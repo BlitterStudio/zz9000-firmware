@@ -2064,6 +2064,25 @@ static void test_doorbell_two_tasks_one_claim(void)
     CHECK(CLOSE(h) == AAR_OK);
 }
 
+/* poll says whether the claim's doorbell request is still in flight, so the
+ * dispatcher keeps polling that claim only until the card has taken it. */
+static void test_poll_reports_in_flight(void)
+{
+    AARHandle *h;
+
+    reset_all();
+    h = claim();
+    CHECK(ops()->poll(aar_plat_get(), &h->claim) == 0);   /* nothing rung yet */
+    card.bell_hold = 1;
+    CHECK(ops()->kick(aar_plat_get(), &h->claim, ZZAPP_KICK_CQ_POSTED) == AAR_OK);
+    CHECK(ops()->poll(aar_plat_get(), &h->claim) == 1);   /* the card has not taken it */
+    CHECK(ops()->poll(aar_plat_get(), &h->claim) == 1);
+    card.bell_hold = 0;
+    CHECK(ops()->poll(aar_plat_get(), &h->claim) == 0);   /* retired */
+    CHECK(ops()->poll(aar_plat_get(), &h->claim) == 0);
+    CHECK(CLOSE(h) == AAR_OK);
+}
+
 static void test_load_start_stop_status(void)
 {
     AARHandle *h;
@@ -3039,6 +3058,7 @@ int main(void)
     test_doorbell();
     test_doorbell_is_per_claim();
     test_doorbell_two_tasks_one_claim();
+    test_poll_reports_in_flight();
     test_load_start_stop_status();
     test_tags_reach_the_card();
     test_load_refused_and_unknown_caps();

@@ -604,18 +604,21 @@ static int zz_kick(struct aar_plat *p, struct aar_plat_claim *c,
 	return rc;
 }
 
-static void zz_poll(struct aar_plat *p, struct aar_plat_claim *c)
+/* 1 while the doorbell request is still in flight, so the dispatcher keeps
+ * polling this claim; 0 when there is nothing left to retire. */
+static int zz_poll(struct aar_plat *p, struct aar_plat_claim *c)
 {
 	struct zz_state *s = state_of(p);
 	struct zz_claim *zc = claim_of(c);
 
 	if (c->handle == 0u || !zc->bell_inflight)
-		return;
+		return 0;
 	if (!bell_try(zc))
-		return;
+		return 1;
 	if (zc->bell_inflight && s->board.bell_done(s->board.user, &zc->bell))
 		zc->bell_inflight = 0u;
 	bell_unlock(zc);
+	return zc->bell_inflight != 0u;
 }
 
 /* ---- Barriers ------------------------------------------------------------------- */
