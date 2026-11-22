@@ -197,6 +197,12 @@ void audio_fabric_producer_detach(uint32_t slot)
 	g_detach_calls++;
 }
 void audio_fabric_producer_clear(uint32_t slot) { (void)slot; }
+/* Fill-ahead seam: the last request, 0 being the default. */
+static unsigned g_fill_ahead;
+void audio_fabric_fill_ahead_set(uint32_t periods)
+{
+	g_fill_ahead = periods;
+}
 int audio_fabric_producer_go_live_when_ready(uint32_t slot, int ready)
 {
 	(void)slot;
@@ -428,6 +434,45 @@ static void test_open_close(void)
 	cleanup();
 }
 
+/* The open flag reaches the session: the grant reports the short floor and
+ * the fabric is asked for the short fill-ahead, which close and the owner's
+ * release give back. A session without the flag asks for nothing. */
+static void test_open_low_latency(void)
+{
+	struct fixture f;
+	uint32_t session;
+
+	g_zorro3 = 0;
+	cleanup();
+	f = make_fixture(1U, SDK_ALLOC_HOST_WINDOW);
+	g_fill_ahead = 0U;
+	CHECK(do_open(1U, &f, BANK_BYTES, 0U, 4U, 8U) == SDK_STATUS_OK);
+	session = get32(g_comp.payload);
+	CHECK(get32(g_comp.payload + 12) == 2880U);
+	CHECK(get32(g_comp.payload + 16) == 2880U);
+	CHECK(g_fill_ahead == 2U);
+	CHECK(session_op(SDK_OP_AUDIO_VOICE_CLOSE, 1U, session) ==
+	      SDK_STATUS_OK);
+	CHECK(g_fill_ahead == 0U);
+	CHECK(nothing_held(1U, &f));
+
+	f = make_fixture(1U, SDK_ALLOC_HOST_WINDOW);
+	CHECK(do_open(1U, &f, BANK_BYTES, 0U, 4U, 8U) == SDK_STATUS_OK);
+	CHECK(g_fill_ahead == 2U);
+	CHECK(release_client(1U) == SDK_STATUS_OK);
+	CHECK(g_fill_ahead == 0U);
+
+	f = make_fixture(1U, SDK_ALLOC_HOST_WINDOW);
+	CHECK(do_open(1U, &f, BANK_BYTES, 0U, 0U, 8U) == SDK_STATUS_OK);
+	session = get32(g_comp.payload);
+	CHECK(get32(g_comp.payload + 16) == 7680U);
+	CHECK(g_fill_ahead == 0U);
+	CHECK(session_op(SDK_OP_AUDIO_VOICE_CLOSE, 1U, session) ==
+	      SDK_STATUS_OK);
+	CHECK(nothing_held(1U, &f));
+	cleanup();
+}
+
 static void test_open_refused(void)
 {
 	struct fixture f;
@@ -441,7 +486,7 @@ static void test_open_refused(void)
 	cleanup();
 	f = make_fixture(1U, SDK_ALLOC_HOST_WINDOW);
 
-	CHECK(do_open(1U, &f, BANK_BYTES, 0U, 4U, 4U) ==
+	CHECK(do_open(1U, &f, BANK_BYTES, 0U, 8U, 4U) ==
 	      SDK_STATUS_BAD_REQUEST);
 	CHECK(do_open(1U, &f, BANK_BYTES, 0U, 0U, 0U) ==
 	      SDK_STATUS_BAD_REQUEST);
@@ -684,6 +729,7 @@ int main(void)
 		return 1;
 	taskq_init(&g_shared.queue);
 	test_open_close();
+	test_open_low_latency();
 	test_open_refused();
 	test_zorro3_buffers();
 	test_upload();
