@@ -26,13 +26,15 @@ BENCH_SMOKE_TARGET := $(BUILD_DIR)/bench_smoke_test
 MEDIA_VIEW_TARGET := $(BUILD_DIR)/audio_pump_media_view_test
 STREAM_DECODE_TARGET := $(BUILD_DIR)/audio_stream_decode_test
 REDUCE_TARGET := $(BUILD_DIR)/audio_reduce_test
+VOICE_TARGET := $(BUILD_DIR)/audio_voice_test
+VOICE_PT4_TARGET := $(BUILD_DIR)/audio_voice_pt4_test
 TARGETS := $(CONVERT_TARGET) $(CONVERT_EXACT_TARGET) $(CAPTURE_TARGET) $(PROFILE_TARGET) \
 	$(PLAYBACK_TARGET) $(RATE_TARGET) $(PRECONVERT_TARGET) \
 	$(MEDIA_VIEW_TARGET) $(DRAIN_TARGET) $(CLOSE_TARGET) $(RECLAIM_TARGET) \
 	$(SCENE_TARGET) $(METER_TARGET) $(CONTROL_TARGET) $(CONFIG_TARGET) \
 	$(MP3_PROBE_TARGET) $(MPEG_LAYER2_TARGET) $(FABRIC_TARGET) \
 	$(RING_TARGET) $(BENCH_SMOKE_TARGET) $(STREAM_DECODE_TARGET) \
-	$(REDUCE_TARGET)
+	$(REDUCE_TARGET) $(VOICE_TARGET) $(VOICE_PT4_TARGET)
 
 # mock/ shadows ff.h and xil_cache.h for the TUs (zz_config.c) whose
 # real firmware dependencies are FatFs and the Zynq cache API. The
@@ -65,6 +67,8 @@ test: $(TARGETS)
 	$(BENCH_SMOKE_TARGET)
 	$(STREAM_DECODE_TARGET) fixtures/tone.mp3
 	$(REDUCE_TARGET)
+	$(VOICE_TARGET)
+	$(VOICE_PT4_TARGET)
 
 # U2 fabric compositor: the characterization golden (pump_golden.c, a
 # verbatim capture of the pre-fabric pump) drives the parity scenarios
@@ -283,6 +287,27 @@ $(REDUCE_TARGET): audio_reduce_test.c $(SRC_DIR)/audio_reduce.c \
 	@mkdir -p $(BUILD_DIR)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ audio_reduce_test.c \
 		$(SRC_DIR)/audio_reduce.c -lm
+
+# Voice engine core: position and loop math, command timing, rate rules,
+# mixing and saturation against the integer-only engine.
+$(VOICE_TARGET): audio_voice_test.c $(SRC_DIR)/audio_voice.c \
+	$(SRC_DIR)/audio_voice.h
+	@mkdir -p $(BUILD_DIR)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ audio_voice_test.c \
+		$(SRC_DIR)/audio_voice.c
+
+# Voice engine against libpt4 (the ProTracker 4.1 replayer, vendored under
+# sdk/tools/libpt4): voice events from zz9k-voice-pt4 must reproduce
+# libpt4's WIDE voice positions exactly and its output within rounding.
+PT4_DIR := ../../sdk/tools
+PT4_SRCS := $(addprefix $(PT4_DIR)/libpt4/src/,load.c replay.c voice.c \
+	api.c tables.c float.c)
+$(VOICE_PT4_TARGET): audio_voice_pt4_test.c $(SRC_DIR)/audio_voice.c \
+	$(SRC_DIR)/audio_voice.h $(PT4_DIR)/zz9k-voice-pt4.c \
+	$(PT4_DIR)/zz9k-voice-pt4.h $(PT4_SRCS)
+	@mkdir -p $(BUILD_DIR)
+	$(CC) $(CPPFLAGS) -I$(PT4_DIR) $(CFLAGS) -o $@ audio_voice_pt4_test.c \
+		$(SRC_DIR)/audio_voice.c $(PT4_DIR)/zz9k-voice-pt4.c $(PT4_SRCS)
 
 check-tables:
 	python3 ../../util/gen_audio_convert_tables.py

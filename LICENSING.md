@@ -89,4 +89,8 @@ The rest of the repository is GPL-3.0-or-later unless a file says otherwise.
 That covers the firmware, `zz9k.library` and `mpega.library` themselves, the
 DataTypes, and the tools. The GL front end that the firmware compiles is
 `PolyForm-Noncommercial-1.0.0 OR GPL-3.0-or-later`. Third-party code keeps its
-own licence, for example `sdk/tools/lha-unix/`.
+own licence, for example `sdk/tools/lha-unix/`. `sdk/tools/libpt4/`, the
+ProTracker 4.1 replayer used by the voice engine tests and `zz9k-voiceplay`,
+is under the zlib licence, and so are the test modules in
+`test/audio/fixtures/pt4/`; `sdk/tools/libpt4/ORIGIN.md` names the upstream
+commit.
