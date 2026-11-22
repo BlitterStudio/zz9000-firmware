@@ -498,6 +498,12 @@ dispatcher while another task holds the transport lock is not dropped: the
 dispatcher signals itself again, up to 200 consecutive times, and the
 vertical-blank tick remains the backstop.
 
+The first synchronous call that outlasts the poll window starts the dispatcher
+if it is not running, with the transport lock released, so the card's
+completion interrupt drains the ring and signals the sleeping owner. A
+dispatcher that cannot start is not retried on every call; the 1 ms timer
+keeps working without it.
+
 ```c
 ZZ9KCaps caps;
 if (ZZ9KQueryCaps(&caps) != ZZ9K_STATUS_OK) {

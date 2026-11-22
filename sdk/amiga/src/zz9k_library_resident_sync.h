@@ -37,7 +37,8 @@
     !defined(ZZ9K_LIB_SYNC_WAIT_FALLBACK) || \
     !defined(ZZ9K_LIB_SYNC_DISPATCHER_STOP_REQUESTED) || \
     !defined(ZZ9K_LIB_SYNC_DISPATCHER_POLL) || \
-    !defined(ZZ9K_LIB_SYNC_DISPATCHER_RESIGNAL)
+    !defined(ZZ9K_LIB_SYNC_DISPATCHER_RESIGNAL) || \
+    !defined(ZZ9K_LIB_SYNC_DISPATCHER_ENSURE)
 #error "resident synchronization bindings are required"
 #endif
 
@@ -200,6 +201,11 @@ static inline int zz9k_lib_sync_call(void *base, void *transport_lock,
       continue;
     }
     ZZ9K_LIB_SYNC_RELEASE(transport_lock);
+    /* Past the busy window the caller is about to sleep: make sure the
+     * dispatcher exists to wake it, with the lock released. */
+    if (ZZ9K_LIB_SYNC_WAIT_BUSY_DONE(record)) {
+      ZZ9K_LIB_SYNC_DISPATCHER_ENSURE(base);
+    }
 
     status = ZZ9K_LIB_SYNC_CALL_WAIT(record);
     ZZ9K_LIB_SYNC_OBTAIN(transport_lock);

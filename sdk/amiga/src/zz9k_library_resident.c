@@ -76,6 +76,7 @@ struct ZZ9KBase {
   UBYTE dispatcher_running;
   UBYTE dispatcher_starting;
   UBYTE dispatcher_stop_requested;
+  UBYTE dispatcher_start_failed;
   struct ZZ9KOpener *openers;
   uint16_t next_client_id;
   /* Vertical blanks counted by the VBlank interrupt, the clock of the
@@ -126,6 +127,7 @@ static int zz9k_lib_sync_call_completed(void *record);
 static int zz9k_lib_sync_call_status(void *record);
 static int zz9k_lib_sync_call_cancel(void *opaque, void *record);
 static int zz9k_lib_sync_call_wait(void *record);
+static void zz9k_lib_sync_call_ensure_dispatcher(void *opaque);
 static void zz9k_lib_timer_wait_arm(struct ZZ9KTimerWait *timer,
                                     uint32_t seconds, uint32_t micros);
 static int zz9k_lib_sync_call_fallback(void *record);
@@ -250,6 +252,8 @@ static void zz9k_lib_dispatcher_stop(struct ZZ9KBase *base);
 #define ZZ9K_LIB_SYNC_DISPATCHER_RESIGNAL(base) \
   Signal(((struct ZZ9KBase *)(base))->dispatcher_task, \
          ((struct ZZ9KBase *)(base))->dispatcher_signal_mask)
+#define ZZ9K_LIB_SYNC_DISPATCHER_ENSURE(base) \
+  zz9k_lib_sync_call_ensure_dispatcher(base)
 #include "zz9k_library_resident_sync.h"
 #undef ZZ9K_LIB_SYNC_OBTAIN
 #undef ZZ9K_LIB_SYNC_ATTEMPT
@@ -284,6 +288,7 @@ static void zz9k_lib_dispatcher_stop(struct ZZ9KBase *base);
 #undef ZZ9K_LIB_SYNC_DISPATCHER_STOP_REQUESTED
 #undef ZZ9K_LIB_SYNC_DISPATCHER_POLL
 #undef ZZ9K_LIB_SYNC_DISPATCHER_RESIGNAL
+#undef ZZ9K_LIB_SYNC_DISPATCHER_ENSURE
 
 
 static int zz9k_lib_query_caps(REG(a6, struct ZZ9KBase *base),
@@ -1212,6 +1217,23 @@ static int zz9k_lib_dispatcher_ensure(struct ZZ9KBase *base)
 
   FreeSignal(signal_bit);
   return status;
+}
+
+/* Called by a synchronous caller about to sleep, with the transport lock
+ * released. The first one starts the dispatcher, so the completion
+ * interrupt can drain the ring and signal the owner; the owner's tick stays
+ * the fallback. A dispatcher that cannot start is not retried on every
+ * call. */
+static void zz9k_lib_sync_call_ensure_dispatcher(void *opaque)
+{
+  struct ZZ9KBase *base = (struct ZZ9KBase *)opaque;
+
+  if (base->dispatcher_running || base->dispatcher_start_failed) {
+    return;
+  }
+  if (zz9k_lib_dispatcher_ensure(base) != ZZ9K_STATUS_OK) {
+    base->dispatcher_start_failed = 1;
+  }
 }
 
 static void zz9k_lib_dispatcher_stop(struct ZZ9KBase *base)
