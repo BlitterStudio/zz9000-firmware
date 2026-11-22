@@ -202,7 +202,9 @@ static const struct SDKServiceDescriptor sdk_services[] = {
  * descriptors carry no bus-dependent flag; the firmware ORs these in when
  * it serves a descriptor. The voice engine is advertised on Zorro III only:
  * it passed hardware qualification there, and a Zorro II machine has not
- * been tested. Its opcodes dispatch on both buses. */
+ * been tested. Its opcodes dispatch on both buses. SDK_SERVICE_FLAG_AUDIO_
+ * VOICE_STEREO is defined but not set here: the engine plays the stereo
+ * formats, and a later change advertises them on Zorro III. */
 static uint32_t sdk_service_bus_flags(uint32_t service_id, int zorro3)
 {
 	uint32_t flags = 0U;

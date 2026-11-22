@@ -480,6 +480,11 @@ enum ZZ9KServiceFlags {
    * on-hardware qualification, and leaves it clear on Zorro II until the
    * engine is tested on a Zorro II machine. */
   ZZ9K_SERVICE_FLAG_AUDIO_VOICE = 1U << 28,
+  /* The voice engine accepts the stereo sample formats
+   * ZZ9K_VOICE_FORMAT_S8S and ZZ9K_VOICE_FORMAT_S16S in an UPLOAD DEFINE
+   * (interleaved left and right). Reported only with
+   * ZZ9K_SERVICE_FLAG_AUDIO_VOICE; no firmware sets it yet. */
+  ZZ9K_SERVICE_FLAG_AUDIO_VOICE_STEREO = 1U << 29,
 
 
   ZZ9K_SERVICE_FLAG_VIDEO_MPEG1 = 1U << 16,

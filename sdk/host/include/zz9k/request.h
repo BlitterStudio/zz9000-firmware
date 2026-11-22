@@ -1012,7 +1012,7 @@ static inline int zz9k_request_audio_voice_upload(
       ((flags & ZZ9K_VOICE_UPLOAD_FLAG_COPY) != 0U && length == 0U) ||
       ((flags & ZZ9K_VOICE_UPLOAD_FLAG_DEFINE) != 0U &&
        (sample_id >= ZZ9K_VOICE_MAX_SAMPLES || sample_length == 0U ||
-        format > ZZ9K_VOICE_FORMAT_S16))) {
+        !zz9k_voice_format_valid(format)))) {
     return ZZ9K_STATUS_BAD_REQUEST;
   }
 

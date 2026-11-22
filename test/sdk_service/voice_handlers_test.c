@@ -663,6 +663,17 @@ static void test_upload(void)
 	CHECK(call(SDK_OP_AUDIO_VOICE_UPLOAD, 1U, payload, 48U) ==
 	      SDK_STATUS_OK);
 	CHECK(memcmp(bank, f.staging.ptr, 64U) == 0);
+	/* The stereo formats are accepted; format 4 is refused and copies
+	 * nothing. */
+	put32(payload + 32, 3U);
+	CHECK(call(SDK_OP_AUDIO_VOICE_UPLOAD, 1U, payload, 48U) ==
+	      SDK_STATUS_OK);
+	memset(bank, 0, 64U);
+	put32(payload + 32, 4U);
+	CHECK(call(SDK_OP_AUDIO_VOICE_UPLOAD, 1U, payload, 48U) ==
+	      SDK_STATUS_BAD_REQUEST);
+	CHECK(bank[0] == 0U && bank[63] == 0U);
+	put32(payload + 32, 0U);
 	/* Out of range: refused, nothing copied. */
 	memset(bank, 0, BANK_BYTES);
 	put32(payload + 12, BANK_BYTES - 8U);

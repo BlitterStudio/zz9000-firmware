@@ -14,13 +14,14 @@ and the firmware side of the mixing path in
 ## What the engine does
 
 - Up to 32 voices, granted at open.
-- Samples are signed 8-bit or signed 16-bit big-endian, kept in a sample bank
-  on the card of 1 byte to 32 MiB. Up to 256 samples (ids 0 to 255) can be
-  defined over the bank.
+- Samples are signed 8-bit or signed 16-bit big-endian, mono, kept in a sample
+  bank on the card of 1 byte to 32 MiB. Interleaved stereo formats exist too.
+  Up to 256 samples (ids 0 to 255) can be defined over the bank.
 - A voice plays at a Paula period, divided into the PAL or the NTSC clock
   chosen at open, or at a rate in Hz. Periods below 5 are ignored.
 - Volume is set per side, left and right, each 0 to 65535, and a master gain
-  scales the mix.
+  scales the mix. A stereo sample uses the left volume on its left channel
+  and the right volume on its right channel.
 - A voice plays forward or backward and can loop. A loop is a start and a
   length in bytes inside the sample.
 - Playback reads the nearest sample, or interpolates linearly between two
@@ -283,8 +284,8 @@ Behaviour of each op:
   loop. The rate and volume from earlier SET records stay. The first pass ends
   at offset plus length, or at the sample end. A START with an undefined
   sample id, or with an offset at or beyond the sample length, silences the
-  voice and counts as rejected. For 16-bit samples every byte quantity is
-  halved, rounding down, to a sample index.
+  voice and counts as rejected. Every byte quantity is divided into sample
+  frames, rounding down: by 1 for S8, 2 for S16 and S8S, and 4 for S16S.
 - LOOP changes the running voice at once without moving its position or the
   end of its current pass. The loop is used when the pass reaches its end.
   Without a loop, the loop start is the lower bound of backward play. A loop
@@ -341,7 +342,10 @@ refused with `ZZ9K_STATUS_BAD_REQUEST` and changes nothing.
 Rules:
 
 - Sample ids run from 0 to the granted `max_samples` minus one, which is 255.
-  Formats are `ZZ9K_VOICE_FORMAT_S8` and `ZZ9K_VOICE_FORMAT_S16` (big-endian).
+  Formats are `ZZ9K_VOICE_FORMAT_S8` and `ZZ9K_VOICE_FORMAT_S16` (big-endian),
+  and `ZZ9K_VOICE_FORMAT_S8S` and `ZZ9K_VOICE_FORMAT_S16S` for interleaved
+  stereo (see [Stereo samples](#stereo-samples)). A format of 4 or more is
+  refused.
 - Defining an id again replaces its geometry for later STARTs. A voice that
   is already playing keeps the geometry it started with.
 - Do not rewrite bank bytes that a voice is playing. The firmware does not
@@ -353,6 +357,93 @@ Rules:
   separately and define several samples over one copied region.
 - The call refuses a zero length and a sample id above the grant before it
   sends anything.
+
+## Stereo samples
+
+`ZZ9K_VOICE_FORMAT_S8S` (2) and `ZZ9K_VOICE_FORMAT_S16S` (3) hold interleaved
+stereo frames: the left sample, then the right sample, with 16-bit samples
+big-endian. This is how AHI stores stereo sounds. A frame is 2 bytes in S8S
+and 4 bytes in S16S.
+
+- Every byte quantity (the START offset and length, the LOOP start and
+  length, and the sample length of a DEFINE) is divided into frames by the
+  shift `zz9k_voice_format_frame_shift(format)` returns: 0 for S8, 1 for S16
+  and S8S, 2 for S16S. The division rounds down. A START offset in an S16S
+  sample that is not a multiple of 4 bytes plays from the frame it rounds
+  down to. Positions, loops, the first-pass length and backward play all
+  count frames.
+- A stereo voice scales its left sample by the left volume and its right
+  sample by the right volume, so volumes of (65535, 0) play the left channel
+  only. A mono voice feeds its one sample to both sides, as before.
+- Linear interpolation blends the left samples with each other and the right
+  samples with each other.
+- A DEFINE with a format at or above `ZZ9K_VOICE_FORMAT_COUNT` (4) is refused
+  with `ZZ9K_STATUS_BAD_REQUEST` and changes nothing. The request builder
+  refuses it too. `zz9k_voice_format_valid()` tests a format.
+- A sample length that is not a multiple of the frame size loses the trailing
+  partial frame, because the length is rounded down.
+
+Firmware advertises the formats with `ZZ9K_SERVICE_FLAG_AUDIO_VOICE_STEREO`
+(see [Discovery](#discovery)). The engine plays them already, and the flag is
+not set yet.
+
+## Timing helpers
+
+`zz9k/voice.h` carries the arithmetic a client needs to predict where the
+engine is, as pure functions. They are the single source of that arithmetic
+for clients, and they state what `advance()` in the firmware's
+`audio_voice.c` does. The firmware engine test
+(`test/audio/audio_voice_test.c`) checks them against the engine over a
+sweep of rates, lengths and fractions, forward and backward, and the SDK
+tests check them against an independent model of it.
+
+- `zz9k_voice_rate_step(hz)` returns the engine's step for a rate in Hz: the
+  number of 1/65536 sample frames a voice advances per output frame,
+  `(min(hz, ZZ9K_VOICE_RATE_MAX_HZ) << 16) / 48000`. It returns 0 for 0 Hz.
+  The engine ignores a SET of 0 Hz and keeps the old step, so a client reads
+  the 0 as no change.
+- `zz9k_voice_pass_frames(backward, pos, frac, bound, step)` returns how many
+  frames a voice renders before its pass ends, for a voice about to render
+  the frame at sample index `pos` with the 16-bit fraction `frac`. The first
+  frame of the next pass is that many frames later. All arguments are
+  frames, not bytes. A forward pass ends when `pos + ((frac + k * step) >>
+  16)` reaches `bound`, the pass end. A backward pass ends when the position
+  falls below `bound`, the loop start. A step that would carry the position
+  below index 0 counts as falling below the loop start, which ends the pass.
+  The result is at least 1. It is `ZZ9K_VOICE_PASS_NEVER` when `step` is 0 or
+  the count does not fit in 32 bits.
+
+Positions inside the helpers are frame indexes. To use them with START and
+LOOP bytes, shift the bytes down with `zz9k_voice_format_frame_shift()`
+first.
+
+## AHI-style channel clients
+
+A client that plays many short sounds on a few channels, as an AHI driver
+does, does not need one engine sample per sound. The engine's 256-sample
+limit then does not apply. The pattern:
+
+1. At open, define one engine sample per sample format the client uses over
+   the bank from offset 0 to its end. Each is a view of the bank in that
+   format. Use DEFINE-only uploads (flags set to DEFINE) for this; the COPY
+   half is not needed.
+2. For each sound the client loads, find a range of the bank and copy the
+   sound's bytes into it with COPY-only uploads. Keep the view for the
+   sound's format, the byte offset of its range, and its length.
+3. To play a sound, send START with the view's sample id, the sound's byte
+   offset as arg0 and its length as arg1. Send LOOP with the offset and
+   length the same way. The bytes are interpreted in the view's format, so a
+   mono and a stereo sound need two views, and the next pass of a channel
+   can be any sound of the same format.
+
+The client keeps its own bounds for each sound, because the view reaches
+past the sound. The engine does not check a pass against anything but the
+view. A pass that is left to run reaches the next sound's bytes, so the
+client sets the first-pass length, or the loop, on every START. The helpers
+in [Timing helpers](#timing-helpers) predict when each pass ends.
+
+The bank must not be rewritten while a voice plays the bytes. See
+[Uploading samples](#uploading-samples).
 
 ## Status and the heartbeat
 
@@ -453,6 +544,15 @@ There is no service flag for the low-latency mode. The open flag is the
 advertisement: a client opens with it and, on `ZZ9K_STATUS_BAD_REQUEST`, opens
 again without it and keeps the standard floor. `zz9k-voiceplay LOWLAT` does
 this and says so.
+
+The stereo sample formats have their own flag,
+`ZZ9K_SERVICE_FLAG_AUDIO_VOICE_STEREO` (bit 29, printed as
+`audio-voice-stereo`), reported together with `audio-voice`. A client that
+wants S8S or S16S samples checks it and defines only the mono formats when it
+is clear. The firmware engine plays both formats, but no firmware sets the
+flag yet, so a client cannot use them until one does. A firmware without
+the stereo support refuses a DEFINE in format 2 or 3 with
+`ZZ9K_STATUS_BAD_REQUEST`. See [Stereo samples](#stereo-samples).
 
 ## zz9k-voiceplay
 

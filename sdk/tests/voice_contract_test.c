@@ -59,6 +59,7 @@ static void test_layouts(void)
   CHECK(ZZ9K_OP_AUDIO_VOICE_RESET == 0x051aU);
   CHECK(ZZ9K_OP_AUDIO_VOICE_UPLOAD == 0x051bU);
   CHECK(ZZ9K_SERVICE_FLAG_AUDIO_VOICE == (1U << 28));
+  CHECK(ZZ9K_SERVICE_FLAG_AUDIO_VOICE_STEREO == (1U << 29));
 
   CHECK(sizeof(ZZ9KAudioVoiceOpenPayload) == 48U);
   CHECK(offsetof(ZZ9KAudioVoiceOpenPayload, ring_handle) == 0U);
@@ -150,11 +151,254 @@ static void test_layouts(void)
   CHECK(ZZ9K_VOICE_UPLOAD_FLAG_COPY == 1U &&
         ZZ9K_VOICE_UPLOAD_FLAG_DEFINE == 2U);
   CHECK(ZZ9K_VOICE_FORMAT_S8 == 0U && ZZ9K_VOICE_FORMAT_S16 == 1U);
+  CHECK(ZZ9K_VOICE_FORMAT_S8S == 2U && ZZ9K_VOICE_FORMAT_S16S == 3U &&
+        ZZ9K_VOICE_FORMAT_COUNT == 4U);
   CHECK(ZZ9K_VOICE_MAX_VOICES == 32U && ZZ9K_VOICE_MAX_SAMPLES == 256U &&
         ZZ9K_VOICE_BANK_MAX_BYTES == 32U * 1024U * 1024U);
   CHECK(ZZ9K_VOICE_RING_DEFAULT_BYTES == 2048U &&
         ZZ9K_VOICE_STAGING_DEFAULT_BYTES == 4096U &&
         ZZ9K_VOICE_STATUS_BYTES == 64U);
+}
+
+/* ---- Stereo formats and the timing helpers ---- */
+
+static void test_stereo_formats(void)
+{
+  ZZ9KRequest req;
+  uint32_t f;
+
+  CHECK(zz9k_voice_format_frame_shift(ZZ9K_VOICE_FORMAT_S8) == 0U);
+  CHECK(zz9k_voice_format_frame_shift(ZZ9K_VOICE_FORMAT_S16) == 1U);
+  CHECK(zz9k_voice_format_frame_shift(ZZ9K_VOICE_FORMAT_S8S) == 1U);
+  CHECK(zz9k_voice_format_frame_shift(ZZ9K_VOICE_FORMAT_S16S) == 2U);
+  for (f = 0U; f < ZZ9K_VOICE_FORMAT_COUNT; f++) {
+    CHECK(zz9k_voice_format_valid(f) != 0U);
+  }
+  CHECK(zz9k_voice_format_valid(ZZ9K_VOICE_FORMAT_COUNT) == 0U);
+  CHECK(zz9k_voice_format_valid(0xFFFFFFFFU) == 0U);
+
+  for (f = 0U; f < ZZ9K_VOICE_FORMAT_COUNT; f++) {
+    CHECK(zz9k_request_audio_voice_upload(&req, 7U,
+                                          ZZ9K_VOICE_UPLOAD_FLAG_DEFINE, 0, 0,
+                                          0, 3U, 0, 16U, f) ==
+          ZZ9K_STATUS_OK);
+    CHECK(zz9k_get_be32(req.entry.payload.inline_data + 32) == f);
+  }
+  CHECK(zz9k_request_audio_voice_upload(&req, 7U,
+                                        ZZ9K_VOICE_UPLOAD_FLAG_DEFINE, 0, 0, 0,
+                                        3U, 0, 16U, 4U) ==
+        ZZ9K_STATUS_BAD_REQUEST);
+  /* The format is ignored when no DEFINE is requested. */
+  CHECK(zz9k_request_audio_voice_upload(&req, 7U,
+                                        ZZ9K_VOICE_UPLOAD_FLAG_COPY, 0, 0, 16U,
+                                        0, 0, 0, 99U) == ZZ9K_STATUS_OK);
+}
+
+/* The audio service flag set: bit 29 is the stereo flag and no other audio
+ * flag shares it. */
+static void test_stereo_flag(void)
+{
+  static const uint32_t others[] = {
+      ZZ9K_SERVICE_FLAG_AUDIO_MP3_DECODE, ZZ9K_SERVICE_FLAG_AUDIO_PCM_MIX,
+      ZZ9K_SERVICE_FLAG_AUDIO_RESAMPLE, ZZ9K_SERVICE_FLAG_AUDIO_PCM16_STEREO,
+      ZZ9K_SERVICE_FLAG_AUDIO_MP3_STREAM, ZZ9K_SERVICE_FLAG_AUDIO_CONTROL,
+      ZZ9K_SERVICE_FLAG_AUDIO_FABRIC, ZZ9K_SERVICE_FLAG_AUDIO_FABRIC_RATE,
+      ZZ9K_SERVICE_FLAG_AUDIO_STREAM_GAIN,
+      ZZ9K_SERVICE_FLAG_AUDIO_FLAC_STREAM,
+      ZZ9K_SERVICE_FLAG_AUDIO_VORBIS_STREAM,
+      ZZ9K_SERVICE_FLAG_AUDIO_STREAM_REDUCE, ZZ9K_SERVICE_FLAG_AUDIO_VOICE,
+      ZZ9K_SERVICE_FLAG_FIRMWARE, ZZ9K_SERVICE_FLAG_MODULE,
+      ZZ9K_SERVICE_FLAG_ASYNC, ZZ9K_SERVICE_FLAG_ZERO_COPY};
+  size_t i;
+
+  for (i = 0U; i < sizeof(others) / sizeof(others[0]); i++) {
+    CHECK((others[i] & ZZ9K_SERVICE_FLAG_AUDIO_VOICE_STEREO) == 0U);
+  }
+}
+
+static void test_rate_step(void)
+{
+  CHECK(ZZ9K_VOICE_RATE_MAX_HZ == 192000U);
+  CHECK(zz9k_voice_rate_step(0U) == 0U);
+  CHECK(zz9k_voice_rate_step(1U) == 1U);
+  CHECK(zz9k_voice_rate_step(8000U) == 10922U);
+  CHECK(zz9k_voice_rate_step(8363U) == 11418U);
+  CHECK(zz9k_voice_rate_step(22050U) == 30105U);
+  CHECK(zz9k_voice_rate_step(44100U) == 60211U);
+  CHECK(zz9k_voice_rate_step(48000U) == 65536U);
+  CHECK(zz9k_voice_rate_step(96000U) == 131072U);
+  CHECK(zz9k_voice_rate_step(192000U) == 262144U);
+  CHECK(zz9k_voice_rate_step(192001U) == 262144U);
+  CHECK(zz9k_voice_rate_step(200000U) == 262144U);
+  CHECK(zz9k_voice_rate_step(0xFFFFFFFFU) == 262144U);
+}
+
+/* An independent model of the engine's per-frame advance (audio_voice.c,
+ * advance()): counts the frames rendered until the voice wraps or stops. */
+static uint32_t model_pass_frames(int backward, uint32_t pos, uint32_t frac,
+                                  uint32_t bound, uint32_t step,
+                                  uint32_t limit)
+{
+  uint32_t k;
+
+  for (k = 1U; k <= limit; k++) {
+    if (!backward) {
+      uint32_t f = frac + (step & 0xFFFFU);
+
+      pos += (step >> 16) + (f >> 16);
+      frac = f & 0xFFFFU;
+      if (pos >= bound) {
+        return k;
+      }
+    } else {
+      uint32_t sub = step & 0xFFFFU;
+      uint32_t ip = step >> 16;
+
+      if (frac < sub) {
+        frac = frac + 0x10000U - sub;
+        ip++;
+      } else {
+        frac -= sub;
+      }
+      if (ip > pos) {
+        return k; /* below index 0: passes below any loop start */
+      }
+      pos -= ip;
+      if (pos < bound) {
+        return k;
+      }
+    }
+  }
+  return ZZ9K_VOICE_PASS_NEVER;
+}
+
+static void test_pass_frames_fixed(void)
+{
+  CHECK(ZZ9K_VOICE_PASS_NEVER == 0xFFFFFFFFU);
+
+  /* Forward, step 1.0. */
+  CHECK(zz9k_voice_pass_frames(0, 0U, 0U, 100U, 65536U) == 100U);
+  CHECK(zz9k_voice_pass_frames(0, 99U, 0U, 100U, 65536U) == 1U);
+  CHECK(zz9k_voice_pass_frames(0, 99U, 0xFFFFU, 100U, 65536U) == 1U);
+  /* Forward, step 0.5, zero and non-zero fraction. */
+  CHECK(zz9k_voice_pass_frames(0, 0U, 0U, 10U, 0x8000U) == 20U);
+  CHECK(zz9k_voice_pass_frames(0, 0U, 0x8000U, 10U, 0x8000U) == 19U);
+  CHECK(zz9k_voice_pass_frames(0, 0U, 0x7FFFU, 10U, 0x8000U) == 20U);
+  CHECK(zz9k_voice_pass_frames(0, 5U, 0xFFFEU, 6U, 1U) == 2U);
+  CHECK(zz9k_voice_pass_frames(0, 5U, 0xFFFFU, 6U, 1U) == 1U);
+  /* Forward, step above 1.0. */
+  CHECK(zz9k_voice_pass_frames(0, 0U, 0U, 10U, 3U * 65536U) == 4U);
+  CHECK(zz9k_voice_pass_frames(0, 0U, 0U, 9U, 3U * 65536U) == 3U);
+  CHECK(zz9k_voice_pass_frames(0, 0U, 0U, 9U, 3U * 65536U + 1U) == 3U);
+  CHECK(zz9k_voice_pass_frames(0, 0U, 1U, 9U, 3U * 65536U) == 3U);
+  CHECK(zz9k_voice_pass_frames(0, 0U, 0U, 9U, 3U * 65536U - 1U) == 4U);
+  CHECK(zz9k_voice_pass_frames(0, 0U, 0U, 1000U, 262144U) == 250U);
+  /* Forward at or past the bound: the next frame passes. */
+  CHECK(zz9k_voice_pass_frames(0, 10U, 0U, 10U, 1U) == 1U);
+  CHECK(zz9k_voice_pass_frames(0, 11U, 5U, 10U, 1U) == 1U);
+
+  /* Backward, step 1.0, loop start 0 (a step below index 0 passes). */
+  CHECK(zz9k_voice_pass_frames(1, 10U, 0U, 0U, 65536U) == 11U);
+  CHECK(zz9k_voice_pass_frames(1, 0U, 0U, 0U, 65536U) == 1U);
+  CHECK(zz9k_voice_pass_frames(1, 0U, 0x8000U, 0U, 0x8000U) == 2U);
+  CHECK(zz9k_voice_pass_frames(1, 0U, 0x7FFFU, 0U, 0x8000U) == 1U);
+  CHECK(zz9k_voice_pass_frames(1, 0U, 0x8000U, 0U, 0x7FFFU) == 2U);
+  CHECK(zz9k_voice_pass_frames(1, 10U, 0U, 5U, 65536U) == 6U);
+  /* Backward, step 0.5 and fractions. */
+  CHECK(zz9k_voice_pass_frames(1, 10U, 0U, 10U, 0x8000U) == 1U);
+  CHECK(zz9k_voice_pass_frames(1, 10U, 0x8000U, 10U, 0x8000U) == 2U);
+  CHECK(zz9k_voice_pass_frames(1, 10U, 0U, 5U, 0x8000U) == 11U);
+  /* Backward, step above 1.0. */
+  CHECK(zz9k_voice_pass_frames(1, 30U, 0U, 0U, 3U * 65536U) == 11U);
+  CHECK(zz9k_voice_pass_frames(1, 30U, 0U, 6U, 3U * 65536U) == 9U);
+  CHECK(zz9k_voice_pass_frames(1, 31U, 0U, 6U, 3U * 65536U) == 9U);
+  /* Backward at or below the bound: the next frame passes. */
+  CHECK(zz9k_voice_pass_frames(1, 4U, 0xFFFFU, 5U, 1U) == 1U);
+  CHECK(zz9k_voice_pass_frames(1, 5U, 0U, 5U, 1U) == 1U);
+
+  /* A voice with no rate never passes, and a pass longer than 32 bits is
+   * reported as never. */
+  CHECK(zz9k_voice_pass_frames(0, 0U, 0U, 100U, 0U) == ZZ9K_VOICE_PASS_NEVER);
+  CHECK(zz9k_voice_pass_frames(1, 100U, 0U, 0U, 0U) == ZZ9K_VOICE_PASS_NEVER);
+  CHECK(zz9k_voice_pass_frames(0, 0U, 0U, 0x7FFFFFFFU, 1U) ==
+        ZZ9K_VOICE_PASS_NEVER);
+  CHECK(zz9k_voice_pass_frames(1, 0x7FFFFFFFU, 0U, 0U, 1U) ==
+        ZZ9K_VOICE_PASS_NEVER);
+  /* The largest pass that fits: 2^32 - 2 frames. */
+  CHECK(zz9k_voice_pass_frames(0, 0U, 0U, 0xFFFFU, 1U) == 0xFFFF0000U);
+}
+
+/* Every combination in a grid, then random values, against the model. */
+static void test_pass_frames_vs_model(void)
+{
+  static const uint32_t steps[] = {
+      0x400U,  0x7FFFU, 0x8000U, 0x8001U, 10922U,  11418U,
+      30105U,  60211U,  0xFFFFU, 65536U,  65537U,  98304U,
+      131072U, 196609U, 262144U, 0x123456U};
+  static const uint32_t fracs[] = {0U, 1U, 0x7FFFU, 0x8000U, 0xFFFFU};
+  uint32_t seed = 0x2f6e2b1U;
+  size_t si;
+  size_t fi;
+  uint32_t pos;
+  uint32_t i;
+
+  for (si = 0U; si < sizeof(steps) / sizeof(steps[0]); si++) {
+    for (fi = 0U; fi < sizeof(fracs) / sizeof(fracs[0]); fi++) {
+      for (pos = 0U; pos < 40U; pos++) {
+        uint32_t bound;
+
+        for (bound = 0U; bound < 50U; bound++) {
+          int dir;
+
+          for (dir = 0; dir < 2; dir++) {
+            uint32_t want = model_pass_frames(dir, pos, fracs[fi], bound,
+                                              steps[si], 1U << 22);
+            uint32_t got = zz9k_voice_pass_frames(dir, pos, fracs[fi], bound,
+                                                  steps[si]);
+
+            if (got != want) {
+              g_failures++;
+              printf("FAIL pass_frames dir=%d pos=%u frac=%u bound=%u "
+                     "step=%u got=%u want=%u\n",
+                     dir, (unsigned)pos, (unsigned)fracs[fi],
+                     (unsigned)bound, (unsigned)steps[si], (unsigned)got,
+                     (unsigned)want);
+              return;
+            }
+          }
+        }
+      }
+    }
+  }
+  for (i = 0U; i < 20000U; i++) {
+    uint32_t p;
+    uint32_t fr;
+    uint32_t b;
+    uint32_t st;
+    int dir;
+    uint32_t want;
+    uint32_t got;
+
+    seed = seed * 1664525U + 1013904223U;
+    p = (seed >> 8) % 500U;
+    seed = seed * 1664525U + 1013904223U;
+    fr = (seed >> 8) & 0xFFFFU;
+    seed = seed * 1664525U + 1013904223U;
+    b = (seed >> 8) % 500U;
+    seed = seed * 1664525U + 1013904223U;
+    st = 64U + (seed >> 8) % (6U * 65536U);
+    dir = (int)((seed >> 4) & 1U);
+    want = model_pass_frames(dir, p, fr, b, st, 1U << 22);
+    got = zz9k_voice_pass_frames(dir, p, fr, b, st);
+    if (got != want) {
+      g_failures++;
+      printf("FAIL pass_frames dir=%d pos=%u frac=%u bound=%u step=%u "
+             "got=%u want=%u\n",
+             dir, (unsigned)p, (unsigned)fr, (unsigned)b, (unsigned)st,
+             (unsigned)got, (unsigned)want);
+      return;
+    }
+  }
 }
 
 /* ---- Record encoding and builders ---- */
@@ -542,7 +786,9 @@ static void test_request_builders(void)
         ZZ9K_STATUS_BAD_REQUEST);
   CHECK(zz9k_request_audio_voice_upload(&req, 7U, 2U, 0, 0, 0, 256U, 0, 1, 0) ==
         ZZ9K_STATUS_BAD_REQUEST);
-  CHECK(zz9k_request_audio_voice_upload(&req, 7U, 2U, 0, 0, 0, 0, 0, 1, 2U) ==
+  CHECK(zz9k_request_audio_voice_upload(&req, 7U, 2U, 0, 0, 0, 0, 0, 1, 3U) ==
+        ZZ9K_STATUS_OK);
+  CHECK(zz9k_request_audio_voice_upload(&req, 7U, 2U, 0, 0, 0, 0, 0, 1, 4U) ==
         ZZ9K_STATUS_BAD_REQUEST);
 }
 
@@ -1509,7 +1755,7 @@ static void test_upload_small_staging_and_failures(void)
   up.sample_id = 256U;
   CHECK(zz9k_voice_upload(ctx, &s, &up) == ZZ9K_STATUS_BAD_REQUEST);
   up.sample_id = 1U;
-  up.format = 2U;
+  up.format = 4U;
   CHECK(zz9k_voice_upload(ctx, &s, &up) == ZZ9K_STATUS_BAD_REQUEST);
   up.format = 0U;
   up.length = 0U;
@@ -1682,6 +1928,11 @@ int main(void)
   }
   g_window_addr = (uint32_t)(uintptr_t)g_window;
 
+  test_stereo_formats();
+  test_stereo_flag();
+  test_rate_step();
+  test_pass_frames_fixed();
+  test_pass_frames_vs_model();
   test_layouts();
   test_records();
   test_status_block_read();

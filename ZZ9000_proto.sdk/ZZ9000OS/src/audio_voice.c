@@ -47,7 +47,7 @@ int audio_voice_sample_set(struct audio_voice_engine *e, uint32_t id,
 
 	if (id >= AUDIO_VOICE_MAX_SAMPLES)
 		return -1;
-	if (format != AUDIO_VOICE_FMT_S8 && format != AUDIO_VOICE_FMT_S16)
+	if (format >= AUDIO_VOICE_FMT_COUNT)
 		return -1;
 	if ((uint64_t)offset + length > e->bank_len)
 		return -1;
@@ -91,6 +91,16 @@ static void set_rate(struct audio_voice_engine *e, struct audio_voice *v,
 	v->step = (uint32_t)(((uint64_t)hz << 16) / AUDIO_VOICE_OUT_HZ);
 }
 
+/* Byte-to-frame shift of a sample format: a frame is 1, 2, 2 or 4 bytes
+ * for S8, S16, S8S and S16S. */
+static uint32_t frame_shift(uint8_t format)
+{
+	if (format == AUDIO_VOICE_FMT_S16S)
+		return 2U;
+	return (format == AUDIO_VOICE_FMT_S16 ||
+	        format == AUDIO_VOICE_FMT_S8S) ? 1U : 0U;
+}
+
 static void start_voice(struct audio_voice_engine *e, struct audio_voice *v,
                         const struct audio_voice_cmd *c)
 {
@@ -104,7 +114,7 @@ static void start_voice(struct audio_voice_engine *e, struct audio_voice *v,
 		return;
 	}
 	s = &e->sample[c->flags];
-	shift = s->format == AUDIO_VOICE_FMT_S16 ? 1U : 0U;
+	shift = frame_shift(s->format);
 	nsamples = s->length >> shift;
 	off = c->arg0 >> shift;
 	len = c->arg1 >> shift;
@@ -116,7 +126,11 @@ static void start_voice(struct audio_voice_engine *e, struct audio_voice *v,
 	if (c->arg1 != 0U && (uint64_t)off + len < nsamples)
 		end = off + len;
 
-	v->s16 = (uint8_t)shift;
+	v->shift = (uint8_t)shift;
+	v->wide = s->format == AUDIO_VOICE_FMT_S16 ||
+	          s->format == AUDIO_VOICE_FMT_S16S;
+	v->stereo = s->format == AUDIO_VOICE_FMT_S8S ||
+	            s->format == AUDIO_VOICE_FMT_S16S;
 	v->base = s->offset;
 	v->len = nsamples;
 	v->pos = off;
@@ -131,8 +145,8 @@ static void start_voice(struct audio_voice_engine *e, struct audio_voice *v,
 static void set_loop(struct audio_voice_engine *e, struct audio_voice *v,
                      const struct audio_voice_cmd *c)
 {
-	uint32_t ls = c->arg0 >> v->s16;
-	uint32_t ll = c->arg1 >> v->s16;
+	uint32_t ls = c->arg0 >> v->shift;
+	uint32_t ll = c->arg1 >> v->shift;
 
 	if (ll == 0U) {
 		if (c->arg1 == 0U && ls <= v->len) {
@@ -191,16 +205,43 @@ static void apply(struct audio_voice_engine *e,
 	}
 }
 
-/* Sample at index i as 16-bit signed; 8-bit data is promoted by 8 bits. */
+/* Mono sample at frame i as 16-bit signed; 8-bit data is promoted by 8
+ * bits. */
 static int32_t sample_at(const struct audio_voice_engine *e,
                          const struct audio_voice *v, uint32_t i)
 {
-	if (v->s16) {
+	if (v->wide) {
 		const uint8_t *p = e->bank + v->base + 2U * i;
 
 		return (int16_t)(uint16_t)(((uint32_t)p[0] << 8) | p[1]);
 	}
 	return (int32_t)(int8_t)e->bank[v->base + i] * 256;
+}
+
+/* One side (0 left, 1 right) of frame i of a stereo voice, as above. */
+static int32_t side_at(const struct audio_voice_engine *e,
+                       const struct audio_voice *v, uint32_t i, uint32_t side)
+{
+	if (v->wide) {
+		const uint8_t *p = e->bank + v->base + 4U * i + 2U * side;
+
+		return (int16_t)(uint16_t)(((uint32_t)p[0] << 8) | p[1]);
+	}
+	return (int32_t)(int8_t)e->bank[v->base + 2U * i + side] * 256;
+}
+
+/* The frame a linear read blends toward: the next one in the direction of
+ * play, following the loop at the pass end. */
+static uint32_t neighbour(const struct audio_voice *v)
+{
+	if (v->backward) {
+		if (v->pos > v->loopstart)
+			return v->pos - 1U;
+		return v->looplen != 0U ? v->loopstart + v->looplen - 1U : v->pos;
+	}
+	if (v->pos + 1U < v->end)
+		return v->pos + 1U;
+	return v->looplen != 0U ? v->loopstart : v->pos;
 }
 
 static int32_t read_voice(const struct audio_voice_engine *e,
@@ -209,25 +250,32 @@ static int32_t read_voice(const struct audio_voice_engine *e,
 	int32_t a = sample_at(e, v, v->pos);
 
 	if (e->interp == AUDIO_VOICE_INTERP_LINEAR) {
-		uint32_t n;
-		int32_t b;
+		int32_t b = sample_at(e, v, neighbour(v));
 
-		if (v->backward) {
-			if (v->pos > v->loopstart)
-				n = v->pos - 1U;
-			else
-				n = v->looplen != 0U ?
-				    v->loopstart + v->looplen - 1U : v->pos;
-		} else {
-			if (v->pos + 1U < v->end)
-				n = v->pos + 1U;
-			else
-				n = v->looplen != 0U ? v->loopstart : v->pos;
-		}
-		b = sample_at(e, v, n);
 		a += (int32_t)(((int64_t)(b - a) * (int64_t)v->frac) >> 16);
 	}
 	return a;
+}
+
+/* Both sides of the current frame of a stereo voice; linear interpolation
+ * blends each side with its own neighbour. */
+static void read_stereo(const struct audio_voice_engine *e,
+                        const struct audio_voice *v, int32_t *left,
+                        int32_t *right)
+{
+	int32_t l = side_at(e, v, v->pos, 0U);
+	int32_t r = side_at(e, v, v->pos, 1U);
+
+	if (e->interp == AUDIO_VOICE_INTERP_LINEAR) {
+		uint32_t n = neighbour(v);
+		int32_t bl = side_at(e, v, n, 0U);
+		int32_t br = side_at(e, v, n, 1U);
+
+		l += (int32_t)(((int64_t)(bl - l) * (int64_t)v->frac) >> 16);
+		r += (int32_t)(((int64_t)(br - r) * (int64_t)v->frac) >> 16);
+	}
+	*left = l;
+	*right = r;
 }
 
 static void advance(struct audio_voice *v)
@@ -307,9 +355,17 @@ static void mix(struct audio_voice_engine *e, int16_t *out, uint32_t frames)
 
 			if (!v->active || v->step == 0U)
 				continue;
-			s = read_voice(e, v);
-			acc_l += (s * (int32_t)v->vol_l) >> 16;
-			acc_r += (s * (int32_t)v->vol_r) >> 16;
+			if (v->stereo) {
+				int32_t sl, sr;
+
+				read_stereo(e, v, &sl, &sr);
+				acc_l += (sl * (int32_t)v->vol_l) >> 16;
+				acc_r += (sr * (int32_t)v->vol_r) >> 16;
+			} else {
+				s = read_voice(e, v);
+				acc_l += (s * (int32_t)v->vol_l) >> 16;
+				acc_r += (s * (int32_t)v->vol_r) >> 16;
+			}
 			advance(v);
 		}
 		out[2U * i] = saturate(acc_l, e->master);

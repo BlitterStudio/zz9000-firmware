@@ -37,9 +37,18 @@
 #define AUDIO_VOICE_CLOCK_PAL  3546895U
 #define AUDIO_VOICE_CLOCK_NTSC 3579545U
 
-/* Sample formats. 16-bit data is big-endian, as the Amiga wrote it. */
-#define AUDIO_VOICE_FMT_S8  0U
-#define AUDIO_VOICE_FMT_S16 1U
+/*
+ * Sample formats. 16-bit data is big-endian, as the Amiga wrote it. The
+ * stereo formats hold interleaved frames, the left sample then the right
+ * one: a frame is 2 bytes in S8S and 4 bytes in S16S. A DEFINE accepts
+ * formats below AUDIO_VOICE_FMT_COUNT. The numbers match ZZ9K_VOICE_FORMAT_*
+ * in the SDK's zz9k/voice.h.
+ */
+#define AUDIO_VOICE_FMT_S8    0U
+#define AUDIO_VOICE_FMT_S16   1U
+#define AUDIO_VOICE_FMT_S8S   2U
+#define AUDIO_VOICE_FMT_S16S  3U
+#define AUDIO_VOICE_FMT_COUNT 4U
 
 #define AUDIO_VOICE_INTERP_NEAREST 0U
 #define AUDIO_VOICE_INTERP_LINEAR  1U
@@ -81,8 +90,10 @@
  *          voice field is ignored.
  *
  * A voice number of 32 or more, or an unknown op, is rejected.
- * For 16-bit samples every byte quantity is halved (rounding down) to a
- * sample index.
+ * Every byte quantity (offsets and lengths of START and LOOP) is divided
+ * into frames, rounding down: by 1 for S8, 2 for S16 and S8S, and 4 for
+ * S16S. A stereo sample plays its left sample at the left volume and its
+ * right sample at the right volume; a mono sample feeds both sides.
  */
 #define AUDIO_VOICE_OP_START     1U
 #define AUDIO_VOICE_OP_LOOP      2U
@@ -116,14 +127,16 @@ struct audio_voice_sample {
 struct audio_voice {
 	uint8_t active;
 	uint8_t backward;
-	uint8_t s16;
+	uint8_t shift;      /* log2 of the frame size in bytes */
+	uint8_t wide;       /* 16-bit samples */
+	uint8_t stereo;     /* interleaved left and right samples */
 	uint32_t base;      /* sample byte offset in the bank */
-	uint32_t len;       /* sample length in samples */
-	uint32_t pos;       /* sample index */
+	uint32_t len;       /* sample length in frames */
+	uint32_t pos;       /* frame index */
 	uint32_t frac;      /* 16-bit fraction */
-	uint32_t end;       /* current pass end, in samples */
-	uint32_t loopstart; /* samples; lower bound of backward play */
-	uint32_t looplen;   /* samples, 0 = no loop */
+	uint32_t end;       /* current pass end, in frames */
+	uint32_t loopstart; /* frames; lower bound of backward play */
+	uint32_t looplen;   /* frames, 0 = no loop */
 	uint32_t step;      /* 16.16 samples per output frame, 0 = no rate */
 	uint32_t vol_l;
 	uint32_t vol_r;

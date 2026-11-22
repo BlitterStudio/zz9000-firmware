@@ -1464,7 +1464,10 @@ The mailbox opcodes are `ZZ9K_OP_AUDIO_VOICE_OPEN` (`0x0518`), `_CLOSE`
 (`0x0519`), `_RESET` (`0x051a`) and `_UPLOAD` (`0x051b`). The firmware sets
 `ZZ9K_SERVICE_FLAG_AUDIO_VOICE` on Zorro III and does not set it on Zorro II
 yet, so a client on a card without the flag tries Open and handles the
-refusal; see the discovery section of the voice guide.
+refusal; see the discovery section of the voice guide. The stereo sample
+formats have their own flag, `ZZ9K_SERVICE_FLAG_AUDIO_VOICE_STEREO` (bit 29),
+which no firmware sets yet; the voice guide describes the formats and the
+timing helpers in `zz9k/voice.h`.
 
 ## Decompression Jobs
 

@@ -388,6 +388,12 @@ static int test_service_flag_names(void)
                    "audio-voice")) {
     return 55;
   }
+  if (!expect_name(zz9k_service_flag_name(
+                       ZZ9K_SERVICE_AUDIO,
+                       ZZ9K_SERVICE_FLAG_AUDIO_VOICE_STEREO),
+                   "audio-voice-stereo")) {
+    return 56;
+  }
   if (zz9k_service_flag_name(ZZ9K_SERVICE_AUDIO, 0x80000000UL) != 0) {
     return 19;
   }
@@ -580,7 +586,7 @@ static int test_service_flag_iteration(void)
   if (zz9k_known_service_flag(ZZ9K_SERVICE_CODEC, 19) != 0U) {
     return 28;
   }
-  if (zz9k_known_service_flag_count(ZZ9K_SERVICE_AUDIO) != 17U) {
+  if (zz9k_known_service_flag_count(ZZ9K_SERVICE_AUDIO) != 18U) {
     return 20;
   }
   if (zz9k_known_service_flag(ZZ9K_SERVICE_AUDIO, 4) !=
@@ -633,7 +639,11 @@ static int test_service_flag_iteration(void)
       ZZ9K_SERVICE_FLAG_AUDIO_VOICE) {
     return 54;
   }
-  if (zz9k_known_service_flag(ZZ9K_SERVICE_AUDIO, 17) != 0U) {
+  if (zz9k_known_service_flag(ZZ9K_SERVICE_AUDIO, 17) !=
+      ZZ9K_SERVICE_FLAG_AUDIO_VOICE_STEREO) {
+    return 57;
+  }
+  if (zz9k_known_service_flag(ZZ9K_SERVICE_AUDIO, 18) != 0U) {
     return 50;
   }
   if (zz9k_known_service_flag_count(ZZ9K_SERVICE_VIDEO) != 20U ||

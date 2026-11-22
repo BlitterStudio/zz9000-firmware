@@ -58,6 +58,18 @@ fabric ISR only copies periods out of that ring, as it does for the other
 slots, and the slot's retirement gives the playing frame that clients read.
 The slot produces 48 kHz stereo S16, so it needs no conversion.
 
+The engine reads mono S8 and S16 samples and interleaved stereo S8S and S16S
+samples (left sample, then right sample) from the session's bank. A frame is
+1, 2, 2 or 4 bytes for S8, S16, S8S and S16S, and the byte offsets and
+lengths of START and LOOP are divided into frames, rounding down. A stereo
+voice multiplies its left sample by the left volume and its right sample by
+the right volume, and linear interpolation blends each side with its own
+neighbour. Mono output is the same as before the stereo formats existed. The
+upload DEFINE accepts format numbers 0 to 3 and refuses the rest without
+changing the bank or the sample table. The formats and the rate and pass
+helpers in `zz9k/voice.h` are described in
+[zz9k-voice.md](../sdk/docs/zz9k-voice.md).
+
 Closing a session detaches the slot, and a reset clears it. Both drop the
 periods already queued in the TX ring and request a rebuild from the
 remaining producers, so at most the period the DMA is playing still carries
@@ -204,6 +216,7 @@ at 48 kHz and never needs conversion.
 | `SDK_SERVICE_FLAG_AUDIO_FABRIC` | bit 22 | Direct-ring audio fabric is available in the audio service |
 | `SDK_SERVICE_FLAG_AUDIO_FABRIC_RATE` | bit 23 | Source-rate leases are available |
 | `SDK_SERVICE_FLAG_AUDIO_VOICE` | bit 28 | Voice engine opcodes are advertised. The firmware sets it on Zorro III; it is not set on Zorro II yet |
+| `SDK_SERVICE_FLAG_AUDIO_VOICE_STEREO` | bit 29 | The voice engine's stereo sample formats are advertised. The flag is defined in the firmware headers, and no firmware sets it yet |
 
 Clients should check the capability and service flags before using the
 opcodes. Firmware that does not recognize the source-rate flag returns

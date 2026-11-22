@@ -292,11 +292,13 @@ $(REDUCE_TARGET): audio_reduce_test.c $(SRC_DIR)/audio_reduce.c \
 		$(SRC_DIR)/audio_reduce.c -lm
 
 # Voice engine core: position and loop math, command timing, rate rules,
-# mixing and saturation against the integer-only engine.
+# mixing and saturation against the integer-only engine. The test also
+# includes the SDK's zz9k/voice.h to pin its timing helpers to the engine.
+SDK_INC := ../../sdk/include
 $(VOICE_TARGET): audio_voice_test.c $(SRC_DIR)/audio_voice.c \
-	$(SRC_DIR)/audio_voice.h
+	$(SRC_DIR)/audio_voice.h $(SDK_INC)/zz9k/voice.h
 	@mkdir -p $(BUILD_DIR)
-	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ audio_voice_test.c \
+	$(CC) $(CPPFLAGS) -I$(SDK_INC) $(CFLAGS) -o $@ audio_voice_test.c \
 		$(SRC_DIR)/audio_voice.c
 
 # Voice engine against libpt4 (the ProTracker 4.1 replayer, vendored under

@@ -618,8 +618,7 @@ uint16_t audio_voice_session_upload(uint32_t session,
 	}
 	if ((up->flags & AUDIO_VOICE_UPLOAD_DEFINE) != 0U) {
 		if (up->sample_id >= AUDIO_VOICE_MAX_SAMPLES ||
-		    (up->format != AUDIO_VOICE_FMT_S8 &&
-		     up->format != AUDIO_VOICE_FMT_S16) ||
+		    up->format >= AUDIO_VOICE_FMT_COUNT ||
 		    up->sample_offset > g_s.res.bank_len ||
 		    up->sample_length > g_s.res.bank_len - up->sample_offset)
 			return SDK_STATUS_BAD_REQUEST;
