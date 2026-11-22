@@ -238,6 +238,14 @@ enum ZZ9KOpcode {
    * while a producer was live; lead frames are written to the TX ring
    * but not yet retired. output_rate is the formatter rate. */
   ZZ9K_OP_AUDIO_OUTPUT_CLOCK = ZZ9K_SERVICE_AUDIO + 0x17,
+  /* Wavetable voice engine (zz9k/voice.h): a firmware-mixed slot of up to
+   * 32 voices driven by timestamped records in a shared-memory ring. The
+   * opcodes dispatch from firmware on both buses. The firmware advertises
+   * them with ZZ9K_SERVICE_FLAG_AUDIO_VOICE on Zorro III only. */
+  ZZ9K_OP_AUDIO_VOICE_OPEN = ZZ9K_SERVICE_AUDIO + 0x18,
+  ZZ9K_OP_AUDIO_VOICE_CLOSE = ZZ9K_SERVICE_AUDIO + 0x19,
+  ZZ9K_OP_AUDIO_VOICE_RESET = ZZ9K_SERVICE_AUDIO + 0x1a,
+  ZZ9K_OP_AUDIO_VOICE_UPLOAD = ZZ9K_SERVICE_AUDIO + 0x1b,
 
   ZZ9K_OP_DECOMPRESS = ZZ9K_SERVICE_CODEC + 0x00,
   ZZ9K_OP_DECOMPRESS_TEST = ZZ9K_SERVICE_CODEC + 0x01,
@@ -467,6 +475,11 @@ enum ZZ9KServiceFlags {
    * the stream rate divided by 1, 2 or 4 through a low-pass decimator)
    * and output_channels (1 mixes stereo down, 2 duplicates mono). */
   ZZ9K_SERVICE_FLAG_AUDIO_STREAM_REDUCE = 1U << 27,
+  /* The wavetable voice engine opcodes (ZZ9K_OP_AUDIO_VOICE_*) are
+   * advertised. The firmware sets it on Zorro III, where the engine passed
+   * on-hardware qualification, and leaves it clear on Zorro II until the
+   * engine is tested on a Zorro II machine. */
+  ZZ9K_SERVICE_FLAG_AUDIO_VOICE = 1U << 28,
 
 
   ZZ9K_SERVICE_FLAG_VIDEO_MPEG1 = 1U << 16,

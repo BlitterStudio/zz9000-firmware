@@ -2,7 +2,7 @@
 
 `zz9k.library` is the AmigaOS 3.x API for SDK v2. It serializes mailbox requests for Amiga-side programs and provides synchronous, asynchronous, and message-port calls for the firmware services described below. New programs should use the library instead of programming mailbox registers directly.
 
-The current interface is `zz9k.library` version 2, revision 41 (`ZZ9K_LIBRARY_NAME`, `ZZ9K_LIBRARY_VERSION`, and `ZZ9K_LIBRARY_REVISION` in `sdk/amiga/include/zz9k/library_vectors.h`). SDK v2 requires firmware with service discovery. Query capabilities and the service descriptor before using an optional operation.
+The current interface is `zz9k.library` version 2, revision 42 (`ZZ9K_LIBRARY_NAME`, `ZZ9K_LIBRARY_VERSION`, and `ZZ9K_LIBRARY_REVISION` in `sdk/amiga/include/zz9k/library_vectors.h`). SDK v2 requires firmware with service discovery. Query capabilities and the service descriptor before using an optional operation.
 
 ## Contents
 
@@ -12,7 +12,7 @@ The current interface is `zz9k.library` version 2, revision 41 (`ZZ9K_LIBRARY_NA
 - [Calling the library](#synchronous-calls)
 - [Memory and surfaces](#shared-buffer-allocation-flags)
 - [Image service](#image-scaling) and [video service](#streaming-video-sessions)
-- [Audio service](#audio-decode-jobs), [control plane](#audio-control-plane-and-metering), and [direct rings](#audio-fabric-direct-ring-plane)
+- [Audio service](#audio-decode-jobs), [control plane](#audio-control-plane-and-metering), [direct rings](#audio-fabric-direct-ring-plane), and [voice engine](#voice-engine)
 - [Codec service](#decompression-jobs) and [crypto service](#crypto-hash-jobs)
 - [Asynchronous calls](#async-calls)
 - [Library compatibility history](#library-compatibility-history)
@@ -96,7 +96,9 @@ Revision 41 removes the `ZZ9KApp*` calls (LVOs `-354` to `-414`: `ZZ9KAppOpen`,
 `LoadFile`, `LoadMemory`, `Start`, `Stop`, `Status`, `SendMessage`,
 `GetMessage`, `MessageSignal`, `Close` and `SetLimits`) together with the
 VBlank lease they used and the owner check of app handles. The vector table
-ends at `ZZ9KAudioStreamBeginEx` (`-348`), 54 public functions. Nothing of
+ended at `ZZ9KAudioStreamBeginEx` (`-348`), 54 public functions. Revision 42
+reuses `-354` to `-384` for the voice engine calls, 60 public functions.
+Nothing of
 the removed interface was released to users. The owner check of client ids
 stays: the service task still releases the opener record and the client id of
 a task that is gone without `CloseLibrary()`.
@@ -435,12 +437,14 @@ All multi-byte mailbox fields use the byte order defined by `zz9k/abi.h`. The se
 | Memory | `0x0100` ALLOC_SHARED, `0x0101` FREE_SHARED, `0x0102` MEM_FILL, `0x0103` MEM_COPY |
 | Surface | `0x0200` ALLOC_SURFACE, `0x0201` FREE_SURFACE, `0x0202` MAP_FRAMEBUFFER_SURFACE, `0x0203` FILL_SURFACE, `0x0204` COPY_SURFACE, `0x0205` QUERY_PALETTE |
 | Image | `0x0400` SCALE_IMAGE, `0x0401` DECODE_JPEG, `0x0402` DECODE_PNG, `0x0403` DECODE_GIF, `0x0404` IMAGE_SESSION_BEGIN, `0x0405` IMAGE_SESSION_FEED, `0x0406` IMAGE_SESSION_CLOSE, `0x0407` SCALE_IMAGE_CLIPPED, `0x0408` IMAGE_ANIMATION_FRAME_NEXT, `0x0409` IMAGE_ANIMATION_FRAME_PRESENT, `0x040a` IMAGE_ANIMATION_FRAME_RETIRE, `0x040b` IMAGE_ANIMATION_RESTART |
-| Audio | `0x0500` DECODE_MP3, `0x0501` MIX_AUDIO, `0x0502` RESAMPLE_AUDIO, `0x0503` STREAM_BEGIN, `0x0504` STREAM_FEED, `0x0505` STREAM_READ, `0x0506` STREAM_CLOSE, `0x0507` STREAM_PLAY, `0x0508` STREAM_STOP, `0x0509`–`0x050e` control and metering, `0x0512` FABRIC_STATE_GET, `0x0513` RING_ACQUIRE, `0x0514` RING_RELEASE, `0x0515` STREAM_GAIN, `0x0516` STREAM_BEGIN_EX, `0x0517` OUTPUT_CLOCK |
+| Audio | `0x0500` DECODE_MP3, `0x0501` MIX_AUDIO, `0x0502` RESAMPLE_AUDIO, `0x0503` STREAM_BEGIN, `0x0504` STREAM_FEED, `0x0505` STREAM_READ, `0x0506` STREAM_CLOSE, `0x0507` STREAM_PLAY, `0x0508` STREAM_STOP, `0x0509`–`0x050e` control and metering, `0x0512` FABRIC_STATE_GET, `0x0513` RING_ACQUIRE, `0x0514` RING_RELEASE, `0x0515` STREAM_GAIN, `0x0516` STREAM_BEGIN_EX, `0x0517` OUTPUT_CLOCK, `0x0518` VOICE_OPEN, `0x0519` VOICE_CLOSE, `0x051a` VOICE_RESET, `0x051b` VOICE_UPLOAD |
 | Codec | `0x0600` DECOMPRESS, `0x0601` DECOMPRESS_TEST, `0x0602` STREAM_BEGIN, `0x0603` STREAM_READ, `0x0604` STREAM_CLOSE, `0x0605` STREAM_FEED, `0x0606` DECOMPRESS_BATCH |
 | Crypto | `0x0800` HASH, `0x0801` STREAM, `0x0802` AEAD, `0x0803` KX, `0x0804` VERIFY |
 | Diagnostics | `0x0900` DIAG_READ, `0x0901` DIAG_TIMING, `0x0902` DIAG_SCHED, `0x0903` DIAG_MEMORY |
 | Module | `0x0a00` MODULE_STATUS |
 | Video | `0x0b00`–`0x0b03` video-session begin/write/decode/close; `0x0b04`–`0x0b0d` media-session begin/write/decode/audio-read/present/discard/status/audio-bind/audio-unbind/close |
+
+The voice engine opcodes `0x0518` through `0x051b` dispatch in firmware on both buses. The audio service descriptor covers them (28 opcodes through `0x051b`) and sets `ZZ9K_SERVICE_FLAG_AUDIO_VOICE` on Zorro III. The flag is not set on Zorro II yet, because the engine has not been tested on a Zorro II machine. See [zz9k-voice.md](zz9k-voice.md).
 
 `ZZ9K_OP_MODULE_STATUS` takes a 48-byte `ZZ9KModuleStatusRequestPayload`:
 the only nonzero field is the big-endian zero-based `index`. It returns a
@@ -1353,7 +1357,7 @@ most recent settled status afterwards.
 
 Calibrated matched firmware advertises `ZZ9K_CAP_AUDIO_CONTROL` (bit
 25), `ZZ9K_CAP_AUDIO_METERING` (bit 26), and
-`ZZ9K_SERVICE_FLAG_AUDIO_CONTROL` (bit 21). The current audio service descriptor reports 23 opcode slots through `0x0516`, including the reserved `0x050f`–`0x0511` gap. The control-plane subset occupies `0x0509` through `0x050e`. Older or uncalibrated firmware omits the bits, so clients must still gate exactly like every other surface:
+`ZZ9K_SERVICE_FLAG_AUDIO_CONTROL` (bit 21). The current audio service descriptor reports 28 opcode slots through `0x051b`, including the reserved `0x050f`–`0x0511` gap and the unassigned `0x0501` and `0x0502`. The control-plane subset occupies `0x0509` through `0x050e`. Older or uncalibrated firmware omits the bits, so clients must still gate exactly like every other surface:
 
 ```c
 if (!zz9k_has_capabilities(caps.capability_bits, ZZ9K_CAP_AUDIO_CONTROL)) {
@@ -1409,6 +1413,39 @@ The steady data path performs no mailbox copy. A producer writes PCM, makes the 
 The typed client surface in `include/zz9k/audio.h` validates grants, wraps ring writes, publishes producer state, reads firmware credits, refreshes heartbeats, and performs generation-bound release. The resident mailbox path accepts a legacy bypass grant only when source-rate conversion was not requested. It validates that a returned grant matches the requested contract and source rate, then releases malformed or mismatched grants before reporting failure. `tools/zz9k-fabriclease.c` exercises acquire, direct writes, credit pacing, heartbeat recovery, low-rate telemetry, drain, Ctrl-C cleanup, and Zorro II single-slot refusal.
 
 Zorro II aperture-layout generation 2 reserves one 48-KiB direct region and leaves 16 KiB in the general host-window heap. Zorro III grants two 16-period rings. A firmware or bitstream that predates the matched layout is declined cleanly.
+
+## Voice Engine
+
+The firmware mixes up to 32 wavetable voices at 48 kHz into its own audio
+fabric slot. A program uploads samples into a card-side bank, then queues
+timestamped command records through a shared-memory ring. The contract (the
+timeline and lead, the command records, uploads, the status block, the
+heartbeat and the Zorro II buffer sizes) is in [zz9k-voice.md](zz9k-voice.md).
+This section lists the calls.
+
+| Call | LVO | Registers |
+| --- | ---: | --- |
+| `ZZ9KVoiceOpen(desc, session)` | `-354` (`ZZ9K_LVO_VOICE_OPEN`) | a0, a1 |
+| `ZZ9KVoiceClose(session)` | `-360` (`ZZ9K_LVO_VOICE_CLOSE`) | a0 |
+| `ZZ9KVoiceReset(session)` | `-366` (`ZZ9K_LVO_VOICE_RESET`) | a0 |
+| `ZZ9KVoiceUpload(session, desc)` | `-372` (`ZZ9K_LVO_VOICE_UPLOAD`) | a0, a1 |
+| `ZZ9KVoiceWrite(session, records, count)` | `-378` (`ZZ9K_LVO_VOICE_WRITE`) | a0, a1, d0 |
+| `ZZ9KVoiceGetStatus(session, status)` | `-384` (`ZZ9K_LVO_VOICE_GET_STATUS`) | a0, a1 |
+
+Require `ZZ9K_LIBRARY_MIN_REVISION_AUDIO_VOICE` (42). The descriptors, record
+builders and status helpers are in `zz9k/voice.h`, which `zz9k/sdk.h`
+includes. Open, Close, Reset and Upload are mailbox calls and return a
+`ZZ9K_STATUS_*` code. Write returns the number of records it queued. Write
+and GetStatus only touch the session's shared buffers, so the resident
+library does not take its transport lock for them. Call GetStatus at least
+every 500 ms: the firmware closes a session whose heartbeat stays unchanged
+for 2 seconds.
+
+The mailbox opcodes are `ZZ9K_OP_AUDIO_VOICE_OPEN` (`0x0518`), `_CLOSE`
+(`0x0519`), `_RESET` (`0x051a`) and `_UPLOAD` (`0x051b`). The firmware sets
+`ZZ9K_SERVICE_FLAG_AUDIO_VOICE` on Zorro III and does not set it on Zorro II
+yet, so a client on a card without the flag tries Open and handles the
+refusal; see the discovery section of the voice guide.
 
 ## Decompression Jobs
 
@@ -2026,7 +2063,8 @@ Use the named minimum-revision constant whenever an application requires an LVO 
 | 38 | `ZZ9K_LIBRARY_MIN_REVISION_CLIENT_RECLAIM` | Per-opener client ids and `ZZ9K_OP_CLIENT_RELEASE`; the final `CloseLibrary()` resubmits the release while the firmware answers `BUSY` and reclaims that opener's owned SDK resources after worker quiescence |
 | 39 | `ZZ9K_LIBRARY_MIN_REVISION_APP_LOAD_LEASE` | ARM-app `LOAD_END` waits used lifecycle progress (removed in revision 41). |
 | 40 | `ZZ9K_LIBRARY_MIN_REVISION_APP_OWNER_REAP`, `ZZ9K_LIBRARY_MIN_REVISION_APP_SET_LIMITS` | The service task released an app handle, its opener record, and its client id when the owner task was gone; since revision 41 only the opener record and the client id (the app calls were removed) |
-| 41 | None | The `ZZ9KApp*` calls (`-354` to `-414`) are removed; the ARM app runtime is reached through `aar.library`, which carries its mailbox calls through `zz9k.library`; the vector table ends at `ZZ9KAudioStreamBeginEx` (`-348`) |
+| 41 | None | The `ZZ9KApp*` calls (`-354` to `-414`) are removed; the ARM app runtime is reached through `aar.library`, which carries its mailbox calls through `zz9k.library`; the vector table ended at `ZZ9KAudioStreamBeginEx` (`-348`) |
+| 42 | `ZZ9K_LIBRARY_MIN_REVISION_AUDIO_VOICE` | The voice engine calls `ZZ9KVoiceOpen()`, `ZZ9KVoiceClose()`, `ZZ9KVoiceReset()`, `ZZ9KVoiceUpload()`, `ZZ9KVoiceWrite()` and `ZZ9KVoiceGetStatus()` at `-354` to `-384`; the vector table ends at `ZZ9KVoiceGetStatus`. See [the voice engine guide](zz9k-voice.md) |
 
 ### Async submission and wait helpers
 

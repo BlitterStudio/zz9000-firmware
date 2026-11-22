@@ -32,6 +32,7 @@
 #include "audio_scene.h"
 #include "sdk_audio_control.h"
 #include "audio_fabric.h"
+#include "audio_voice_session.h"
 #include "audio_stream_drain.h"
 #include "audio_stream_close.h"
 #include "audio_convert.h"
@@ -1534,9 +1535,8 @@ static uint32_t service_flags(const struct SDKServiceDescriptor *service)
 		flags |= sdk_jpeg_service_flags();
 		flags |= SDK_SERVICE_FLAG_IMAGE_PNG_DIRECT_BGRA;
 	}
-	if (service->service_id == SDK_SERVICE_MEMORY &&
-	    sdk_aperture_runtime_is_zorro3())
-		flags |= SDK_SERVICE_FLAG_MEMORY_MEDIA_INPUT;
+	flags |= sdk_service_bus_flags(service->service_id,
+				       sdk_aperture_runtime_is_zorro3());
 	if (service->service_id == SDK_SERVICE_VIDEO &&
 	    audio_codec_present())
 		flags |= SDK_SERVICE_FLAG_VIDEO_AUDIO_BIND;
@@ -4677,6 +4677,228 @@ static uint16_t handle_audio_ring_release(
 	return complete_status(req, comp, SDK_STATUS_OK);
 }
 
+/*
+ * Wavetable voice engine session. The module (audio_voice_session.c) owns
+ * the engine and the ring; this file owns the handles: it resolves and
+ * pins the three shared buffers, allocates the card-side bank, and gives
+ * both back through voice_session_release() whenever the session ends.
+ */
+#define SDK_VOICE_BANK_ALIGNMENT 32U
+
+struct voice_session_owner {
+	struct SDKSharedBuffer *ring;
+	struct SDKSharedBuffer *status;
+	struct SDKSharedBuffer *staging;
+	uint32_t bank_address;
+	uint16_t client_id;
+};
+
+static struct voice_session_owner g_voice_owner;
+
+static void voice_session_release(void *ctx)
+{
+	(void)ctx;
+	shared_buffer_unpin(g_voice_owner.ring);
+	shared_buffer_unpin(g_voice_owner.status);
+	shared_buffer_unpin(g_voice_owner.staging);
+	if (g_voice_owner.bank_address != 0U)
+		(void)surface_allocator_free(g_voice_owner.bank_address);
+	memset(&g_voice_owner, 0, sizeof(g_voice_owner));
+}
+
+/*
+ * A buffer the 68k writes and the CPU reads: the client's own, not
+ * declared card-only, and visible through the host window on Zorro II
+ * (zz9k.library strips HOST_WINDOW on Zorro III, where the ordinary
+ * shared heap is board-visible).
+ */
+static struct SDKSharedBuffer *voice_client_buffer(uint32_t handle,
+	uint16_t client_id)
+{
+	struct SDKSharedBuffer *buffer = find_shared_buffer(handle);
+
+	if (!buffer || buffer->owner_id != client_id)
+		return 0;
+	if ((buffer->flags & (SDK_ALLOC_CARD_ONLY | SDK_ALLOC_MEDIA)) != 0U)
+		return 0;
+	if (!sdk_aperture_runtime_is_zorro3() &&
+	    (buffer->flags & SDK_ALLOC_HOST_WINDOW) == 0U)
+		return 0;
+	return buffer;
+}
+
+static int payload_bytes_zero(const volatile uint8_t *payload,
+	uint32_t from, uint32_t to)
+{
+	for (; from < to; from++) {
+		if (payload[from] != 0U)
+			return 0;
+	}
+	return 1;
+}
+
+static uint16_t handle_audio_voice_open(volatile struct SDKMailboxEntry *req,
+	volatile struct SDKMailboxEntry *comp, uint16_t payload_len)
+{
+	volatile struct SDKAudioVoiceOpenPayload *payload;
+	volatile struct SDKAudioVoiceOpenResultPayload *result;
+	struct audio_voice_session_open open;
+	struct audio_voice_session_grant grant;
+	struct SDKSharedBuffer *ring;
+	struct SDKSharedBuffer *status;
+	struct SDKSharedBuffer *staging;
+	uint32_t ring_handle;
+	uint32_t status_handle;
+	uint32_t staging_handle;
+	uint32_t bank_bytes;
+	uint32_t bank_address;
+	uint16_t client_id = request_client_id(req);
+	uint16_t rc;
+
+	if (payload_len < sizeof(*payload))
+		return complete_status(req, comp, SDK_STATUS_BAD_REQUEST);
+	payload = (volatile struct SDKAudioVoiceOpenPayload *)req->payload;
+	if (!payload_bytes_zero(req->payload,
+	        offsetof(struct SDKAudioVoiceOpenPayload, reserved),
+	        sizeof(*payload)))
+		return complete_status(req, comp, SDK_STATUS_BAD_REQUEST);
+	if (audio_voice_session_active())
+		return complete_status(req, comp, SDK_STATUS_BUSY);
+	ring_handle = get_be32(payload->ring_handle);
+	status_handle = get_be32(payload->status_handle);
+	staging_handle = get_be32(payload->staging_handle);
+	bank_bytes = get_be32(payload->bank_bytes);
+	if (ring_handle == status_handle || ring_handle == staging_handle ||
+	    status_handle == staging_handle)
+		return complete_status(req, comp, SDK_STATUS_BAD_HANDLE);
+	ring = voice_client_buffer(ring_handle, client_id);
+	status = voice_client_buffer(status_handle, client_id);
+	staging = voice_client_buffer(staging_handle, client_id);
+	if (!ring || !status || !staging)
+		return complete_status(req, comp, SDK_STATUS_BAD_HANDLE);
+	rc = audio_voice_session_check(ring->length,
+		(uintptr_t)status->address, status->length,
+		bank_bytes, get_be32(payload->voices),
+		get_be32(payload->flags));
+	if (rc != SDK_STATUS_OK)
+		return complete_status(req, comp, rc);
+	if (!shared_buffer_pin(ring))
+		return complete_status(req, comp, SDK_STATUS_BUSY);
+	if (!shared_buffer_pin(status)) {
+		shared_buffer_unpin(ring);
+		return complete_status(req, comp, SDK_STATUS_BUSY);
+	}
+	if (!shared_buffer_pin(staging)) {
+		shared_buffer_unpin(ring);
+		shared_buffer_unpin(status);
+		return complete_status(req, comp, SDK_STATUS_BUSY);
+	}
+	bank_address = surface_allocator_alloc_aligned(bank_bytes,
+		SDK_VOICE_BANK_ALIGNMENT);
+	memset(&open, 0, sizeof(open));
+	open.ring = (uint8_t *)(uintptr_t)ring->address;
+	open.ring_len = ring->length;
+	open.status = (uint8_t *)(uintptr_t)status->address;
+	open.status_len = status->length;
+	open.staging = (uint8_t *)(uintptr_t)staging->address;
+	open.staging_len = staging->length;
+	open.bank = (uint8_t *)(uintptr_t)bank_address;
+	open.bank_len = bank_bytes;
+	open.lead_frames = get_be32(payload->lead_frames);
+	open.flags = get_be32(payload->flags);
+	open.voices = get_be32(payload->voices);
+	open.release = voice_session_release;
+	rc = bank_address == 0U ? SDK_STATUS_NO_MEMORY :
+		audio_voice_session_open(&open, &grant);
+	if (rc != SDK_STATUS_OK) {
+		if (bank_address != 0U)
+			(void)surface_allocator_free(bank_address);
+		shared_buffer_unpin(ring);
+		shared_buffer_unpin(status);
+		shared_buffer_unpin(staging);
+		return complete_status(req, comp, rc);
+	}
+	g_voice_owner.ring = ring;
+	g_voice_owner.status = status;
+	g_voice_owner.staging = staging;
+	g_voice_owner.bank_address = bank_address;
+	g_voice_owner.client_id = client_id;
+
+	write_completion(comp, req, SDK_STATUS_OK, sizeof(*result));
+	memset((void *)comp->payload, 0, sizeof(comp->payload));
+	result = (volatile struct SDKAudioVoiceOpenResultPayload *)
+		comp->payload;
+	put_be32(result->session, grant.session);
+	put_be32(result->voices, grant.voices);
+	put_be32(result->bank_bytes, grant.bank_bytes);
+	put_be32(result->lead_frames, grant.lead_frames);
+	put_be32(result->lead_floor_frames, grant.lead_floor_frames);
+	put_be32(result->lead_max_frames, grant.lead_max_frames);
+	put_be32(result->ring_records, grant.ring_records);
+	put_be32(result->output_rate, grant.output_rate);
+	put_be32(result->max_samples, grant.max_samples);
+	return SDK_STATUS_OK;
+}
+
+/* A session id from a client other than the session's owner is no handle. */
+static int voice_session_owned_by(uint16_t client_id)
+{
+	return audio_voice_session_active() &&
+	       g_voice_owner.client_id == client_id;
+}
+
+static uint16_t handle_audio_voice_session_op(
+	volatile struct SDKMailboxEntry *req,
+	volatile struct SDKMailboxEntry *comp, uint16_t payload_len,
+	uint16_t opcode)
+{
+	volatile struct SDKAudioVoiceSessionPayload *payload;
+	uint32_t session;
+	uint16_t rc;
+
+	if (payload_len < sizeof(*payload))
+		return complete_status(req, comp, SDK_STATUS_BAD_REQUEST);
+	payload = (volatile struct SDKAudioVoiceSessionPayload *)req->payload;
+	if (!payload_bytes_zero(req->payload,
+	        offsetof(struct SDKAudioVoiceSessionPayload, reserved),
+	        sizeof(*payload)))
+		return complete_status(req, comp, SDK_STATUS_BAD_REQUEST);
+	session = get_be32(payload->session);
+	if (!voice_session_owned_by(request_client_id(req)))
+		return complete_status(req, comp, SDK_STATUS_BAD_HANDLE);
+	rc = opcode == SDK_OP_AUDIO_VOICE_CLOSE ?
+		audio_voice_session_close(session) :
+		audio_voice_session_reset(session);
+	return complete_status(req, comp, rc);
+}
+
+static uint16_t handle_audio_voice_upload(volatile struct SDKMailboxEntry *req,
+	volatile struct SDKMailboxEntry *comp, uint16_t payload_len)
+{
+	volatile struct SDKAudioVoiceUploadPayload *payload;
+	struct audio_voice_session_upload upload;
+
+	if (payload_len < sizeof(*payload))
+		return complete_status(req, comp, SDK_STATUS_BAD_REQUEST);
+	payload = (volatile struct SDKAudioVoiceUploadPayload *)req->payload;
+	if (!payload_bytes_zero(req->payload,
+	        offsetof(struct SDKAudioVoiceUploadPayload, reserved),
+	        sizeof(*payload)))
+		return complete_status(req, comp, SDK_STATUS_BAD_REQUEST);
+	if (!voice_session_owned_by(request_client_id(req)))
+		return complete_status(req, comp, SDK_STATUS_BAD_HANDLE);
+	upload.flags = get_be32(payload->flags);
+	upload.staging_offset = get_be32(payload->staging_offset);
+	upload.bank_offset = get_be32(payload->bank_offset);
+	upload.length = get_be32(payload->length);
+	upload.sample_id = get_be32(payload->sample_id);
+	upload.sample_offset = get_be32(payload->sample_offset);
+	upload.sample_length = get_be32(payload->sample_length);
+	upload.format = get_be32(payload->format);
+	return complete_status(req, comp, audio_voice_session_upload(
+		get_be32(payload->session), &upload));
+}
+
 /* Validates ring geometry and opens an unbound session shared by the MP3-only
  * Begin and the codec-aware BeginEx. Both water marks are PCM-ring
  * thresholds: low_water is the playback pump's refill trigger, high_water
@@ -5228,6 +5450,14 @@ static int client_decompress_streams_released(uint16_t client_id)
 	return sdk_decompress_stream_release_client(client_id);
 }
 
+/* A client that vanishes takes its voice session with it. */
+static int client_voice_sessions_released(uint16_t client_id)
+{
+	if (voice_session_owned_by(client_id))
+		audio_voice_session_shutdown();
+	return 1;
+}
+
 static int client_shared_buffers_released(uint16_t client_id)
 {
 	uint32_t i;
@@ -5281,6 +5511,7 @@ static uint16_t handle_client_release(volatile struct SDKMailboxEntry *req,
 	    !client_video_sessions_released(client_id) ||
 	    !client_audio_streams_released(client_id) ||
 	    !client_decompress_streams_released(client_id) ||
+	    !client_voice_sessions_released(client_id) ||
 	    !client_shared_buffers_released(client_id))
 		return complete_status(req, comp, SDK_STATUS_BUSY);
 	client_surfaces_release(client_id);
@@ -8912,6 +9143,14 @@ static uint16_t handle_request(volatile struct SDKMailboxEntry *req,
 		return handle_audio_fabric_state_get(req, comp, payload_len);
 	case SDK_OP_AUDIO_OUTPUT_CLOCK:
 		return handle_audio_output_clock(req, comp, payload_len);
+	case SDK_OP_AUDIO_VOICE_OPEN:
+		return handle_audio_voice_open(req, comp, payload_len);
+	case SDK_OP_AUDIO_VOICE_CLOSE:
+	case SDK_OP_AUDIO_VOICE_RESET:
+		return handle_audio_voice_session_op(req, comp, payload_len,
+		                                     opcode);
+	case SDK_OP_AUDIO_VOICE_UPLOAD:
+		return handle_audio_voice_upload(req, comp, payload_len);
 	case SDK_OP_AUDIO_RING_ACQUIRE:
 		return handle_audio_ring_acquire(req, comp, payload_len);
 	case SDK_OP_AUDIO_RING_RELEASE:
@@ -9097,6 +9336,16 @@ void sdk_mailbox_publish_after_aperture_ack(void)
 	sdk_mailbox_pending = 0;
 }
 
+#ifdef SDK_MAILBOX_HOST_TEST
+/* Host harness entry: one request through the production dispatcher. */
+uint16_t sdk_mailbox_test_handle_request(
+	volatile struct SDKMailboxEntry *req,
+	volatile struct SDKMailboxEntry *comp)
+{
+	return handle_request(req, comp, 1U);
+}
+#endif
+
 
 void sdk_mailbox_init(void)
 {
@@ -9126,6 +9375,9 @@ void sdk_mailbox_init(void)
 	sdk_status = SDK_STATUS_OK;
 	sdk_mailbox_active = 0;
 	sdk_mailbox_pending = 0;
+	/* End a voice session before the shared-buffer table is wiped: its
+	 * release hook unpins the client's buffers and frees the bank. */
+	audio_voice_session_shutdown();
 	/* R7 fail-closed fabric teardown BEFORE the generation advances:
 	 * the fabric silences the ring it owns, bumps every lease epoch
 	 * (a stale pre-reset handle must never validate again) and zeroes

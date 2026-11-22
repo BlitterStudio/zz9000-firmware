@@ -1733,6 +1733,19 @@ target_include_directories(audio_stream_contract_test
 
 add_test(NAME audio_stream_contract_test COMMAND audio_stream_contract_test)
 
+add_executable(voice_contract_test
+  tests/voice_contract_test.c
+)
+
+target_include_directories(voice_contract_test
+  PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/host/include
+)
+
+target_link_libraries(voice_contract_test PRIVATE zz9k_host)
+add_test(NAME voice_contract_test COMMAND voice_contract_test)
+
 add_executable(zz9k_fabriclease
   tools/zz9k-fabriclease.c
 )

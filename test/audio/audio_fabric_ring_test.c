@@ -1405,6 +1405,182 @@ static void scenario_ahi_paced(void)
 	}
 }
 
+/* ---- I. voice slot: firmware-owned, never leased ---- */
+
+#define VOICE_PCM 1000                       /* constant voice source */
+#define VOICE_MIXED_PCM (MIXED_PCM + VOICE_PCM)
+
+/* Attach a constant 48-kHz stereo producer on the voice slot the way a
+ * firmware engine joining a live mix does (no frontier re-arm). */
+static void voice_attach_live(int16_t value)
+{
+	model_init(&g_model_c, 48000U, 2U, SDK_AUDIO_SAMPLE_FORMAT_S16LE);
+	model_prefill_constant(&g_model_c, value);
+	check(audio_fabric_producer_attach(AUDIO_FABRIC_SLOT_VOICE,
+		&g_ops_c) == 1, "voice: attach", "");
+	audio_fabric_producer_go_live(AUDIO_FABRIC_SLOT_VOICE);
+}
+
+/* Constant producers never run dry: keep runway ahead of the staging
+ * cursor (the ring holds one constant, so any window is valid). */
+static void source_topup(struct src_model *m)
+{
+	m->produced = m->staged + 2ULL * MODEL_RING_BYTES;
+}
+
+static uint32_t count_constant_periods(const uint8_t *snap, int16_t value)
+{
+	uint32_t count = 0U;
+	uint32_t period;
+
+	for (period = 0U; period < AUDIO_NUM_PERIODS; period++) {
+		if (snapshot_period_is_constant(snap, period, value))
+			count++;
+	}
+	return count;
+}
+
+/* Detaching the voice producer while a lease plays leaves the lease
+ * untouched: every TX period the compositor writes after the detach is
+ * exactly pump + lease, the lease stays ACTIVE and keeps being
+ * credited, and no peer counts an underrun. */
+static void scenario_voice_detach_keeps_lease(void)
+{
+	static uint8_t before[AUDIO_TX_BUFFER_SIZE];
+	struct audio_fabric_ring_grant grant;
+	struct audio_fabric_slot_state st;
+	uint32_t pump_baseline;
+	uint64_t credited;
+	uint32_t tick;
+	uint32_t period;
+
+	fabric_reset_state();
+	g_dma_count = 0;
+	pump_baseline = pump_standby_start();
+	check(acquire_lease(AUDIO_FABRIC_SLOT_MAILBOX, 128U, &grant) ==
+	      AUDIO_FABRIC_LEASE_OK, "voice detach: lease acquire", "");
+	g_producer[AUDIO_FABRIC_SLOT_MAILBOX].generation = grant.generation;
+	producer_fill(AUDIO_FABRIC_SLOT_MAILBOX, LEASE_PCM);
+	for (tick = 0U; tick < 2U; tick++) {
+		source_topup(&g_model_b);
+		producer_publish(AUDIO_FABRIC_SLOT_MAILBOX,
+			RING_TEST_CAPACITY, 0U);
+		fabric_pass();
+	}
+	voice_attach_live(VOICE_PCM);
+	for (tick = 0U; tick < 3U; tick++) {
+		source_topup(&g_model_b);
+		source_topup(&g_model_c);
+		producer_publish(AUDIO_FABRIC_SLOT_MAILBOX,
+			RING_TEST_CAPACITY, 0U);
+		fabric_pass();
+	}
+	check(count_constant_periods(g_fabric_tx, VOICE_MIXED_PCM) != 0U,
+	      "voice detach: voice mixed with pump and lease before detach",
+	      fmt("voice periods=%u",
+	          count_constant_periods(g_fabric_tx, VOICE_MIXED_PCM)));
+	st = lease_state(AUDIO_FABRIC_SLOT_MAILBOX);
+	check(st.state == AUDIO_FABRIC_SLOT_STATE_ACTIVE,
+	      "voice detach: lease ACTIVE before detach",
+	      fmt("state=%u", st.state));
+	credited = st.consumed_bytes;
+	memcpy(before, g_fabric_tx, sizeof(before));
+
+	audio_fabric_producer_detach(AUDIO_FABRIC_SLOT_VOICE);
+	for (tick = 0U; tick < AUDIO_NUM_PERIODS; tick++) {
+		uint32_t changed = 0U;
+		uint32_t wrong = 0U;
+
+		source_topup(&g_model_b);
+		producer_publish(AUDIO_FABRIC_SLOT_MAILBOX,
+			RING_TEST_CAPACITY, 0U);
+		fabric_pass();
+		for (period = 0U; period < AUDIO_NUM_PERIODS; period++) {
+			if (memcmp(before + period * TICK_BYTES,
+				   g_fabric_tx + period * TICK_BYTES,
+				   TICK_BYTES) == 0)
+				continue;
+			changed++;
+			if (!period_is_constant(period, MIXED_PCM))
+				wrong++;
+		}
+		check(wrong == 0U,
+		      "voice detach: next written period is pump + lease only",
+		      fmt("pass=%u changed=%u not-pump+lease=%u", tick,
+		          changed, wrong));
+		memcpy(before, g_fabric_tx, sizeof(before));
+	}
+	check(count_constant_periods(g_fabric_tx, MIXED_PCM) ==
+	      AUDIO_NUM_PERIODS,
+	      "voice detach: ring settles to pump + lease",
+	      fmt("mixed periods=%u",
+	          count_constant_periods(g_fabric_tx, MIXED_PCM)));
+	st = lease_state(AUDIO_FABRIC_SLOT_MAILBOX);
+	check(st.state == AUDIO_FABRIC_SLOT_STATE_ACTIVE &&
+	      st.underruns == 0U && st.consumed_bytes > credited,
+	      "voice detach: lease stays ACTIVE and credited",
+	      fmt("state=%u underruns=%u credited %llu -> %llu", st.state,
+	          st.underruns, (unsigned long long)credited,
+	          (unsigned long long)st.consumed_bytes));
+	check(lease_state(AUDIO_FABRIC_SLOT_PUMP).underruns ==
+	      pump_baseline,
+	      "voice detach: pump unaffected", "");
+}
+
+/* Neither an acquire, a release nor a state read reaches the voice
+ * slot, with or without a producer attached to it; the grant keeps
+ * its two lease slots, and the voice producer takes no converter from
+ * the two-converter admission budget. */
+static void scenario_voice_slot_hidden(void)
+{
+	struct audio_fabric_ring_grant grant;
+	struct audio_fabric_ring_grant second;
+	struct audio_fabric_ring_grant third;
+	struct audio_fabric_slot_state st;
+	int pass;
+
+	for (pass = 0; pass < 2; pass++) {
+		fabric_reset_state();
+		g_dma_count = 0;
+		if (pass == 1)
+			voice_attach_live(VOICE_PCM);
+		check(acquire_lease(AUDIO_FABRIC_SLOT_VOICE, 128U, &grant) ==
+		      AUDIO_FABRIC_LEASE_EBAD_SLOT,
+		      "voice hidden: acquire never grants the voice slot",
+		      fmt("voice producer attached=%d", pass));
+		check(audio_fabric_ring_release(AUDIO_FABRIC_SLOT_VOICE,
+			1U) == AUDIO_FABRIC_LEASE_EBAD_SLOT,
+		      "voice hidden: release rejects the voice slot",
+		      fmt("voice producer attached=%d", pass));
+		memset(&st, 0xA5, sizeof(st));
+		check(audio_fabric_slot_state(AUDIO_FABRIC_SLOT_VOICE,
+			SDK_AUDIO_METER_IDENTITY_SDK_STREAM, 0, &st) == 0,
+		      "voice hidden: state get rejects the voice slot",
+		      fmt("voice producer attached=%d", pass));
+		check(acquire_lease_rate(AUDIO_FABRIC_SLOT_MAILBOX, 128U,
+			44100U, &grant) == AUDIO_FABRIC_LEASE_OK &&
+		      grant.slot_count == 2U,
+		      "voice hidden: first lease granted, two lease slots",
+		      fmt("slot_count=%u", grant.slot_count));
+		check(acquire_lease_rate(AUDIO_FABRIC_SLOT_RESERVED, 128U,
+			44100U, &second) == AUDIO_FABRIC_LEASE_OK,
+		      "voice hidden: voice producer is not a converter",
+		      fmt("voice producer attached=%d", pass));
+		check(acquire_lease(AUDIO_FABRIC_SLOT_VOICE, 128U, &third) ==
+		      AUDIO_FABRIC_LEASE_EBAD_SLOT,
+		      "voice hidden: no third grant with both leases held",
+		      fmt("voice producer attached=%d", pass));
+		fabric_pass();
+		check(audio_fabric_slot_state(AUDIO_FABRIC_SLOT_VOICE,
+			SDK_AUDIO_METER_IDENTITY_SDK_STREAM, 0, &st) == 0 &&
+		      audio_fabric_slot_state(AUDIO_FABRIC_SLOT_MAILBOX,
+			SDK_AUDIO_METER_IDENTITY_SDK_STREAM, 0, &st) == 1 &&
+		      st.generation == grant.generation,
+		      "voice hidden: lease state reads unaffected",
+		      fmt("voice producer attached=%d", pass));
+	}
+}
+
 int main(void)
 {
 	scenario_admission();
@@ -1422,6 +1598,8 @@ int main(void)
 	scenario_prime_preserves_lease_age();
 	scenario_dead_line();
 	scenario_rebuild();
+	scenario_voice_detach_keeps_lease();
+	scenario_voice_slot_hidden();
 	scenario_warm_reset();
 	scenario_cache_fidelity();
 	if (failures != 0)

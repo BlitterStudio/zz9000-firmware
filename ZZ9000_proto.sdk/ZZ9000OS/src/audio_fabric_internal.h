@@ -127,7 +127,7 @@ struct audio_fabric_slot {
 	uint32_t convert_rate;
 	/* Lease preconvert staging; active only for converting leases. */
 	struct fabric_lease_preconvert preconvert;
-	/* Lease-plane state; zero (ring NULL) for the pump slot. */
+	/* Lease-plane state; zero (ring NULL) for the pump and voice slots. */
 	struct audio_fabric_lease lease;
 };
 

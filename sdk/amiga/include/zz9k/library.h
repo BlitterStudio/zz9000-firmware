@@ -168,6 +168,24 @@ int ZZ9KAudioStreamBegin(ZZ9KLibrary *library,
 int ZZ9KAudioStreamBeginEx(ZZ9KLibrary *library,
                            const ZZ9KAudioStreamBeginExDesc *desc,
                            ZZ9KAudioStreamResult *result);
+/* Wavetable voice engine (zz9k/voice.h). Open allocates the ring, status and
+ * staging buffers and fills the session; close frees them. Write and
+ * GetStatus are lock-free shared-memory calls (no mailbox round trip), so
+ * they stay cheap next to a blocked synchronous call from another task.
+ * GetStatus is also the session heartbeat: every call refreshes it, so make
+ * one at least every 500 ms (ZZ9K_VOICE_HEARTBEAT_MS). The card closes the
+ * session after 2 s without a GetStatus or a voice mailbox call (Upload and
+ * Reset count as liveness too; Write does not). */
+int ZZ9KVoiceOpen(ZZ9KLibrary *library, const ZZ9KVoiceOpenDesc *desc,
+                  ZZ9KVoiceSession *session);
+int ZZ9KVoiceClose(ZZ9KLibrary *library, ZZ9KVoiceSession *session);
+int ZZ9KVoiceReset(ZZ9KLibrary *library, ZZ9KVoiceSession *session);
+int ZZ9KVoiceUpload(ZZ9KLibrary *library, ZZ9KVoiceSession *session,
+                    const ZZ9KVoiceUploadDesc *desc);
+uint32_t ZZ9KVoiceWrite(ZZ9KLibrary *library, ZZ9KVoiceSession *session,
+                        const ZZ9KVoiceRecord *records, uint32_t count);
+int ZZ9KVoiceGetStatus(ZZ9KLibrary *library, ZZ9KVoiceSession *session,
+                       ZZ9KVoiceStatus *status);
 int ZZ9KAudioStreamFeed(ZZ9KLibrary *library,
                         const ZZ9KAudioStreamFeedDesc *desc,
                         ZZ9KAudioStreamResult *result);

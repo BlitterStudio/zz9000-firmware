@@ -332,6 +332,34 @@ int main(int argc, char **argv)
      "int ZZ9KAudioStreamBeginEx(const ZZ9KAudioStreamBeginExDesc *desc, "
      "ZZ9KAudioStreamResult *result);",
      "jsr -348(a6)"},
+    {"ZZ9KVoiceOpen",
+     "ZZ9KVoiceOpen(desc,session)(a0/a1)",
+     "int ZZ9KVoiceOpen(const ZZ9KVoiceOpenDesc *desc, "
+     "ZZ9KVoiceSession *session);",
+     "jsr -354(a6)"},
+    {"ZZ9KVoiceClose",
+     "ZZ9KVoiceClose(session)(a0)",
+     "int ZZ9KVoiceClose(ZZ9KVoiceSession *session);",
+     "jsr -360(a6)"},
+    {"ZZ9KVoiceReset",
+     "ZZ9KVoiceReset(session)(a0)",
+     "int ZZ9KVoiceReset(ZZ9KVoiceSession *session);",
+     "jsr -366(a6)"},
+    {"ZZ9KVoiceUpload",
+     "ZZ9KVoiceUpload(session,desc)(a0/a1)",
+     "int ZZ9KVoiceUpload(ZZ9KVoiceSession *session, "
+     "const ZZ9KVoiceUploadDesc *desc);",
+     "jsr -372(a6)"},
+    {"ZZ9KVoiceWrite",
+     "ZZ9KVoiceWrite(session,records,count)(a0/a1/d0)",
+     "uint32_t ZZ9KVoiceWrite(ZZ9KVoiceSession *session, "
+     "const ZZ9KVoiceRecord *records, uint32_t count);",
+     "jsr -378(a6)"},
+    {"ZZ9KVoiceGetStatus",
+     "ZZ9KVoiceGetStatus(session,status)(a0/a1)",
+     "int ZZ9KVoiceGetStatus(ZZ9KVoiceSession *session, "
+     "ZZ9KVoiceStatus *status);",
+     "jsr -384(a6)"},
   };
   char *fd;
   char *clib;
@@ -374,13 +402,14 @@ int main(int argc, char **argv)
     ok &= expect_contains("proto", proto, expected[i].lvo_token);
   }
   /* The ZZ9KApp* calls were removed in revision 41: no trace of them in the
-   * metadata, and the table ends at ZZ9KAudioStreamBeginEx. */
+   * metadata. Revision 42 reuses their vectors from -354 for the voice calls,
+   * and the table ends at ZZ9KVoiceGetStatus (-384). */
   ok &= expect_absent("fd", fd, "ZZ9KApp");
   ok &= expect_absent("clib", clib, "ZZ9KApp");
   ok &= expect_absent("clib", clib, "app_client");
   ok &= expect_absent("proto", proto, "ZZ9KApp");
   ok &= expect_absent("proto", proto, "app_client");
-  ok &= expect_absent("proto", proto, "jsr -354(a6)");
+  ok &= expect_absent("proto", proto, "jsr -390(a6)");
 
   free(fd);
   free(clib);

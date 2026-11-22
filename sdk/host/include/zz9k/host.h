@@ -12,6 +12,7 @@
 #include "zz9k/abi.h"
 #include "zz9k/crypto.h"
 #include "zz9k/text.h"
+#include "zz9k/voice.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -323,6 +324,40 @@ int zz9k_audio_ring_session_begin(ZZ9KContext *ctx,
  * never began is BAD_REQUEST; the release status is returned. */
 int zz9k_audio_ring_session_end(ZZ9KContext *ctx,
                                 ZZ9KAudioRingSession *session);
+
+/* Wavetable voice engine session (ZZ9K_OP_AUDIO_VOICE_*, zz9k/voice.h).
+ *
+ * zz9k_voice_open allocates the command ring, status block and staging
+ * buffer in the host window (ZZ9K_ALLOC_HOST_WINDOW), sends OPEN, and fills
+ * *session with the grant and the Amiga-visible pointers. A refused open, or
+ * any failure after the first allocation, frees everything it took and
+ * leaves *session zeroed. Zorro II only has the 16 KiB host window, so the
+ * default 2 KiB ring and 4 KiB staging buffer keep it usable next to AHI. */
+int zz9k_voice_open(ZZ9KContext *ctx, const ZZ9KVoiceOpenDesc *desc,
+                    ZZ9KVoiceSession *session);
+/* Closes the session and frees its three buffers, whatever the close status;
+ * *session is zeroed. Returns the close status, or the first free failure. */
+int zz9k_voice_close(ZZ9KContext *ctx, ZZ9KVoiceSession *session);
+/* Drops every queued record and silences all voices; samples, master gain
+ * and the timeline stay. */
+int zz9k_voice_reset(ZZ9KContext *ctx, ZZ9KVoiceSession *session);
+/* Copies desc->length bytes through the staging buffer into the bank at
+ * desc->bank_offset in staging-sized COPY requests, then defines the sample
+ * with one DEFINE. The caller must not rewrite bytes a voice is playing. */
+int zz9k_voice_upload(ZZ9KContext *ctx, ZZ9KVoiceSession *session,
+                      const ZZ9KVoiceUploadDesc *desc);
+/* Writes up to count records into the ring, never more than the free space
+ * (read cursor taken from the status block), then publishes the write cursor
+ * with one 16-bit store. Returns the number of records written. No mailbox
+ * call: pure shared-memory work, safe next to a blocked synchronous call. */
+uint32_t zz9k_voice_write(ZZ9KVoiceSession *session,
+                          const ZZ9KVoiceRecord *records, uint32_t count);
+/* Reads the status block and refreshes the session heartbeat by bumping the
+ * ring heartbeat word; call it at least every ZZ9K_VOICE_HEARTBEAT_MS
+ * (500 ms). The card closes the session after 2 s without it or a voice
+ * mailbox call (upload and reset count as liveness too; write does not).
+ * No mailbox call. */
+int zz9k_voice_status(ZZ9KVoiceSession *session, ZZ9KVoiceStatus *status);
 int zz9k_video_session_begin(ZZ9KContext *ctx,
                              const ZZ9KVideoSessionBeginDesc *desc,
                              ZZ9KVideoSessionResult *result);

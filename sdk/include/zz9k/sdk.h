@@ -17,6 +17,7 @@
 #include "zz9k/image_geometry.h"
 #include "zz9k/image.h"
 #include "zz9k/audio.h"
+#include "zz9k/voice.h"
 #include "zz9k/shared.h"
 #include "zz9k/crypto.h"
 #include "zz9k/compression.h"

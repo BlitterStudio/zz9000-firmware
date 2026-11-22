@@ -21,6 +21,7 @@ and programs that use the card.
 | [zz9k-amissl-provider.md](../sdk/docs/zz9k-amissl-provider.md) | The OpenSSL 3 provider for AmiSSL applications. |
 | [zz9k-picture-datatype.md](../sdk/docs/zz9k-picture-datatype.md) | `zz9k-picture.datatype` for JPEG, PNG, and WebP. |
 | [zz9k-sound-datatype.md](../sdk/docs/zz9k-sound-datatype.md) | `zz9k-sound.datatype` for MP3, FLAC, and Ogg Vorbis. |
+| [zz9k-voice.md](../sdk/docs/zz9k-voice.md) | The ZZ9000AX voice engine: up to 32 sample voices driven by timestamped commands, with `zz9k-voiceplay`. |
 | [zzplay.md](../sdk/docs/zzplay.md) | The ZZPlay media player. |
 | [zz9k-68k-offload.md](../sdk/docs/zz9k-68k-offload.md) | The experimental 68k runner and offload model. |
 | [zz9k-modules.md](../sdk/docs/zz9k-modules.md) | Service manifests and the service registry helpers. |

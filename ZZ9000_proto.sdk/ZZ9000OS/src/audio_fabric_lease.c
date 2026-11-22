@@ -81,8 +81,8 @@ static inline void fabric_ring_put_be32(volatile uint8_t *p, uint32_t v)
  * Board-visible offsets are ARM addresses minus ADDR_ADJ.
  */
 struct fabric_ring_map {
-	uint8_t *ring[AUDIO_FABRIC_SLOT_COUNT];    /* [1..slot_count] */
-	uint8_t *control[AUDIO_FABRIC_SLOT_COUNT];
+	uint8_t *ring[AUDIO_FABRIC_LEASE_SLOT_END];    /* [1..slot_count] */
+	uint8_t *control[AUDIO_FABRIC_LEASE_SLOT_END];
 	uint32_t capacity;
 	uint32_t slot_count;   /* leaseable slots (Z3: 2, Z2: 1) */
 	uint8_t zorro2;
@@ -99,12 +99,12 @@ static uint32_t g_ring_heartbeat_timeout_ms =
 void audio_fabric_host_set_ring_grant(uint32_t slot, uint8_t *ring,
 	uint8_t *control, uint32_t capacity)
 {
-	if (slot == 0U || slot >= AUDIO_FABRIC_SLOT_COUNT)
+	if (slot == 0U || slot >= AUDIO_FABRIC_LEASE_SLOT_END)
 		return;
 	g_ring_host_map.ring[slot] = ring;
 	g_ring_host_map.control[slot] = control;
 	g_ring_host_map.capacity = capacity;
-	g_ring_host_map.slot_count = AUDIO_FABRIC_SLOT_COUNT - 1U;
+	g_ring_host_map.slot_count = AUDIO_FABRIC_LEASE_SLOTS;
 	g_ring_host_map.zorro2 = 0U;
 }
 
@@ -177,7 +177,7 @@ static int fabric_slot_leaseable(uint32_t slot,
 	const struct fabric_ring_map *map)
 {
 	if (slot == AUDIO_FABRIC_SLOT_PUMP ||
-	    slot >= AUDIO_FABRIC_SLOT_COUNT)
+	    slot >= AUDIO_FABRIC_LEASE_SLOT_END)
 		return 0;
 	return slot <= map->slot_count;
 }
@@ -191,7 +191,7 @@ static struct fabric_ring_record {
 	uint32_t heartbeat_ms;
 	uint8_t revoked;
 	uint8_t status;         /* SDK_AUDIO_RING_STATUS_* at revoke */
-} g_ring_record[AUDIO_FABRIC_SLOT_COUNT];
+} g_ring_record[AUDIO_FABRIC_LEASE_SLOT_END];
 
 static void fabric_ring_record(uint32_t slot, uint32_t generation,
 	uint32_t identity, uint32_t heartbeat_ms, uint8_t revoked,
@@ -225,7 +225,7 @@ void fabric_lease_reset_rings(void)
 	if (!fabric_ring_map(&map))
 		return;
 	for (slot = AUDIO_FABRIC_SLOT_MAILBOX; slot <
-	     AUDIO_FABRIC_SLOT_COUNT; slot++) {
+	     AUDIO_FABRIC_LEASE_SLOT_END; slot++) {
 		if (map.ring[slot] != NULL)
 			fabric_ring_zero(map.ring[slot], map.control[slot],
 				map.capacity);
@@ -444,7 +444,7 @@ void fabric_lease_isr_tick(void)
 	uint32_t slot;
 
 	for (slot = AUDIO_FABRIC_SLOT_MAILBOX;
-	     slot < AUDIO_FABRIC_SLOT_COUNT; slot++) {
+	     slot < AUDIO_FABRIC_LEASE_SLOT_END; slot++) {
 		struct audio_fabric_slot *s = fabric_slot(slot);
 		struct audio_fabric_lease *l = &s->lease;
 		struct fabric_ring_producer_view view;
@@ -693,11 +693,11 @@ static void fabric_swap_s16be(int16_t *samples, uint32_t bytes)
  * not re-enter the poll scratch; it finishes the claimed period from
  * the pre-FIR converter snapshot instead of skipping it. */
 static uint8_t g_lease_poll_busy;
-static struct zz_audio_convert g_poll_snap[AUDIO_FABRIC_SLOT_COUNT];
-static uint64_t g_poll_inflight_src[AUDIO_FABRIC_SLOT_COUNT];
-static uint8_t g_poll_inflight[AUDIO_FABRIC_SLOT_COUNT];
-static uint8_t g_poll_stolen[AUDIO_FABRIC_SLOT_COUNT];
-static uint8_t g_poll_metered[AUDIO_FABRIC_SLOT_COUNT];
+static struct zz_audio_convert g_poll_snap[AUDIO_FABRIC_LEASE_SLOT_END];
+static uint64_t g_poll_inflight_src[AUDIO_FABRIC_LEASE_SLOT_END];
+static uint8_t g_poll_inflight[AUDIO_FABRIC_LEASE_SLOT_END];
+static uint8_t g_poll_stolen[AUDIO_FABRIC_LEASE_SLOT_END];
+static uint8_t g_poll_metered[AUDIO_FABRIC_LEASE_SLOT_END];
 
 void audio_fabric_lease_poll(void)
 {
@@ -710,7 +710,7 @@ void audio_fabric_lease_poll(void)
 	g_lease_poll_busy = 1U;
 
 	for (slot = AUDIO_FABRIC_SLOT_MAILBOX;
-	     slot < AUDIO_FABRIC_SLOT_COUNT; slot++) {
+	     slot < AUDIO_FABRIC_LEASE_SLOT_END; slot++) {
 		struct audio_fabric_slot *s = fabric_slot(slot);
 		struct fabric_lease_preconvert *p;
 		struct audio_fabric_lease *l;
@@ -968,7 +968,7 @@ static void fabric_lease_finish_inflight(uint32_t periods)
 	uint32_t slot;
 
 	for (slot = AUDIO_FABRIC_SLOT_MAILBOX;
-	     slot < AUDIO_FABRIC_SLOT_COUNT; slot++) {
+	     slot < AUDIO_FABRIC_LEASE_SLOT_END; slot++) {
 		struct audio_fabric_slot *s = fabric_slot(slot);
 		struct fabric_lease_preconvert *p;
 		struct audio_fabric_lease *l;
@@ -1063,7 +1063,7 @@ static void fabric_lease_catchup_unclaimed(uint32_t periods)
 	uint32_t slot;
 
 	for (slot = AUDIO_FABRIC_SLOT_MAILBOX;
-	     slot < AUDIO_FABRIC_SLOT_COUNT; slot++) {
+	     slot < AUDIO_FABRIC_LEASE_SLOT_END; slot++) {
 		struct audio_fabric_slot *s = fabric_slot(slot);
 		struct fabric_lease_preconvert *p;
 		struct audio_fabric_lease *l;
@@ -1182,7 +1182,7 @@ static uint32_t fabric_converting_count(void)
 	uint32_t count = 0U;
 	uint32_t i;
 
-	for (i = 0U; i < AUDIO_FABRIC_SLOT_COUNT; i++) {
+	for (i = 0U; i < AUDIO_FABRIC_LEASE_SLOT_END; i++) {
 		struct audio_fabric_slot *s = fabric_slot(i);
 
 		if (s == NULL || !s->attached)
@@ -1352,7 +1352,9 @@ int audio_fabric_slot_state(uint32_t slot, uint32_t pump_identity,
 	uint32_t epoch_before;
 	uint32_t attempts = 0U;
 
-	if (s == NULL || out == NULL)
+	/* The voice slot is firmware-owned: it has no lease state to
+	 * report, so a state read of it fails like any bad slot. */
+	if (s == NULL || out == NULL || slot >= AUDIO_FABRIC_LEASE_SLOT_END)
 		return 0;
 retry:
 	memset(out, 0, sizeof(*out));

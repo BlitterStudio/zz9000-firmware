@@ -220,6 +220,8 @@ C_SRCS = \
 	$(SRC_DIR)/ax.c \
 	$(SRC_DIR)/audio_fabric.c \
 	$(SRC_DIR)/audio_fabric_lease.c \
+	$(SRC_DIR)/audio_voice.c \
+	$(SRC_DIR)/audio_voice_session.c \
 	$(SRC_DIR)/audio_capture.c \
 	$(SRC_DIR)/audio_convert.c \
 	$(SRC_DIR)/audio_convert_tables.c \

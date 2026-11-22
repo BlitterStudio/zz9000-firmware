@@ -232,6 +232,7 @@ Use the focused headers when a smaller include set suits the program:
 | `zz9k/image.h` | One-shot and streaming image decode descriptors |
 | `zz9k/shared.h` | Shared-buffer byte-access helpers |
 | `zz9k/audio.h` | MP3 decode and streaming audio descriptors |
+| `zz9k/voice.h` | Voice engine descriptors, command records and status helpers |
 | `zz9k/compression.h` | Decompression and streaming decompression descriptors |
 | `zz9k/crypto.h` | Hash, HMAC, Poly1305, ChaCha20, and AEAD descriptors |
 | `zz9k/text.h` | Status text for tools and applications |
@@ -242,6 +243,7 @@ and Zorro II service limits are in
 [`docs/zz9k-zorro2-services.md`](docs/zz9k-zorro2-services.md). The SDK also
 includes documentation for [the picture DataType](docs/zz9k-picture-datatype.md),
 [the sound DataType](docs/zz9k-sound-datatype.md),
+[the voice engine](docs/zz9k-voice.md),
 [ZZPlay](docs/zzplay.md), and [the AmiSSL provider](docs/zz9k-amissl-provider.md).
 
 ## Compatibility

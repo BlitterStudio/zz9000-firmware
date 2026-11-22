@@ -93,6 +93,7 @@ copy_tree() {
 GUIDE_SPECS="README.md:ZZ9000-SDK \
 docs/zz9k-library.md:zz9k-library \
 docs/zz9k-zorro2-services.md:zz9k-zorro2-services \
+docs/zz9k-voice.md:zz9k-voice \
 docs/zz9k-picture-datatype.md:zz9k-picture-datatype \
 docs/zz9k-sound-datatype.md:zz9k-sound-datatype \
 docs/zzplay.md:ZZPlay \

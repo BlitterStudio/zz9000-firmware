@@ -13,6 +13,7 @@
 #include "zz9k/caps.h"
 #include "zz9k/reply.h"
 #include "zz9k/request.h"
+#include "zz9k/shared.h"
 #include <errno.h>
 #include <string.h>
 
@@ -2817,6 +2818,314 @@ int zz9k_audio_ring_session_end(ZZ9KContext *ctx,
   if (status != ZZ9K_STATUS_OK) {
     return status;
   }
+  return ZZ9K_STATUS_OK;
+}
+
+/* ---- Wavetable voice engine (zz9k/voice.h) ---- */
+
+static int zz9k_voice_alloc_buffer(ZZ9KContext *ctx, uint32_t length,
+                                   ZZ9KSharedBuffer *buffer)
+{
+  int status = zz9k_alloc_shared(ctx, length, ZZ9K_VOICE_BUFFER_ALIGN,
+                                 ZZ9K_ALLOC_HOST_WINDOW, buffer);
+
+  if (status != ZZ9K_STATUS_OK) {
+    return status;
+  }
+  /* The ring cursor is one 16-bit store and the status words are read as
+   * 16-bit halves, so the board pointers must be even. The firmware
+   * alignment request already makes them 64-byte aligned. */
+  if ((((uintptr_t)buffer->data) & 3U) != 0U) {
+    (void)zz9k_free_shared(ctx, buffer->handle);
+    memset(buffer, 0, sizeof(*buffer));
+    return ZZ9K_STATUS_INTERNAL_ERROR;
+  }
+  return ZZ9K_STATUS_OK;
+}
+
+/* Frees whichever of the three handles is set; returns the first failure. */
+static int zz9k_voice_free_buffers(ZZ9KContext *ctx, uint32_t ring_handle,
+                                   uint32_t status_handle,
+                                   uint32_t staging_handle)
+{
+  uint32_t handles[3];
+  int result = ZZ9K_STATUS_OK;
+  uint32_t i;
+
+  handles[0] = ring_handle;
+  handles[1] = status_handle;
+  handles[2] = staging_handle;
+  for (i = 0U; i < 3U; i++) {
+    if (handles[i] != ZZ9K_INVALID_HANDLE) {
+      int status = zz9k_free_shared(ctx, handles[i]);
+
+      if (result == ZZ9K_STATUS_OK) {
+        result = status;
+      }
+    }
+  }
+  return result;
+}
+
+static int zz9k_voice_session_call(ZZ9KContext *ctx, uint16_t opcode,
+                                   uint32_t session)
+{
+  ZZ9KRequest request;
+  ZZ9KMailboxEntry reply;
+  int status;
+
+  memset(&reply, 0, sizeof(reply));
+  status = zz9k_request_audio_voice_session(&request, opcode, session);
+  if (status != ZZ9K_STATUS_OK) {
+    return status;
+  }
+  return zz9k_call(ctx, &request, &reply, ZZ9K_DEFAULT_TIMEOUT_TICKS);
+}
+
+int zz9k_voice_open(ZZ9KContext *ctx, const ZZ9KVoiceOpenDesc *desc,
+                    ZZ9KVoiceSession *session)
+{
+  ZZ9KSharedBuffer ring;
+  ZZ9KSharedBuffer status_block;
+  ZZ9KSharedBuffer staging;
+  ZZ9KRequest request;
+  ZZ9KMailboxEntry reply;
+  ZZ9KVoiceGrant grant;
+  uint32_t ring_bytes;
+  uint32_t staging_bytes;
+  uint32_t raw_session = 0U;
+  int status;
+
+  if (!ctx || !desc || !session) {
+    return ZZ9K_STATUS_BAD_REQUEST;
+  }
+  memset(session, 0, sizeof(*session));
+
+  ring_bytes = desc->ring_bytes != 0U ? desc->ring_bytes
+                                      : ZZ9K_VOICE_RING_DEFAULT_BYTES;
+  staging_bytes = desc->staging_bytes != 0U
+                      ? desc->staging_bytes
+                      : ZZ9K_VOICE_STAGING_DEFAULT_BYTES;
+  if (ring_bytes < ZZ9K_VOICE_RING_MIN_BYTES ||
+      ring_bytes > ZZ9K_VOICE_RING_MAX_BYTES || staging_bytes < 4U) {
+    return ZZ9K_STATUS_BAD_REQUEST;
+  }
+  /* Validate the descriptor before any allocation: the builder checks the
+   * request fields and only needs three distinct handles for that. */
+  status = zz9k_request_audio_voice_open(&request, 1U, 2U, 3U, desc);
+  if (status != ZZ9K_STATUS_OK) {
+    return status;
+  }
+
+  memset(&ring, 0, sizeof(ring));
+  memset(&status_block, 0, sizeof(status_block));
+  memset(&staging, 0, sizeof(staging));
+  status = zz9k_voice_alloc_buffer(ctx, ring_bytes, &ring);
+  if (status != ZZ9K_STATUS_OK) {
+    return status;
+  }
+  status = zz9k_voice_alloc_buffer(ctx, ZZ9K_VOICE_STATUS_BYTES,
+                                   &status_block);
+  if (status != ZZ9K_STATUS_OK) {
+    (void)zz9k_voice_free_buffers(ctx, ring.handle, ZZ9K_INVALID_HANDLE,
+                                  ZZ9K_INVALID_HANDLE);
+    return status;
+  }
+  status = zz9k_voice_alloc_buffer(ctx, staging_bytes, &staging);
+  if (status != ZZ9K_STATUS_OK) {
+    (void)zz9k_voice_free_buffers(ctx, ring.handle, status_block.handle,
+                                  ZZ9K_INVALID_HANDLE);
+    return status;
+  }
+
+  /* The firmware reads cursor 0 and a clean status block at open. */
+  (void)zz9k_shared_set(&ring, 0U, 0U, ZZ9K_VOICE_RING_HEADER_BYTES);
+  zz9k_put_be32((volatile uint8_t *)ring.data +
+                    ZZ9K_VOICE_RING_HEARTBEAT_OFFSET,
+                1U);
+  (void)zz9k_shared_set(&status_block, 0U, 0U, ZZ9K_VOICE_STATUS_BYTES);
+  zz9k_audio_ring_cache_flush(ring.data, ZZ9K_VOICE_RING_HEADER_BYTES);
+  zz9k_audio_ring_cache_flush(status_block.data, ZZ9K_VOICE_STATUS_BYTES);
+
+  memset(&reply, 0, sizeof(reply));
+  status = zz9k_request_audio_voice_open(&request, ring.handle,
+                                         status_block.handle,
+                                         staging.handle, desc);
+  if (status == ZZ9K_STATUS_OK) {
+    status = zz9k_call(ctx, &request, &reply, ZZ9K_DEFAULT_TIMEOUT_TICKS);
+  }
+  if (status == ZZ9K_STATUS_OK) {
+    /* Remember the session a malformed grant named, so it can be closed
+     * instead of leaking the firmware's bank. */
+    if (zz9k_reply_require(&reply, ZZ9K_OP_AUDIO_VOICE_OPEN,
+                           sizeof(ZZ9KAudioVoiceOpenResultPayload)) ==
+        ZZ9K_STATUS_OK) {
+      raw_session = zz9k_get_be32(&reply.payload.inline_data[0]);
+    }
+    status = zz9k_reply_audio_voice_open_result(&reply, &grant);
+  }
+  if (status == ZZ9K_STATUS_OK &&
+      grant.ring_records != zz9k_voice_ring_records_for_bytes(ring_bytes)) {
+    status = ZZ9K_STATUS_INTERNAL_ERROR;
+  }
+  if (status != ZZ9K_STATUS_OK) {
+    if (raw_session != 0U) {
+      (void)zz9k_voice_session_call(ctx, ZZ9K_OP_AUDIO_VOICE_CLOSE,
+                                    raw_session);
+    }
+    (void)zz9k_voice_free_buffers(ctx, ring.handle, status_block.handle,
+                                  staging.handle);
+    memset(session, 0, sizeof(*session));
+    return status;
+  }
+
+  session->grant = grant;
+  session->ring_handle = ring.handle;
+  session->status_handle = status_block.handle;
+  session->staging_handle = staging.handle;
+  session->ring_bytes = ring.length;
+  session->staging_bytes = staging.length;
+  session->ring = (volatile uint8_t *)ring.data;
+  session->status = (volatile uint8_t *)status_block.data;
+  session->staging = (volatile uint8_t *)staging.data;
+  session->write_cursor = 0U;
+  session->heartbeat = 1U;
+  session->mapped = 1U;
+  return ZZ9K_STATUS_OK;
+}
+
+int zz9k_voice_close(ZZ9KContext *ctx, ZZ9KVoiceSession *session)
+{
+  uint32_t ring_handle;
+  uint32_t status_handle;
+  uint32_t staging_handle;
+  int status;
+  int free_status;
+
+  if (!ctx || !session || !session->mapped) {
+    return ZZ9K_STATUS_BAD_REQUEST;
+  }
+  ring_handle = session->ring_handle;
+  status_handle = session->status_handle;
+  staging_handle = session->staging_handle;
+  status = zz9k_voice_session_call(ctx, ZZ9K_OP_AUDIO_VOICE_CLOSE,
+                                   session->grant.session);
+  /* A stale session (the firmware already closed it on a missed heartbeat)
+   * has unpinned the buffers too, so they are freed either way. */
+  free_status = zz9k_voice_free_buffers(ctx, ring_handle, status_handle,
+                                        staging_handle);
+  memset(session, 0, sizeof(*session));
+  return status != ZZ9K_STATUS_OK ? status : free_status;
+}
+
+int zz9k_voice_reset(ZZ9KContext *ctx, ZZ9KVoiceSession *session)
+{
+  if (!ctx || !session || !session->mapped) {
+    return ZZ9K_STATUS_BAD_REQUEST;
+  }
+  return zz9k_voice_session_call(ctx, ZZ9K_OP_AUDIO_VOICE_RESET,
+                                 session->grant.session);
+}
+
+int zz9k_voice_upload(ZZ9KContext *ctx, ZZ9KVoiceSession *session,
+                      const ZZ9KVoiceUploadDesc *desc)
+{
+  ZZ9KSharedBuffer staging;
+  ZZ9KRequest request;
+  ZZ9KMailboxEntry reply;
+  const uint8_t *src;
+  uint32_t done = 0U;
+  uint32_t chunk;
+  int status;
+
+  if (!ctx || !session || !session->mapped || !desc || !desc->data ||
+      desc->length == 0U ||
+      desc->sample_id >= session->grant.max_samples ||
+      desc->bank_offset > session->grant.bank_bytes ||
+      desc->length > session->grant.bank_bytes - desc->bank_offset) {
+    return ZZ9K_STATUS_BAD_REQUEST;
+  }
+  /* Refuse a sample the DEFINE would reject before any byte is copied. */
+  status = zz9k_request_audio_voice_upload(
+      &request, session->grant.session, ZZ9K_VOICE_UPLOAD_FLAG_DEFINE, 0U, 0U,
+      0U, desc->sample_id, desc->bank_offset, desc->length, desc->format);
+  if (status != ZZ9K_STATUS_OK) {
+    return status;
+  }
+
+  staging.handle = session->staging_handle;
+  staging.data = session->staging;
+  staging.length = session->staging_bytes;
+  src = (const uint8_t *)desc->data;
+  while (done < desc->length) {
+    chunk = desc->length - done;
+    if (chunk > session->staging_bytes) {
+      /* Whole longwords per round trip keeps the staging copy aligned. */
+      chunk = session->staging_bytes & ~3U;
+    }
+    if (!zz9k_shared_copy_to(&staging, 0U, src + done, chunk)) {
+      return ZZ9K_STATUS_INTERNAL_ERROR;
+    }
+    zz9k_audio_ring_cache_flush(staging.data, chunk);
+    status = zz9k_request_audio_voice_upload(
+        &request, session->grant.session, ZZ9K_VOICE_UPLOAD_FLAG_COPY, 0U,
+        desc->bank_offset + done, chunk, 0U, 0U, 0U, 0U);
+    if (status == ZZ9K_STATUS_OK) {
+      memset(&reply, 0, sizeof(reply));
+      status = zz9k_call(ctx, &request, &reply, ZZ9K_DEFAULT_TIMEOUT_TICKS);
+    }
+    if (status != ZZ9K_STATUS_OK) {
+      return status;
+    }
+    done += chunk;
+  }
+
+  status = zz9k_request_audio_voice_upload(
+      &request, session->grant.session, ZZ9K_VOICE_UPLOAD_FLAG_DEFINE, 0U, 0U,
+      0U, desc->sample_id, desc->bank_offset, desc->length, desc->format);
+  if (status != ZZ9K_STATUS_OK) {
+    return status;
+  }
+  memset(&reply, 0, sizeof(reply));
+  return zz9k_call(ctx, &request, &reply, ZZ9K_DEFAULT_TIMEOUT_TICKS);
+}
+
+uint32_t zz9k_voice_write(ZZ9KVoiceSession *session,
+                          const ZZ9KVoiceRecord *records, uint32_t count)
+{
+  uint16_t read_cursor;
+  uint32_t staged;
+
+  if (!session || !session->mapped || !records || count == 0U) {
+    return 0U;
+  }
+  zz9k_audio_ring_cache_invalidate(session->status, ZZ9K_VOICE_STATUS_BYTES);
+  read_cursor = zz9k_voice_load_be16(session->status +
+                                     ZZ9K_VOICE_STATUS_READ_CURSOR_OFFSET);
+  staged = zz9k_voice_ring_stage(session, read_cursor, records, count);
+  if (staged == 0U) {
+    return 0U;
+  }
+  /* Records reach the card before the cursor that announces them. */
+  zz9k_audio_ring_cache_flush(session->ring + ZZ9K_VOICE_RING_HEADER_BYTES,
+                              session->ring_bytes -
+                                  ZZ9K_VOICE_RING_HEADER_BYTES);
+  zz9k_voice_ring_publish(session);
+  zz9k_audio_ring_cache_flush(session->ring, ZZ9K_VOICE_RING_HEADER_BYTES);
+  return staged;
+}
+
+int zz9k_voice_status(ZZ9KVoiceSession *session, ZZ9KVoiceStatus *status)
+{
+  if (!session || !session->mapped || !status) {
+    return ZZ9K_STATUS_BAD_REQUEST;
+  }
+  zz9k_audio_ring_cache_invalidate(session->status, ZZ9K_VOICE_STATUS_BYTES);
+  zz9k_voice_status_read(session->status, status);
+  session->heartbeat++;
+  zz9k_put_be32(session->ring + ZZ9K_VOICE_RING_HEARTBEAT_OFFSET,
+                session->heartbeat);
+  zz9k_audio_ring_cache_flush(session->ring, ZZ9K_VOICE_RING_HEADER_BYTES);
   return ZZ9K_STATUS_OK;
 }
 

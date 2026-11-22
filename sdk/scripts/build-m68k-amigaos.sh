@@ -163,6 +163,16 @@ if [ ! -f "$SWAPSTACK" ]; then
   SWAPSTACK="build/m68k/swapstack.o"
 fi
 m68k-amigaos-gcc $CFLAGS -Iamiga/include -Itools build/m68k/zz9k_host.o $ZZPLAY_SOURCES "$SWAPSTACK" -o build/zzplay
+# Voice engine player: libpt4 (zlib, without its float renderer, which the
+# player never calls) and the event layer built beside the tool.
+for src in api load replay tables voice; do
+  m68k-amigaos-gcc $CFLAGS -Itools -c tools/libpt4/src/$src.c -o build/m68k/pt4-$src.o
+done
+m68k-amigaos-gcc $CFLAGS -Itools -c tools/zz9k-voice-pt4.c -o build/m68k/zz9k-voice-pt4.o
+m68k-amigaos-gcc $LIBCFLAGS -Itools build/m68k/pt4-api.o \
+  build/m68k/pt4-load.o build/m68k/pt4-replay.o build/m68k/pt4-tables.o \
+  build/m68k/pt4-voice.o build/m68k/zz9k-voice-pt4.o \
+  tools/zz9k-voiceplay.c "$SWAPSTACK" -o build/zz9k-voiceplay
 m68k-amigaos-gcc $LIBCFLAGS tools/zz9k-mpega-smoke.c -o build/zz9k-mpega-smoke
 m68k-amigaos-gcc $CFLAGS -Itools build/m68k/zz9k_host.o build/m68k/zz9k-fb-common.o build/m68k/zz9k-image-window.o build/m68k/zz9k-picture-viewer.o tools/zz9k-jpeg.c -o build/zz9k-jpeg
 m68k-amigaos-gcc $CFLAGS -Itools build/m68k/zz9k_host.o build/m68k/zz9k-fb-common.o build/m68k/zz9k-image-window.o build/m68k/zz9k-picture-viewer.o tools/zz9k-png.c -o build/zz9k-png

@@ -1,8 +1,9 @@
 # Audio fabric
 
-The audio fabric mixes SDK playback and direct-ring audio sources into the
-formatter TX ring. Firmware advertises it through `SDK_CAP_AUDIO_FABRIC`,
-`SDK_SERVICE_FLAG_AUDIO_FABRIC`, and `SDK_SERVICE_FLAG_AUDIO_FABRIC_RATE`.
+The audio fabric mixes SDK playback, direct-ring audio sources and the voice
+engine into the formatter TX ring. Firmware advertises it through
+`SDK_CAP_AUDIO_FABRIC`, `SDK_SERVICE_FLAG_AUDIO_FABRIC`, and
+`SDK_SERVICE_FLAG_AUDIO_FABRIC_RATE`.
 The fabric owns the output while a producer is active, so register-driven
 legacy playback cannot retarget the formatter during a mixed session.
 
@@ -16,6 +17,7 @@ formatter exposes the MM2S stream interface that reads this ring.
 flowchart LR
   Pump["SDK playback pump<br/>slot 0"] --> Fabric
   Lease["Direct-ring lease<br/>slot 1 or 2"] --> Rate
+  Voice["Voice engine<br/>slot 3"] --> Fabric
   Rate["48 kHz: direct<br/>other accepted rates: main-loop conversion"] --> Fabric["audio_fabric_isr<br/>period mix and TX-ring write"]
   Fabric --> TX["8-period formatter TX ring"]
   TX --> Formatter["audio formatter MM2S"]
@@ -28,17 +30,40 @@ retirement and underrun state. A late, paused, absent, or malformed source
 contributes silence for that period. Its underrun counter changes without
 blocking the other slots.
 
-The slot table has three entries.
+The slot table has four entries.
 
 | Slot | Producer | Availability |
 | --- | --- | --- |
 | 0 | SDK playback pump | Always reserved for firmware |
 | 1 | Direct-ring lease | Leaseable when the active bus map provides it |
 | 2 | Direct-ring lease | Leaseable on Zorro III; otherwise depends on the bus map |
+| 3 | Voice engine | Firmware-owned; attached while a voice session is open |
 
 Zorro III provides two direct-ring grants. Zorro II provides one compact grant
 when the generation-2 aperture contract is valid and acknowledged. Older
 Zorro II bitstreams provide no grant map, so acquire returns `UNSUPPORTED`.
+
+## Voice engine slot
+
+Slot 3 is the firmware-owned voice slot. The firmware attaches it while a
+voice engine session is open and never leases or grants it to a client. An
+open session fails with `BUSY` while a register-driven client owns the
+output.
+
+The voice engine renders on the core-0 main loop, from
+`audio_voice_session_poll()`. It renders whole periods until its frame
+counter is the granted lead past the playing frame, and writes them into a
+staging ring of 40 periods that serves as the slot's source ring. The
+fabric ISR only copies periods out of that ring, as it does for the other
+slots, and the slot's retirement gives the playing frame that clients read.
+The slot produces 48 kHz stereo S16, so it needs no conversion.
+
+Closing a session detaches the slot, and a reset clears it. Both drop the
+periods already queued in the TX ring and request a rebuild from the
+remaining producers, so at most the period the DMA is playing still carries
+voice audio. The lead floor is the fabric's fill-ahead of six periods plus
+two periods of main-loop jitter; the client contract is in
+[zz9k-voice.md](../sdk/docs/zz9k-voice.md).
 
 ## Ownership and direct rings
 
@@ -59,8 +84,10 @@ does not pass through mailbox payloads.
 | `SDK_OP_AUDIO_RING_ACQUIRE` | `0x0513` | Acquire a generation-bound PCM ring and control block |
 | `SDK_OP_AUDIO_RING_RELEASE` | `0x0514` | Release a generation-bound lease |
 
-The audio service advertises 23 opcodes, `0x0500` through `0x0516`. The
-retired copy-submit range `0x050f` through `0x0511` remains reserved.
+The audio service advertises 28 opcodes, `0x0500` through `0x051B`. The
+retired copy-submit range `0x050f` through `0x0511` remains reserved, as do
+`0x0501` and `0x0502`. The voice engine opcodes `0x0518` through `0x051B` are
+inside the count, and the voice service flag is set on Zorro III only.
 
 A successful acquire zeroes the PCM ring and control block, publishes a fresh
 generation, and begins in `LEASED`. The slot becomes `ACTIVE` after the first
@@ -113,16 +140,18 @@ other accepted rate is converted into 48 kHz periods by
 `audio_fabric_lease_poll()` on the core-0 main loop. The ISR copies those
 staged periods; it does not run the lease FIR conversion.
 
-At most two live producers may require conversion across the three slots. A
-48 kHz bypass lease may acquire a free slot. An acquire that would exceed the
-conversion limit returns `BUSY`. The SDK playback pump also counts when its
-bound source rate differs from 48 kHz.
+At most two live producers may require conversion across the pump and the two
+lease slots. A 48 kHz bypass lease may acquire a free slot. An acquire that
+would exceed the conversion limit returns `BUSY`. The SDK playback pump also
+counts when its bound source rate differs from 48 kHz. The voice slot renders
+at 48 kHz and never needs conversion.
 
 | Capability or flag | Value | Meaning |
 | --- | --- | --- |
 | `SDK_CAP_AUDIO_FABRIC` | bit 27 | Audio fabric is available |
 | `SDK_SERVICE_FLAG_AUDIO_FABRIC` | bit 22 | Direct-ring audio fabric is available in the audio service |
 | `SDK_SERVICE_FLAG_AUDIO_FABRIC_RATE` | bit 23 | Source-rate leases are available |
+| `SDK_SERVICE_FLAG_AUDIO_VOICE` | bit 28 | Voice engine opcodes are advertised. The firmware sets it on Zorro III; it is not set on Zorro II yet |
 
 Clients should check the capability and service flags before using the
 opcodes. Firmware that does not recognize the source-rate flag returns

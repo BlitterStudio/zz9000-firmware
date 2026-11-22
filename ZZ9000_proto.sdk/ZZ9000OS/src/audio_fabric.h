@@ -15,11 +15,13 @@
  *   FABRIC_ACTIVE      the compositor owns the output; legacy entry is
  *                      rejected and the formatter is never repointed.
  *
- * Producer #1 is the SDK pump slot (audio streams and media sessions,
- * routed implicitly from their first bind); slots 2 and 3 are the
+ * Slot 0 is the SDK pump slot (audio streams and media sessions,
+ * routed implicitly from their first bind); slots 1 and 2 are the
  * direct-ring lease plane (opcodes 0x0512+: the SDK producer writes
  * PCM and a seqlock control line straight into its board-visible
- * grant; mailbox copy-submit is never on the data path). The per-slot
+ * grant; mailbox copy-submit is never on the data path). Slot 3 is
+ * the firmware-owned voice slot: a synthesized 48-kHz producer that
+ * the firmware attaches itself, never leased or granted. The per-slot
  * mix discipline is saturating int32 accumulate then one S16 clamp
  * per frame (KTD4); a late, absent, paused or malformed producer
  * contributes silence without stalling the others and only its own
@@ -42,11 +44,19 @@ enum audio_fabric_ownership {
 	AUDIO_FABRIC_ACTIVE = 2,
 };
 
-/* Bounded slot table (R4): the pump slot plus the lease plane (U3). */
+/* Bounded slot table (R4): the pump slot, the two lease slots (U3)
+ * and the firmware-owned voice slot. Loops that mean "lease slots"
+ * stop at AUDIO_FABRIC_LEASE_SLOT_END; compositor loops walk every
+ * slot up to AUDIO_FABRIC_SLOT_COUNT. */
 #define AUDIO_FABRIC_SLOT_PUMP     0U
 #define AUDIO_FABRIC_SLOT_MAILBOX  1U
 #define AUDIO_FABRIC_SLOT_RESERVED 2U
-#define AUDIO_FABRIC_SLOT_COUNT    3U
+#define AUDIO_FABRIC_SLOT_VOICE    3U
+#define AUDIO_FABRIC_SLOT_COUNT    4U
+/* One past the last lease slot (slots MAILBOX..END-1 are leaseable). */
+#define AUDIO_FABRIC_LEASE_SLOT_END AUDIO_FABRIC_SLOT_VOICE
+#define AUDIO_FABRIC_LEASE_SLOTS \
+	(AUDIO_FABRIC_LEASE_SLOT_END - AUDIO_FABRIC_SLOT_MAILBOX)
 
 /* Per-slot balance scale (SDK_AUDIO_BALANCE_* vocabulary, 0..255).
  * Every slot is unity until the lease plane programs real gains. */
@@ -314,9 +324,10 @@ int audio_fabric_ring_release(uint32_t slot, uint32_t generation);
  * vocabulary; other slots take the lease identity). hold_reset
  * consumes the lease peak-hold window on the next compositor read
  * (the scene-meter read-and-clear convention). Returns 0 for a bad
- * slot. The pump slot is never leased: it reports 0 peak/clip and
- * UNKNOWN heartbeat -- its telemetry lives with the scene meter,
- * which already scans the mixed output.
+ * slot, the firmware-owned voice slot included. The pump slot is
+ * never leased: it reports 0 peak/clip and UNKNOWN heartbeat -- its
+ * telemetry lives with the scene meter, which already scans the
+ * mixed output.
  */
 int audio_fabric_slot_state(uint32_t slot, uint32_t pump_identity,
 	int hold_reset, struct audio_fabric_slot_state *out);
