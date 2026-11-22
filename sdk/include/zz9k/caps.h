@@ -168,7 +168,7 @@ static inline uint32_t zz9k_known_service_flag_count(uint32_t service_id)
     return 18U;
   }
   if (service_id == ZZ9K_SERVICE_AUDIO) {
-    return 17U;
+    return 18U;
   }
   if (service_id == ZZ9K_SERVICE_CODEC) {
     return 19U;
@@ -301,6 +301,8 @@ static inline uint32_t zz9k_known_service_flag(uint32_t service_id,
       return ZZ9K_SERVICE_FLAG_AUDIO_STREAM_REDUCE;
     case 16:
       return ZZ9K_SERVICE_FLAG_AUDIO_VOICE;
+    case 17:
+      return ZZ9K_SERVICE_FLAG_AUDIO_VOICE_STEREO;
     default:
       return 0U;
     }
@@ -552,6 +554,8 @@ static inline const char *zz9k_service_flag_name(uint32_t service_id,
       return "stream-reduce";
     case ZZ9K_SERVICE_FLAG_AUDIO_VOICE:
       return "audio-voice";
+    case ZZ9K_SERVICE_FLAG_AUDIO_VOICE_STEREO:
+      return "audio-voice-stereo";
     default:
       return 0;
     }

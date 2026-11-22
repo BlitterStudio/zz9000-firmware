@@ -232,7 +232,7 @@ Use the focused headers when a smaller include set suits the program:
 | `zz9k/image.h` | One-shot and streaming image decode descriptors |
 | `zz9k/shared.h` | Shared-buffer byte-access helpers |
 | `zz9k/audio.h` | MP3 decode and streaming audio descriptors |
-| `zz9k/voice.h` | Voice engine descriptors, command records and status helpers |
+| `zz9k/voice.h` | Voice engine descriptors, sample formats, command records, status helpers and timing helpers |
 | `zz9k/compression.h` | Decompression and streaming decompression descriptors |
 | `zz9k/crypto.h` | Hash, HMAC, Poly1305, ChaCha20, and AEAD descriptors |
 | `zz9k/text.h` | Status text for tools and applications |

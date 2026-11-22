@@ -9,7 +9,8 @@
  *
  * This header carries the mailbox payload layouts (opcodes
  * ZZ9K_OP_AUDIO_VOICE_* in zz9k/abi.h), the ring, record and status layouts,
- * and the pure helpers that build records and read the status block. The
+ * and the pure helpers that build records, read the status block and compute
+ * the engine's rate step and pass timing. The
  * session calls that allocate buffers and talk to the card are declared in
  * zz9k/host.h (zz9k_voice_*) and zz9k.library (ZZ9KVoice*).
  *
@@ -71,8 +72,20 @@ extern "C" {
 #define ZZ9K_VOICE_UPLOAD_FLAG_KNOWN \
   (ZZ9K_VOICE_UPLOAD_FLAG_COPY | ZZ9K_VOICE_UPLOAD_FLAG_DEFINE)
 
-#define ZZ9K_VOICE_FORMAT_S8  0U /* signed 8-bit */
-#define ZZ9K_VOICE_FORMAT_S16 1U /* signed 16-bit, big-endian */
+#define ZZ9K_VOICE_FORMAT_S8  0U /* signed 8-bit, mono */
+#define ZZ9K_VOICE_FORMAT_S16 1U /* signed 16-bit, big-endian, mono */
+/* Stereo formats: interleaved frames, left sample then right sample, as AHI
+ * stores them. A client may use them when the audio service reports
+ * ZZ9K_SERVICE_FLAG_AUDIO_VOICE_STEREO. */
+#define ZZ9K_VOICE_FORMAT_S8S  2U /* signed 8-bit, 2 bytes per frame */
+#define ZZ9K_VOICE_FORMAT_S16S 3U /* signed 16-bit big-endian, 4 bytes per frame */
+#define ZZ9K_VOICE_FORMAT_COUNT 4U /* formats 0 .. COUNT - 1 are valid */
+
+/* Highest voice rate in Hz. The engine clamps a SET above it. */
+#define ZZ9K_VOICE_RATE_MAX_HZ 192000U
+
+/* Returned by zz9k_voice_pass_frames() when a pass never ends. */
+#define ZZ9K_VOICE_PASS_NEVER 0xFFFFFFFFU
 
 /* ---- Mailbox payloads (48 bytes, big-endian) ---- */
 
@@ -339,6 +352,86 @@ typedef struct ZZ9KVoiceUploadDesc {
 } ZZ9KVoiceUploadDesc;
 
 /* ---- Pure helpers ---- */
+
+/* Whether format is one of ZZ9K_VOICE_FORMAT_*. */
+static inline uint32_t zz9k_voice_format_valid(uint32_t format)
+{
+  return format < ZZ9K_VOICE_FORMAT_COUNT ? 1U : 0U;
+}
+
+/* Shift from bytes to frames: a frame is 1, 2, 2 or 4 bytes for S8, S16, S8S
+ * and S16S. The engine rounds every byte offset and length down to a frame
+ * with it. A format that is not valid reads as 0. */
+static inline uint32_t zz9k_voice_format_frame_shift(uint32_t format)
+{
+  switch (format) {
+  case ZZ9K_VOICE_FORMAT_S16:
+  case ZZ9K_VOICE_FORMAT_S8S:
+    return 1U;
+  case ZZ9K_VOICE_FORMAT_S16S:
+    return 2U;
+  default:
+    return 0U;
+  }
+}
+
+/* The engine's step for a rate in Hz: output frames advance a voice by this
+ * many 1/65536 sample frames, ((min(hz, 192000) << 16) / 48000). The engine
+ * ignores a SET of 0 Hz and keeps the old step, so 0 Hz returns 0 here and
+ * means no change. Single source of the rate arithmetic: the firmware engine
+ * test pins it to audio_voice.c. */
+static inline uint32_t zz9k_voice_rate_step(uint32_t hz)
+{
+  if (hz > ZZ9K_VOICE_RATE_MAX_HZ) {
+    hz = ZZ9K_VOICE_RATE_MAX_HZ;
+  }
+  return (uint32_t)(((uint64_t)hz << 16) / ZZ9K_VOICE_OUTPUT_RATE);
+}
+
+/* Frames a voice renders until its pass ends. The voice is about to render
+ * the frame at sample index pos with 16-bit fraction frac, and moves by step
+ * (zz9k_voice_rate_step()) per output frame. All positions are in sample
+ * frames, not bytes. The result k is at least 1 and the first frame of the
+ * next pass (the loop, or silence) is k frames later.
+ *
+ * Forward: bound is the pass end, and the pass ends at the first frame whose
+ * position, pos + ((frac + k * step) >> 16), reaches bound. Backward: bound
+ * is the loop start, the lower limit, and the pass ends at the first frame
+ * whose position falls below it. A step that would take the position below
+ * index 0 counts as below the loop start. A forward position at or past
+ * bound, or a backward one already below it, ends the pass in 1 frame.
+ *
+ * Returns ZZ9K_VOICE_PASS_NEVER when step is 0 or the pass does not fit in
+ * 32 bits. Single source of the pass timing arithmetic: the firmware engine
+ * test pins it to advance() in audio_voice.c. */
+static inline uint32_t zz9k_voice_pass_frames(int backward, uint32_t pos,
+                                              uint32_t frac, uint32_t bound,
+                                              uint32_t step)
+{
+  uint64_t k;
+
+  if (step == 0U) {
+    return ZZ9K_VOICE_PASS_NEVER;
+  }
+  if (!backward) {
+    uint64_t need;
+
+    if (pos >= bound) {
+      return 1U;
+    }
+    need = ((uint64_t)(bound - pos) << 16) - frac;
+    k = (need + step - 1U) / step;
+  } else {
+    uint64_t at = ((uint64_t)pos << 16) | frac;
+    uint64_t low = (uint64_t)bound << 16;
+
+    k = at < low ? 1U : (at - low) / step + 1U;
+  }
+  if (k > 0xFFFFFFFFU) {
+    return ZZ9K_VOICE_PASS_NEVER;
+  }
+  return (uint32_t)k;
+}
 
 /* Record capacity of a ring of ring_bytes, or 0 when it is too small. */
 static inline uint32_t zz9k_voice_ring_records_for_bytes(uint32_t ring_bytes)
