@@ -446,7 +446,7 @@ static void test_api_sleep_atomic_against_injected_irq(void)
 	g_test_deadline_at_irq = 0U;
 	test_clock_hook = hook_trigger_sleep_irq;
 
-	CHECK(zzapp_kernel_api_sleep(&kernel, 0, 10u) == 0);
+	CHECK(zzapp_kernel_api_sleep(&kernel, 0, 10000u) == 0);
 	/* Unmask delivered the pended IRQ, which ran switch_frame. */
 	CHECK(g_test_irq_fired == 1);
 	CHECK(g_test_state_at_irq == ZZAPP_THREAD_SLEEPING);

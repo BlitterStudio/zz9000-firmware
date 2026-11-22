@@ -406,8 +406,11 @@ zzapp_arm_frame_t *zzapp_kernel_switch_frame(zzapp_kernel_t *kernel,
  * call: returns the selected return frame. */
 zzapp_arm_frame_t *zzapp_kernel_svc_return(zzapp_arm_frame_t *frame);
 int zzapp_kernel_block(zzapp_kernel_t *kernel, uint32_t pid);
-/* Atomically release API lock, snapshot now, and enter SLEEPING under IRQ mask. */
-int zzapp_kernel_api_sleep(zzapp_kernel_t *kernel, uint32_t pid, uint64_t sleep_ms);
+/* Atomically release API lock, snapshot now, and enter SLEEPING under IRQ
+ * mask. The sleep lasts at least `sleep_us` microseconds of
+ * zzapp_kernel_now_us(); the deadline (a millisecond of the kernel clock)
+ * is the first boundary at or after the reading plus `sleep_us`. */
+int zzapp_kernel_api_sleep(zzapp_kernel_t *kernel, uint32_t pid, uint64_t sleep_us);
 int zzapp_kernel_wake(zzapp_kernel_t *kernel, uint32_t pid,
 		zzapp_wake_reason_t reason);
 int zzapp_kernel_sleep(zzapp_kernel_t *kernel, uint32_t pid,

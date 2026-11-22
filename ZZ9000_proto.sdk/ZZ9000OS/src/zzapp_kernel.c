@@ -2049,9 +2049,33 @@ int zzapp_kernel_api_block(zzapp_kernel_t *kernel, uint32_t pid)
 	return rc;
 }
 
-int zzapp_kernel_api_sleep(zzapp_kernel_t *kernel, uint32_t pid, uint64_t sleep_ms)
+/* The kernel clock, in whole milliseconds, as of the microsecond reading
+ * `now_us`: the committed count plus the whole milliseconds of the clock
+ * since the slice began (the same difference of floored readings the tick
+ * adds). Unlike zzapp_kernel_now it counts an idle core as well, so a
+ * deadline set from it is always on the clock's own millisecond boundaries. */
+static uint64_t kernel_ms_at(const zzapp_kernel_t *kernel, uint64_t now_us)
+{
+	uint32_t elapsed_ms;
+	uint32_t elapsed_us;
+
+	slice_elapsed(kernel, now_us, &elapsed_ms, &elapsed_us);
+	return kernel->now + elapsed_ms;
+}
+
+/*
+ * The sleeper wakes when the millisecond clock reaches the deadline, and the
+ * clock steps on the microsecond reading's millisecond boundaries. A
+ * deadline of `now_ms + ceil(sleep_us / 1000)` would end the sleep early by
+ * the fraction of the millisecond already elapsed when it began, so the
+ * fraction is added before rounding up: the deadline is the first boundary
+ * at or after `now_us + sleep_us`, never before it. One clock reading,
+ * under the IRQ mask, gives both the count and the fraction.
+ */
+int zzapp_kernel_api_sleep(zzapp_kernel_t *kernel, uint32_t pid, uint64_t sleep_us)
 {
 	uint32_t irq_state;
+	uint64_t now_us;
 	uint64_t deadline;
 
 	if (!kernel_thread(kernel, pid))
@@ -2059,7 +2083,9 @@ int zzapp_kernel_api_sleep(zzapp_kernel_t *kernel, uint32_t pid, uint64_t sleep_
 	irq_state = smp_local_irq_save();
 	if (kernel->api_lock_owner == (int)pid)
 		release_api_lock(kernel);
-	deadline = zzapp_kernel_now(kernel) + sleep_ms;
+	now_us = zzapp_kernel_now_us();
+	deadline = kernel_ms_at(kernel, now_us) +
+		   (sleep_us + now_us % 1000U + 999U) / 1000U;
 	if (zzapp_kernel_sleep(kernel, pid, deadline) == 0)
 		kernel_words(kernel, pid)->api_resume_waiting = 1U;
 	smp_local_irq_restore(irq_state);

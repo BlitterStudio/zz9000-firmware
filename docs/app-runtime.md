@@ -238,8 +238,13 @@ the caller at the SVC handoff. `aar_gl_swap` parks through its flip.
 Completion wakes the record READY; file and directory waits wake TIMEOUT after
 30 seconds and return `AAR_E_TIMEDOUT`. Stop wakes a parked waiter (an EVENT
 waiter wakes READY and then sees the stop); waiting service calls return
-`AAR_E_IO`. `aar_event_poll` and `aar_display_vsync` do not park; the
-latter only yields once.
+`AAR_E_IO`. `aar_sleep_us(us)` lasts at least `us` microseconds of the
+`aar_time_us` clock. The scheduler counts whole milliseconds of that clock,
+so the deadline is the first millisecond boundary at or after the start plus
+`us` (the start's millisecond plus `us` rounded up would end the sleep early
+by the fraction of the millisecond already elapsed); the tick that finds it
+due wakes the sleeper. `aar_event_poll` and `aar_display_vsync` do not park;
+the latter only yields once.
 
 A service the app asks of its client is a request on the SQ. A record has
 four request table entries: a blocking one (file, list, console read,

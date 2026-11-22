@@ -1697,6 +1697,8 @@ void zzapp_host_yield_wait(void)
                                       scheduler_perf_stamp());
 #endif
     if (!host->api_parked) {
+        /* Park until the next millisecond of the kernel clock: one
+         * microsecond's deadline rounds up to that boundary. */
         (void)zzapp_kernel_api_sleep(&g_kernel, slot, 1U);
     } else {
         (void)zzapp_kernel_api_block(&g_kernel, slot);
@@ -1734,8 +1736,7 @@ void zzapp_host_sleep(uint32_t us)
         zzapp_kernel_perf_service_end(&g_kernel, ZZAPP_PERF_SERVICE_SVC,
                                       scheduler_perf_stamp());
 #endif
-    (void)zzapp_kernel_api_sleep(&g_kernel, slot,
-        (uint64_t)((us + 999u) / 1000u));
+    (void)zzapp_kernel_api_sleep(&g_kernel, slot, us);
 #ifndef ZZAPP_HOST_TEST
     __asm__ __volatile__("svc 0" ::: "memory");
     api_lock_until_acquired(slot);
