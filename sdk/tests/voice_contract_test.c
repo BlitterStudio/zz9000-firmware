@@ -122,7 +122,9 @@ static void test_layouts(void)
   CHECK(offsetof(ZZ9KVoiceStatusWire, underruns) == 20U);
   CHECK(offsetof(ZZ9KVoiceStatusWire, dropped) == 24U);
   CHECK(offsetof(ZZ9KVoiceStatusWire, session) == 28U);
-  CHECK(offsetof(ZZ9KVoiceStatusWire, reserved) == 32U);
+  CHECK(offsetof(ZZ9KVoiceStatusWire, margin_min_us) == 32U);
+  CHECK(offsetof(ZZ9KVoiceStatusWire, poll_gap_max_us) == 36U);
+  CHECK(offsetof(ZZ9KVoiceStatusWire, reserved) == 40U);
   CHECK(ZZ9K_VOICE_STATUS_PLAYING_FRAME_OFFSET == 0U);
   CHECK(ZZ9K_VOICE_STATUS_HORIZON_OFFSET == 4U);
   CHECK(ZZ9K_VOICE_STATUS_READ_CURSOR_OFFSET == 8U);
@@ -132,6 +134,9 @@ static void test_layouts(void)
   CHECK(ZZ9K_VOICE_STATUS_UNDERRUNS_OFFSET == 20U);
   CHECK(ZZ9K_VOICE_STATUS_DROPPED_OFFSET == 24U);
   CHECK(ZZ9K_VOICE_STATUS_SESSION_OFFSET == 28U);
+  CHECK(ZZ9K_VOICE_STATUS_MARGIN_OFFSET == 32U);
+  CHECK(ZZ9K_VOICE_STATUS_POLL_GAP_OFFSET == 36U);
+  CHECK(ZZ9K_VOICE_JITTER_NONE == 0xFFFFFFFFU);
 
   CHECK(ZZ9K_VOICE_OP_START == 1U && ZZ9K_VOICE_OP_LOOP == 2U &&
         ZZ9K_VOICE_OP_SET == 3U && ZZ9K_VOICE_OP_STOP == 4U &&
@@ -222,6 +227,33 @@ static void test_status_block_read(void)
   CHECK(s.underruns == 0x33333333UL);
   CHECK(s.dropped == 0x44444444UL);
   CHECK(s.session == 0x55555555UL);
+}
+
+static void test_jitter_read(void)
+{
+  uint8_t block[ZZ9K_VOICE_STATUS_BYTES];
+  ZZ9KVoiceJitter j;
+  ZZ9KVoiceStatus s;
+
+  /* A block from firmware that predates the telemetry: both words zero. */
+  memset(block, 0, sizeof(block));
+  zz9k_voice_jitter_read(block, &j);
+  CHECK(j.margin_min_us == 0U && j.poll_gap_max_us == 0U);
+
+  put_status_word(block, 28, 0x55555555UL);
+  put_status_word(block, ZZ9K_VOICE_STATUS_MARGIN_OFFSET, 0x00012345UL);
+  put_status_word(block, ZZ9K_VOICE_STATUS_POLL_GAP_OFFSET, 0x00067890UL);
+  zz9k_voice_jitter_read(block, &j);
+  CHECK(j.margin_min_us == 0x00012345UL);
+  CHECK(j.poll_gap_max_us == 0x00067890UL);
+  /* The status decode leaves the other words alone. */
+  zz9k_voice_status_read(block, &s);
+  CHECK(s.session == 0x55555555UL);
+
+  put_status_word(block, ZZ9K_VOICE_STATUS_MARGIN_OFFSET,
+                  ZZ9K_VOICE_JITTER_NONE);
+  zz9k_voice_jitter_read(block, &j);
+  CHECK(j.margin_min_us == ZZ9K_VOICE_JITTER_NONE);
 }
 
 /* A scripted 16-bit source that returns a queued sequence, so a tear (the
@@ -1591,6 +1623,7 @@ int main(void)
   test_layouts();
   test_records();
   test_status_block_read();
+  test_jitter_read();
   test_read32_tear();
   test_ring_math();
   test_stage_then_publish();

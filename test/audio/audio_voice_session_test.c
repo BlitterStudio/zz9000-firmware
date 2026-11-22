@@ -861,6 +861,100 @@ static void scenario_stall(void)
 	      fmt("horizon=%u playing=%u", st_horizon(), st_playing()));
 }
 
+/* ---- B2. jitter telemetry ---- */
+
+static uint32_t st_margin(void)
+{
+	return st32(AUDIO_VOICE_STATUS_OFF_MARGIN);
+}
+
+static uint32_t st_gap(void)
+{
+	return st32(AUDIO_VOICE_STATUS_OFF_POLL_GAP);
+}
+
+/* A period whose ISR lands skew_ms after the poll (the clock is 1 ms per
+ * XTime tick in the host shim, so one tick is 1000 microseconds). */
+static void period_skew(uint32_t skew_ms)
+{
+	bench_clock += 20U - skew_ms;
+	beat();
+	audio_voice_session_poll();
+	bench_clock += skew_ms;
+	dma_tick(1);
+	audio_fabric_isr();
+}
+
+static void scenario_jitter(void)
+{
+	uint32_t i;
+	uint32_t before;
+
+	fresh();
+	check(open_session(7680U, 4U) == SDK_STATUS_OK, "jitter: open", "");
+	check(st_margin() == AUDIO_VOICE_STATUS_MARGIN_NONE && st_gap() == 0U,
+	      "jitter: margin reads none and the gap zero before any period",
+	      fmt("margin=%x gap=%u", st_margin(), st_gap()));
+	(void)upload_ramp(g_grant.session);
+	rec_start_ramp(960U * 400U, 0U);
+	publish();
+	for (i = 0U; i < 40U; i++)
+		period_skew(3U);
+	/* Lead 8 against fill-ahead 6: the period an ISR takes was rendered
+	 * one poll earlier, so it waited one period plus the skew. */
+	check(st_margin() == 23000U,
+	      "jitter: margin is the age of the period when the ISR takes it",
+	      fmt("margin=%u", st_margin()));
+	check(st_gap() == 20000U,
+	      "jitter: a poll in every period reports a gap of one period",
+	      fmt("gap=%u", st_gap()));
+	check(st_underruns() == 0U && st_state() == AUDIO_VOICE_STATE_LIVE,
+	      "jitter: telemetry leaves the counters alone",
+	      fmt("underruns=%u state=%u", st_underruns(), st_state()));
+	{
+		uint32_t w;
+		int clear = 1;
+
+		for (w = 40U; w < AUDIO_VOICE_STATUS_BYTES; w++)
+			if (g_status[w] != 0U)
+				clear = 0;
+		check(clear, "jitter: the bytes after the two words stay zero",
+		      "");
+	}
+
+	/* The poll stops for 3 periods: the gap shows it, the period the
+	 * stall made late is taken right after the poll that rendered it
+	 * (margin 0 with no skew), and the underruns are counted. */
+	before = st_underruns();
+	for (i = 0U; i < 3U; i++) {
+		bench_clock += 20U;
+		dma_tick(1);
+		audio_fabric_isr();
+	}
+	period(1);
+	/* The status is written by the poll, so the margin the ISR just
+	 * recorded shows one poll later. */
+	period(1);
+	check(st_gap() >= 60000U,
+	      "jitter: a stalled poll shows in the gap",
+	      fmt("gap=%u", st_gap()));
+	check(st_margin() == 0U,
+	      "jitter: the late period waited no time for the ISR",
+	      fmt("margin=%u", st_margin()));
+	check(st_underruns() > before,
+	      "jitter: the stall is counted as an underrun as before",
+	      fmt("underruns %u -> %u", before, st_underruns()));
+
+	/* A new session starts the telemetry again. */
+	check(audio_voice_session_close(g_grant.session) == SDK_STATUS_OK,
+	      "jitter: close", "");
+	fresh();
+	check(open_session(7680U, 4U) == SDK_STATUS_OK, "jitter: reopen", "");
+	check(st_margin() == AUDIO_VOICE_STATUS_MARGIN_NONE && st_gap() == 0U,
+	      "jitter: a new session starts from none and zero",
+	      fmt("margin=%x gap=%u", st_margin(), st_gap()));
+}
+
 /* ---- C. status counters ---- */
 
 static void scenario_status(void)
@@ -1446,6 +1540,7 @@ int main(void)
 	scenario_lead(7680U);
 	scenario_lead(24000U);
 	scenario_stall();
+	scenario_jitter();
 	scenario_status();
 	scenario_reset();
 	scenario_peer_detach(7680U);

@@ -70,6 +70,17 @@ struct voice_session {
 	uint64_t heartbeat_ms;   /* when the heartbeat last changed */
 	uint32_t underrun_base;
 	uint32_t underruns;
+	/*
+	 * Jitter telemetry. The poll stamps each period it renders with a
+	 * timer tick (0 = not stamped) and keeps the largest gap between
+	 * polls; the fabric ISR keeps the smallest age of a period when it
+	 * takes it, in raw ticks so it does no division.
+	 */
+	uint64_t period_stamp[STAGING_PERIODS];
+	volatile uint32_t margin_min_ticks; /* ISR writes, 0xFFFFFFFF = none */
+	uint64_t last_poll_ticks;
+	uint64_t poll_gap_max_ticks;
+	uint8_t poll_seen;
 	/* Byte cursors of the staging ring. */
 	volatile uint64_t produced;
 	volatile uint64_t consumed;
@@ -141,6 +152,23 @@ static uint64_t now_ms(void)
 	return (uint64_t)t * 1000U / COUNTS_PER_SECOND;
 }
 
+static uint64_t now_ticks(void)
+{
+	XTime t;
+
+	XTime_GetTime(&t);
+	return (uint64_t)t;
+}
+
+/* Timer ticks to microseconds, kept below the "none" marker. */
+static uint32_t ticks_to_us(uint64_t ticks)
+{
+	uint64_t us = ticks * 1000000U / COUNTS_PER_SECOND;
+
+	return us >= AUDIO_VOICE_STATUS_MARGIN_NONE ?
+		AUDIO_VOICE_STATUS_MARGIN_NONE - 1U : (uint32_t)us;
+}
+
 /*
  * Every request the client makes of its open session proves it is there, so
  * the heartbeat timeout restarts: a long multi-chunk upload keeps a session
@@ -170,6 +198,22 @@ static int voice_stage(uint32_t bytes)
 {
 	if (bytes > g_s.produced - g_s.consumed)
 		return 0;
+	/* Age of the period the ISR takes, for the margin telemetry: one
+	 * array load, one timer read and a compare, no division. */
+	if (g_s.slot_live) {
+		uint64_t stamp = g_s.period_stamp[
+			(g_s.consumed / PERIOD_BYTES) % STAGING_PERIODS];
+
+		if (stamp != 0U) {
+			uint64_t age = now_ticks() - stamp;
+			uint32_t ticks = age >= AUDIO_VOICE_STATUS_MARGIN_NONE ?
+				AUDIO_VOICE_STATUS_MARGIN_NONE - 1U :
+				(uint32_t)age;
+
+			if (ticks < g_s.margin_min_ticks)
+				g_s.margin_min_ticks = ticks;
+		}
+	}
 	g_s.consumed += bytes;
 	return 1;
 }
@@ -209,6 +253,12 @@ static void publish_status(void)
 	wr32(block + AUDIO_VOICE_STATUS_OFF_UNDERRUNS, underruns);
 	wr32(block + AUDIO_VOICE_STATUS_OFF_DROPPED, g_s.dropped);
 	wr32(block + AUDIO_VOICE_STATUS_OFF_SESSION, g_s.id);
+	wr32(block + AUDIO_VOICE_STATUS_OFF_MARGIN,
+	     g_s.margin_min_ticks == AUDIO_VOICE_STATUS_MARGIN_NONE ?
+	     AUDIO_VOICE_STATUS_MARGIN_NONE :
+	     ticks_to_us(g_s.margin_min_ticks));
+	wr32(block + AUDIO_VOICE_STATUS_OFF_POLL_GAP,
+	     ticks_to_us(g_s.poll_gap_max_ticks));
 	if (g_s.shadow_valid && memcmp(g_s.shadow, block, sizeof(block)) == 0)
 		return;
 	memcpy(g_s.res.status, block, sizeof(block));
@@ -247,6 +297,9 @@ static void render_to_lead(void)
 		if (g_s.queue_count == 0U)
 			g_s.queue_head = 0U;
 		Xil_DCacheFlushRange((INTPTR)out, PERIOD_BYTES);
+		if (g_s.slot_live)
+			g_s.period_stamp[(produced / PERIOD_BYTES) %
+				STAGING_PERIODS] = now_ticks();
 		irq_state = smp_local_irq_save();
 		g_s.produced = produced + PERIOD_BYTES;
 		smp_local_irq_restore(irq_state);
@@ -442,6 +495,7 @@ uint16_t audio_voice_session_open(const struct audio_voice_session_open *open,
 	audio_fabric_producer_rate_set(VOICE_SLOT, AUDIO_VOICE_OUT_HZ);
 
 	memset(&g_s, 0, sizeof(g_s));
+	g_s.margin_min_ticks = AUDIO_VOICE_STATUS_MARGIN_NONE;
 	g_s.res = *open;
 	g_s.voices = open->voices;
 	g_s.lead = lead;
@@ -577,6 +631,15 @@ void audio_voice_session_poll(void)
 
 	if (g_s.state == AUDIO_VOICE_STATE_CLOSED)
 		return;
+	{
+		uint64_t ticks = now_ticks();
+
+		if (g_s.poll_seen && ticks - g_s.last_poll_ticks >
+		    g_s.poll_gap_max_ticks)
+			g_s.poll_gap_max_ticks = ticks - g_s.last_poll_ticks;
+		g_s.last_poll_ticks = ticks;
+		g_s.poll_seen = 1U;
+	}
 	write_cursor = ring_write_cursor();
 	heartbeat = rd32(g_s.res.ring + AUDIO_VOICE_RING_OFF_HEARTBEAT);
 	now = now_ms();

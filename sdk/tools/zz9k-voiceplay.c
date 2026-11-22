@@ -507,6 +507,22 @@ static void report(const char *reason)
   printf("  late %lu, rejected %lu, underruns %lu, dropped %lu\n",
          (unsigned long)status.late, (unsigned long)status.rejected,
          (unsigned long)status.underruns, (unsigned long)status.dropped);
+  {
+    ZZ9KVoiceJitter jitter;
+
+    zz9k_voice_jitter_read(session.status, &jitter);
+    if (jitter.poll_gap_max_us == 0U) {
+      printf("  jitter: this firmware does not report it\n");
+    } else if (jitter.margin_min_us == ZZ9K_VOICE_JITTER_NONE) {
+      printf("  jitter: largest gap between firmware polls %lu us, no "
+             "period taken yet\n", (unsigned long)jitter.poll_gap_max_us);
+    } else {
+      printf("  jitter: smallest wait of a rendered period for the audio "
+             "interrupt %lu us, largest gap between firmware polls %lu us\n",
+             (unsigned long)jitter.margin_min_us,
+             (unsigned long)jitter.poll_gap_max_us);
+    }
+  }
   if (stat_have_margin) {
     printf("  smallest scheduling margin %ld frames (%ld us)\n",
            (long)stat_min_margin,

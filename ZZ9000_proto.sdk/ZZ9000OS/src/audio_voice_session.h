@@ -64,6 +64,15 @@
 #define AUDIO_VOICE_STATUS_OFF_UNDERRUNS 20U /* u32 */
 #define AUDIO_VOICE_STATUS_OFF_DROPPED   24U /* u32 */
 #define AUDIO_VOICE_STATUS_OFF_SESSION   28U /* u32 */
+/*
+ * Jitter telemetry, since open. MARGIN is the smallest time a rendered
+ * period waited for the fabric ISR to take it, in microseconds (0xFFFFFFFF
+ * until the first period is taken). POLL_GAP is the largest gap between two
+ * voice polls, in microseconds.
+ */
+#define AUDIO_VOICE_STATUS_OFF_MARGIN   32U /* u32 */
+#define AUDIO_VOICE_STATUS_OFF_POLL_GAP 36U /* u32 */
+#define AUDIO_VOICE_STATUS_MARGIN_NONE  0xFFFFFFFFU
 
 #define AUDIO_VOICE_STATE_CLOSED 0U
 #define AUDIO_VOICE_STATE_OPEN   1U /* open, no record yet */

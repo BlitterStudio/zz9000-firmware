@@ -223,6 +223,15 @@ typedef struct ZZ9KVoiceRecord {
 #define ZZ9K_VOICE_STATUS_DROPPED_OFFSET       24U /* u32 */
 #define ZZ9K_VOICE_STATUS_SESSION_OFFSET       28U /* u32 */
 
+/* Jitter telemetry (low-latency work), since open. The margin is the
+ * smallest time a rendered period waited for the audio interrupt to take
+ * it, in microseconds, and ZZ9K_VOICE_JITTER_NONE until the first period is
+ * taken. The poll gap is the largest gap between two firmware voice polls,
+ * in microseconds. Firmware without them leaves both words zero. */
+#define ZZ9K_VOICE_STATUS_MARGIN_OFFSET        32U /* u32 */
+#define ZZ9K_VOICE_STATUS_POLL_GAP_OFFSET      36U /* u32 */
+#define ZZ9K_VOICE_JITTER_NONE                 0xFFFFFFFFU
+
 #define ZZ9K_VOICE_STATE_CLOSED 0U
 #define ZZ9K_VOICE_STATE_OPEN   1U /* open, no record yet */
 #define ZZ9K_VOICE_STATE_LIVE   2U
@@ -237,7 +246,9 @@ typedef struct ZZ9KVoiceStatusWire {
   uint8_t underruns[4];
   uint8_t dropped[4];
   uint8_t session[4];
-  uint8_t reserved[32];
+  uint8_t margin_min_us[4];
+  uint8_t poll_gap_max_us[4];
+  uint8_t reserved[24];
 } ZZ9KVoiceStatusWire;
 
 typedef char ZZ9KVoiceStatusWire_is_64_bytes[
@@ -255,6 +266,14 @@ typedef struct ZZ9KVoiceStatus {
   uint32_t dropped;
   uint32_t session;
 } ZZ9KVoiceStatus;
+
+/* Host-order jitter telemetry, read by zz9k_voice_jitter_read(). It is not
+ * part of ZZ9KVoiceStatus so that a program built against the older, smaller
+ * struct keeps working with a library that fills it in. */
+typedef struct ZZ9KVoiceJitter {
+  uint32_t margin_min_us;   /* ZZ9K_VOICE_JITTER_NONE until the first period */
+  uint32_t poll_gap_max_us; /* 0 on firmware without the telemetry */
+} ZZ9KVoiceJitter;
 
 /* ---- Host-facing descriptors ---- */
 
@@ -427,6 +446,17 @@ static inline void zz9k_voice_status_read(const volatile uint8_t *block,
       zz9k_voice_read32(block, ZZ9K_VOICE_STATUS_UNDERRUNS_OFFSET);
   status->dropped = zz9k_voice_read32(block, ZZ9K_VOICE_STATUS_DROPPED_OFFSET);
   status->session = zz9k_voice_read32(block, ZZ9K_VOICE_STATUS_SESSION_OFFSET);
+}
+
+/* Reads the two jitter words of the status block, with the same tear
+ * protection and cache rule as zz9k_voice_status_read. */
+static inline void zz9k_voice_jitter_read(const volatile uint8_t *block,
+                                          ZZ9KVoiceJitter *jitter)
+{
+  jitter->margin_min_us =
+      zz9k_voice_read32(block, ZZ9K_VOICE_STATUS_MARGIN_OFFSET);
+  jitter->poll_gap_max_us =
+      zz9k_voice_read32(block, ZZ9K_VOICE_STATUS_POLL_GAP_OFFSET);
 }
 
 /* Encode and decode one record (big-endian wire form). */

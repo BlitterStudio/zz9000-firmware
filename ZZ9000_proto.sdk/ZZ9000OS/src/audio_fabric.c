@@ -319,6 +319,10 @@ static struct {
 	uint32_t dma_last;
 	uint32_t dma_step_max;
 	uint32_t dma_step_gt1;
+	/* ISR entry phase: bytes the DMA was into its period, the largest
+	 * seen, and a histogram (audio_playback_phase_bucket). */
+	uint32_t phase_max;
+	uint32_t phase_hist[AUDIO_PLAYBACK_PHASE_BUCKETS];
 	uint32_t rebase_count;
 	uint32_t rebase_ahead_last;
 	uint32_t starve_count[AUDIO_FABRIC_SLOT_COUNT];
@@ -395,6 +399,16 @@ void audio_fabric_bench_poll(void)
 		   (unsigned int)g_fabric_bench.dma_step_gt1,
 		   (unsigned int)g_fabric_bench.rebase_count,
 		   (unsigned int)g_fabric_bench.rebase_ahead_last);
+	xil_printf("FABRIC-BENCH phase maxus=%u hist(<0.5,1,2.5,5,10,>=10ms)="
+		   "%u/%u/%u/%u/%u/%u\r\n",
+		   (unsigned int)((g_fabric_bench.phase_max * 1000U) /
+				  (AUDIO_FABRIC_PERIOD_BYTES / 20U)),
+		   (unsigned int)g_fabric_bench.phase_hist[0],
+		   (unsigned int)g_fabric_bench.phase_hist[1],
+		   (unsigned int)g_fabric_bench.phase_hist[2],
+		   (unsigned int)g_fabric_bench.phase_hist[3],
+		   (unsigned int)g_fabric_bench.phase_hist[4],
+		   (unsigned int)g_fabric_bench.phase_hist[5]);
 	xil_printf("FABRIC-BENCH txzero periods=%u samples=%u\r\n",
 		   (unsigned int)g_fabric_bench.tx_zero_periods,
 		   (unsigned int)g_fabric_bench.tx_zero_samples);
@@ -984,6 +998,17 @@ static void audio_fabric_compositor_fill(void)
 	 * so a multi-period DMA jump does not play silence over published PCM. */
 	pos_period =
 		audio_get_dma_transfer_count() % AUDIO_FABRIC_RING_BYTES;
+#ifdef AUDIO_FABRIC_BENCH
+	{
+		uint32_t phase = audio_get_dma_transfer_count() %
+			AUDIO_FABRIC_PERIOD_BYTES;
+
+		if (phase > g_fabric_bench.phase_max)
+			g_fabric_bench.phase_max = phase;
+		g_fabric_bench.phase_hist[audio_playback_phase_bucket(
+			phase, AUDIO_FABRIC_PERIOD_BYTES)]++;
+	}
+#endif
 	pos_period -= pos_period % AUDIO_FABRIC_PERIOD_BYTES;
 	/* Count transmitter frames the DMA has reached while someone is
 	 * actually playing. The fill frontier runs ahead of this; that
