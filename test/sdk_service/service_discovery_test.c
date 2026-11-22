@@ -63,6 +63,19 @@ int main(void)
 			       (unsigned)expected[i].id);
 			return 1;
 		}
+		/*
+		 * The voice opcodes (0x0518..0x051B) are in the firmware but
+		 * unadvertised: the audio descriptor keeps its flag clear and
+		 * its opcode count at 23 until the engine is qualified on
+		 * hardware. Setting the flag and raising the count is the
+		 * change that flips this assertion.
+		 */
+		if (expected[i].id == SDK_SERVICE_AUDIO &&
+		    ((read_be32(info.flags) & SDK_SERVICE_FLAG_AUDIO_VOICE) != 0U ||
+		     read_be32(info.opcode_count) != 23U)) {
+			puts("service discovery: audio advertises the voice engine");
+			return 1;
+		}
 	}
 
 	if (find_service(0xffffU) != 0) {

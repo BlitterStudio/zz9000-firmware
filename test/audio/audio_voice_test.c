@@ -716,6 +716,53 @@ static void test_interpolation(void)
 	CHECK(g_out[2] == scaled(8192), "backward linear at 0.5: %d", g_out[2]);
 }
 
+/* The neighbour a linear read blends toward follows the loop: past the
+ * pass end it is the loop start going forward and the loop end going
+ * backward, not the sample itself. */
+static void test_interpolation_loop(void)
+{
+	struct audio_voice_cmd c[3];
+
+	/* Forward: {0, 64} looping over both samples, half a sample per
+	 * frame. Frame 3 sits half way between sample 1 and the loop start. */
+	setup(AUDIO_VOICE_CLOCK_PAL);
+	g_bank[1] = 64;
+	audio_voice_sample_set(&g_e, 0, 0, 2, AUDIO_VOICE_FMT_S8);
+	g_e.interp = AUDIO_VOICE_INTERP_LINEAR;
+	c[0] = c_hz(0, 24000);
+	c[1] = c_vol(0, VOL_FULL, VOL_FULL);
+	run_now(1, c, 2);
+	c[0] = c_start(0, 0, 0, 0);
+	c[1] = c_loop(0, 0, 2);
+	run_now(6, c, 2);
+	CHECK(g_out[0] == 0, "forward loop frame 0: %d", g_out[0]);
+	CHECK(g_out[2] == scaled(8192), "forward loop frame 1: %d", g_out[2]);
+	CHECK(g_out[4] == scaled(16384), "forward loop frame 2: %d", g_out[4]);
+	CHECK(g_out[6] == scaled(8192),
+	      "forward loop wrap frame: %d want %d", g_out[6], scaled(8192));
+	CHECK(g_out[8] == 0, "forward loop frame 4: %d", g_out[8]);
+	CHECK(g_out[10] == scaled(8192), "forward loop frame 5: %d", g_out[10]);
+
+	/* Backward from sample 1: at index 0 plus a half fraction the
+	 * neighbour is the loop end (sample 1). */
+	setup(AUDIO_VOICE_CLOCK_PAL);
+	g_bank[1] = 64;
+	audio_voice_sample_set(&g_e, 0, 0, 2, AUDIO_VOICE_FMT_S8);
+	g_e.interp = AUDIO_VOICE_INTERP_LINEAR;
+	c[0] = c_hz(0, 24000);
+	c[1] = c_vol(0, VOL_FULL, VOL_FULL);
+	run_now(1, c, 2);
+	c[0] = c_start(0, 0, 1, 0);
+	c[1] = c_loop(0, 0, 2);
+	c[2] = c_dir(0, 1);
+	run_now(4, c, 3);
+	CHECK(g_out[0] == scaled(16384), "backward loop frame 0: %d", g_out[0]);
+	CHECK(g_out[2] == scaled(8192),
+	      "backward loop wrap frame: %d want %d", g_out[2], scaled(8192));
+	CHECK(g_out[4] == 0, "backward loop frame 2: %d", g_out[4]);
+	CHECK(g_out[6] == scaled(16384), "backward loop frame 3: %d", g_out[6]);
+}
+
 static void test_stamp_wrap(void)
 {
 	struct audio_voice_cmd c[3];
@@ -771,6 +818,7 @@ int main(void)
 	test_saturation();
 	test_volume_and_master();
 	test_interpolation();
+	test_interpolation_loop();
 	test_stamp_wrap();
 
 	if (failures) {

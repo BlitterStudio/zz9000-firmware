@@ -212,10 +212,18 @@ static int32_t read_voice(const struct audio_voice_engine *e,
 		uint32_t n;
 		int32_t b;
 
-		if (v->backward)
-			n = v->pos > 0U ? v->pos - 1U : 0U;
-		else
-			n = v->pos + 1U < v->len ? v->pos + 1U : v->pos;
+		if (v->backward) {
+			if (v->pos > v->loopstart)
+				n = v->pos - 1U;
+			else
+				n = v->looplen != 0U ?
+				    v->loopstart + v->looplen - 1U : v->pos;
+		} else {
+			if (v->pos + 1U < v->end)
+				n = v->pos + 1U;
+			else
+				n = v->looplen != 0U ? v->loopstart : v->pos;
+		}
 		b = sample_at(e, v, n);
 		a += (int32_t)(((int64_t)(b - a) * (int64_t)v->frac) >> 16);
 	}

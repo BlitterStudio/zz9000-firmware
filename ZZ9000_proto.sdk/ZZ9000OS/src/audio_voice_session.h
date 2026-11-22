@@ -53,6 +53,8 @@
 
 /* Status block (written by the firmware poll only). */
 #define AUDIO_VOICE_STATUS_BYTES      64U
+/* Start address: the firmware flushes the block, so it owns its lines. */
+#define AUDIO_VOICE_STATUS_ALIGN      32U
 #define AUDIO_VOICE_STATUS_OFF_PLAYING   0U  /* u32 */
 #define AUDIO_VOICE_STATUS_OFF_HORIZON   4U  /* u32 */
 #define AUDIO_VOICE_STATUS_OFF_READ      8U  /* u16 */
@@ -124,8 +126,9 @@ struct audio_voice_session_upload {
  * caller can refuse before it allocates the bank. Returns OK or
  * SDK_STATUS_BAD_REQUEST.
  */
-uint16_t audio_voice_session_check(uint32_t ring_len, uint32_t status_len,
-	uint32_t bank_len, uint32_t voices, uint32_t flags);
+uint16_t audio_voice_session_check(uint32_t ring_len,
+	uintptr_t status_address, uint32_t status_len, uint32_t bank_len,
+	uint32_t voices, uint32_t flags);
 
 /* Nonzero while a session is open. */
 int audio_voice_session_active(void);

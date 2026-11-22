@@ -248,15 +248,15 @@ struct buffer {
 	uint32_t length;
 };
 
-static struct buffer alloc_buffer(uint16_t client, uint32_t length,
-	uint32_t flags)
+static struct buffer alloc_buffer_aligned(uint16_t client, uint32_t length,
+	uint32_t flags, uint32_t alignment)
 {
 	uint8_t payload[48];
 	struct buffer b = { 0U, NULL, 0U };
 
 	memset(payload, 0, sizeof(payload));
 	put32(payload, length);
-	put32(payload + 4, 16U);
+	put32(payload + 4, alignment);
 	put32(payload + 8, flags);
 	if (call(SDK_OP_ALLOC_SHARED, client, payload, 48U) ==
 	    SDK_STATUS_OK) {
@@ -265,6 +265,13 @@ static struct buffer alloc_buffer(uint16_t client, uint32_t length,
 		b.length = length;
 	}
 	return b;
+}
+
+/* The SDK allocates every voice buffer at 64 bytes. */
+static struct buffer alloc_buffer(uint16_t client, uint32_t length,
+	uint32_t flags)
+{
+	return alloc_buffer_aligned(client, length, flags, 64U);
 }
 
 static uint16_t free_buffer(uint16_t client, uint32_t handle)
@@ -482,6 +489,33 @@ static void test_open_refused(void)
 	other.status = small;
 	CHECK(do_open(1U, &other, BANK_BYTES, 0U, 0U, 4U) ==
 	      SDK_STATUS_BAD_REQUEST);
+	/* A status block that starts inside a cache line: the firmware
+	 * flushes it, so it would write a neighbour's line back. */
+	{
+		struct buffer pad[8];
+		unsigned pads = 0U;
+		unsigned p;
+
+		other = f;
+		for (;;) {
+			other.status = alloc_buffer_aligned(1U, STATUS_LEN,
+				SDK_ALLOC_HOST_WINDOW, 16U);
+			if (other.status.handle == 0U ||
+			    ((uintptr_t)other.status.ptr & 31U) != 0U ||
+			    pads + 2U > 8U)
+				break;
+			pad[pads++] = other.status;
+			pad[pads++] = alloc_buffer_aligned(1U, 16U,
+				SDK_ALLOC_HOST_WINDOW, 16U);
+		}
+		CHECK(other.status.handle != 0U &&
+		      ((uintptr_t)other.status.ptr & 31U) == 16U);
+		CHECK(do_open(1U, &other, BANK_BYTES, 0U, 0U, 4U) ==
+		      SDK_STATUS_BAD_REQUEST);
+		CHECK(free_buffer(1U, other.status.handle) == SDK_STATUS_OK);
+		for (p = 0U; p < pads; p++)
+			CHECK(free_buffer(1U, pad[p].handle) == SDK_STATUS_OK);
+	}
 	/* A ring under 16 records. */
 	small = alloc_buffer(1U, 16U + 15U * 16U, SDK_ALLOC_HOST_WINDOW);
 	other = f;

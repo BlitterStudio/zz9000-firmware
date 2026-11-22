@@ -4777,7 +4777,8 @@ static uint16_t handle_audio_voice_open(volatile struct SDKMailboxEntry *req,
 	staging = voice_client_buffer(staging_handle, client_id);
 	if (!ring || !status || !staging)
 		return complete_status(req, comp, SDK_STATUS_BAD_HANDLE);
-	rc = audio_voice_session_check(ring->length, status->length,
+	rc = audio_voice_session_check(ring->length,
+		(uintptr_t)status->address, status->length,
 		bank_bytes, get_be32(payload->voices),
 		get_be32(payload->flags));
 	if (rc != SDK_STATUS_OK)

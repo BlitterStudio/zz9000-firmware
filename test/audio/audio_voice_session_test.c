@@ -43,7 +43,11 @@ void smp_local_irq_restore(uint32_t saved_i_bit) { (void)saved_i_bit; }
 #define SAMPLE_ID 0U
 
 static uint8_t g_ring[RING_LEN];
-static uint8_t g_status[AUDIO_VOICE_STATUS_BYTES];
+/* The firmware writes and flushes the status block: it sits on its own
+ * cache lines. */
+static uint8_t g_status[AUDIO_VOICE_STATUS_BYTES] __attribute__((aligned(32)));
+static uint8_t g_status_spare[AUDIO_VOICE_STATUS_BYTES + 32U]
+	__attribute__((aligned(32)));
 static uint8_t g_staging[STAGING_LEN];
 static uint8_t g_bank[BANK_LEN];
 static int g_release_calls;
@@ -414,10 +418,18 @@ static void scenario_open_refused(void)
 	o = open_params(7680U, 4U, 0U);
 	o.bank_len = AUDIO_VOICE_BANK_MAX_BYTES + 1U;
 	refuse("open refused: bank over 32 MiB", o);
-	check(audio_voice_session_check(RING_LEN, 64U, 1U, 1U, 3U) ==
-	      SDK_STATUS_OK &&
-	      audio_voice_session_check(RING_LEN, 64U, 1U, 1U, 8U) ==
-	      SDK_STATUS_BAD_REQUEST,
+	o = open_params(7680U, 4U, 0U);
+	o.status = g_status_spare + 16U;
+	refuse("open refused: status block not 32-byte aligned", o);
+	o = open_params(7680U, 4U, 0U);
+	o.status = g_status_spare + 4U;
+	refuse("open refused: status block at a word boundary", o);
+	check(audio_voice_session_check(RING_LEN, (uintptr_t)g_status, 64U, 1U,
+	      1U, 3U) == SDK_STATUS_OK &&
+	      audio_voice_session_check(RING_LEN, (uintptr_t)g_status, 64U, 1U,
+	      1U, 8U) == SDK_STATUS_BAD_REQUEST &&
+	      audio_voice_session_check(RING_LEN, (uintptr_t)g_status + 16U,
+	      64U, 1U, 1U, 3U) == SDK_STATUS_BAD_REQUEST,
 	      "open refused: the side-effect-free check agrees", "");
 }
 
@@ -472,6 +484,271 @@ static int find_exact_start(uint32_t stamp)
 		return 1;
 	}
 	return 0;
+}
+
+/* ---- B2. ring wrap, cursor wrap, overrun ---- */
+
+/* Records whose stamp is behind every frame: applied on the next render
+ * and counted late. */
+#define STALE_STAMP 0xFFFFFFFFU
+
+static void rec_reject(uint8_t voice)
+{
+	rec(STALE_STAMP, voice, AUDIO_VOICE_OP_START, 77U, 0U, 0U);
+}
+
+static void rec_stop(uint8_t voice)
+{
+	rec(STALE_STAMP, voice, AUDIO_VOICE_OP_STOP, 0U, 0U, 0U);
+}
+
+static uint32_t st_late(void)
+{
+	return st32(AUDIO_VOICE_STATUS_OFF_LATE);
+}
+
+static uint32_t st_rejected(void)
+{
+	return st32(AUDIO_VOICE_STATUS_OFF_REJECTED);
+}
+
+static uint32_t st_dropped(void)
+{
+	return st32(AUDIO_VOICE_STATUS_OFF_DROPPED);
+}
+
+/* A published batch that straddles the last ring slot is read in two
+ * pieces, tail then head, each invalidated, and every record is applied
+ * exactly once. Rejected counts the first 56 records of the second batch
+ * (the tail) and all of the first; the head slots, which held rejected
+ * records of the first batch, now hold STOPs that must not be replayed as
+ * their old contents. */
+static void scenario_ring_wrap(void)
+{
+	uint32_t i;
+	unsigned ring_ops = 0U;
+	uintptr_t first_adr = 0U;
+	unsigned long first_len = 0UL;
+	uintptr_t second_adr = 0U;
+	unsigned long second_len = 0UL;
+	int kind;
+	uintptr_t adr;
+	unsigned long len;
+
+	fresh();
+	check(open_session(7680U, 4U) == SDK_STATUS_OK, "wrap: open", "");
+	for (i = 0U; i < 200U; i++)
+		rec_reject(0U);
+	publish();
+	run(4);
+	check(st_rejected() == 200U && st_late() == 200U &&
+	      st_dropped() == 0U && st16(AUDIO_VOICE_STATUS_OFF_READ) == 200U,
+	      "wrap: the first batch is applied once",
+	      fmt("rejected=%u late=%u read=%u", st_rejected(), st_late(),
+	      st16(AUDIO_VOICE_STATUS_OFF_READ)));
+	for (i = 0U; i < 56U; i++)
+		rec_reject(1U);
+	for (i = 0U; i < 44U; i++)
+		rec_stop(2U);
+	publish();
+	xil_cache_mock_reset();
+	xil_cache_mock_set_enabled(1);
+	period(1);
+	xil_cache_mock_set_enabled(0);
+	for (i = 0U; xil_cache_mock_op(i, &kind, &adr, &len); i++) {
+		if (kind != XIL_CACHE_MOP_INVALIDATE ||
+		    adr < (uintptr_t)g_ring + AUDIO_VOICE_RING_HEADER_BYTES ||
+		    adr >= (uintptr_t)g_ring + RING_LEN)
+			continue;
+		if (ring_ops == 0U) {
+			first_adr = adr;
+			first_len = len;
+		} else if (ring_ops == 1U) {
+			second_adr = adr;
+			second_len = len;
+		}
+		ring_ops++;
+	}
+	check(ring_ops == 2U &&
+	      first_adr == (uintptr_t)g_ring + AUDIO_VOICE_RING_HEADER_BYTES +
+		200U * AUDIO_VOICE_RING_RECORD_BYTES &&
+	      first_len == 56U * AUDIO_VOICE_RING_RECORD_BYTES &&
+	      second_adr == (uintptr_t)g_ring + AUDIO_VOICE_RING_HEADER_BYTES &&
+	      second_len == 44U * AUDIO_VOICE_RING_RECORD_BYTES,
+	      "wrap: a straddling batch invalidates the tail, then the head",
+	      fmt("ops=%u first=%lu+%lu second=%lu+%lu", ring_ops,
+	      (unsigned long)(first_adr - (uintptr_t)g_ring), first_len,
+	      (unsigned long)(second_adr - (uintptr_t)g_ring), second_len));
+	run(4);
+	check(st_rejected() == 256U && st_late() == 300U &&
+	      st_dropped() == 0U && st16(AUDIO_VOICE_STATUS_OFF_READ) == 300U,
+	      "wrap: every record of the straddling batch is applied once",
+	      fmt("rejected=%u late=%u read=%u", st_rejected(), st_late(),
+	      st16(AUDIO_VOICE_STATUS_OFF_READ)));
+}
+
+/* The 16-bit write cursor wraps from 65535 to 0. A session opened on a ring
+ * whose cursor already stands near the top starts from it: the records
+ * written before the open are not replayed. */
+static void scenario_cursor_wrap(void)
+{
+	uint32_t i;
+
+	fresh();
+	g_wc = 65520U;
+	for (i = 0U; i < 10U; i++)
+		rec_reject(0U);
+	publish();
+	check(g_wc == 65530U, "cursor wrap: ring parked near the top", "");
+	check(open_session(7680U, 4U) == SDK_STATUS_OK, "cursor wrap: open", "");
+	check(st16(AUDIO_VOICE_STATUS_OFF_READ) == 65530U,
+	      "cursor wrap: open takes the write cursor as the read baseline",
+	      fmt("read=%u", st16(AUDIO_VOICE_STATUS_OFF_READ)));
+	run(3);
+	check(st_state() == AUDIO_VOICE_STATE_OPEN && st_rejected() == 0U &&
+	      st_late() == 0U && st_dropped() == 0U &&
+	      st16(AUDIO_VOICE_STATUS_OFF_READ) == 65530U,
+	      "cursor wrap: records written before the open are not replayed",
+	      fmt("state=%u rejected=%u read=%u", st_state(), st_rejected(),
+	      st16(AUDIO_VOICE_STATUS_OFF_READ)));
+	for (i = 0U; i < 12U; i++)
+		rec_reject(0U);
+	publish();
+	check(g_wc == 6U, "cursor wrap: the writer cursor wrapped", "");
+	run(4);
+	check(st_state() == AUDIO_VOICE_STATE_LIVE && st_rejected() == 12U &&
+	      st_late() == 12U && st_dropped() == 0U &&
+	      st16(AUDIO_VOICE_STATUS_OFF_READ) == 6U,
+	      "cursor wrap: records across 65535 to 0 are applied once",
+	      fmt("state=%u rejected=%u late=%u dropped=%u read=%u", st_state(),
+	      st_rejected(), st_late(), st_dropped(),
+	      st16(AUDIO_VOICE_STATUS_OFF_READ)));
+}
+
+/* A client that moves its write cursor by more than the ring holds has
+ * wrapped over records the firmware never took: none of that span can be
+ * trusted, so none fires; all of it is counted and the cursor catches up. */
+static void scenario_ring_overrun(void)
+{
+	uint32_t i;
+
+	fresh();
+	check(open_session(7680U, 4U) == SDK_STATUS_OK, "overrun: open", "");
+	for (i = 0U; i < 10U; i++)
+		rec_reject(0U);
+	publish();
+	run(3);
+	check(st_rejected() == 10U && st_late() == 10U,
+	      "overrun: records before the jump are applied", "");
+	for (i = 0U; i < RING_RECORDS + 44U; i++)
+		rec_reject(1U);
+	publish();
+	run(4);
+	check(st_dropped() == RING_RECORDS + 44U &&
+	      st16(AUDIO_VOICE_STATUS_OFF_READ) == g_wc,
+	      "overrun: a jump past the ring is dropped and the cursor catches up",
+	      fmt("dropped=%u read=%u wc=%u", st_dropped(),
+	      st16(AUDIO_VOICE_STATUS_OFF_READ), g_wc));
+	check(st_rejected() == 10U && st_late() == 10U,
+	      "overrun: no record of the lapped span fires",
+	      fmt("rejected=%u late=%u", st_rejected(), st_late()));
+	/* The ring works again from there. */
+	rec_reject(2U);
+	publish();
+	run(3);
+	check(st_rejected() == 11U && st_dropped() == RING_RECORDS + 44U,
+	      "overrun: records after the jump are applied",
+	      fmt("rejected=%u", st_rejected()));
+}
+
+/* ---- B3. open flags reach the engine ---- */
+
+#define FLAG_PERIOD 428U
+#define FLAG_FRAMES 200U
+
+/* The left channel the engine produces for the ramp at period 428 for
+ * `frames` frames from the start of a period. */
+static int16_t flag_expected(uint32_t clock, int linear, uint32_t frame)
+{
+	uint32_t hz = clock / FLAG_PERIOD;
+	uint64_t step = ((uint64_t)hz << 16) / 48000U;
+	uint64_t total = step * frame;
+	uint32_t pos = (uint32_t)(total >> 16);
+	int32_t frac = (int32_t)(total & 0xFFFFU);
+	int32_t a = ramp(pos);
+	int32_t v = a;
+
+	if (linear)
+		v = a + (int32_t)(((int64_t)(ramp(pos + 1U) - a) * frac) >> 16);
+	return (int16_t)((v * 65535) >> 16);
+}
+
+static int flag_period_matches(const int16_t *p, uint32_t clock, int linear)
+{
+	uint32_t f;
+
+	for (f = 0U; f < FLAG_FRAMES; f++) {
+		int16_t want = flag_expected(clock, linear, f);
+
+		if (p[2U * f] != want || p[2U * f + 1U] != want)
+			return 0;
+	}
+	return 1;
+}
+
+/* NTSC and LINEAR in the open flags select the engine's clock (period to
+ * rate) and interpolation: each of the four combinations produces its own
+ * samples and none of the other three. */
+static void scenario_open_flags(void)
+{
+	static const uint32_t clocks[2] = {
+		AUDIO_VOICE_CLOCK_PAL, AUDIO_VOICE_CLOCK_NTSC
+	};
+	uint32_t combo;
+
+	for (combo = 0U; combo < 4U; combo++) {
+		struct audio_voice_session_open o;
+		uint32_t flags = 0U;
+		int seen[4] = { 0, 0, 0, 0 };
+		uint32_t i;
+		uint32_t k;
+
+		if ((combo & 1U) != 0U)
+			flags |= AUDIO_VOICE_OPEN_NTSC;
+		if ((combo & 2U) != 0U)
+			flags |= AUDIO_VOICE_OPEN_LINEAR;
+		fresh();
+		o = open_params(7680U, 4U, flags);
+		check(audio_voice_session_open(&o, &g_grant) == SDK_STATUS_OK,
+		      "flags: open", fmt("flags=%u", flags));
+		check(upload_ramp(g_grant.session) == SDK_STATUS_OK,
+		      "flags: upload", "");
+		rec(960U * 2U, 0U, AUDIO_VOICE_OP_SET,
+		    AUDIO_VOICE_SET_RATE | AUDIO_VOICE_SET_VOLUME, FLAG_PERIOD,
+		    0xFFFFFFFFU);
+		rec(960U * 2U, 0U, AUDIO_VOICE_OP_START, SAMPLE_ID, 0U, 0U);
+		rec(960U * 2U, 0U, AUDIO_VOICE_OP_LOOP, 0U, 0U,
+		    2U * LOOP_SAMPLES);
+		publish();
+		for (i = 0U; i < 12U; i++) {
+			period(1);
+			for (k = 0U; k < AUDIO_NUM_PERIODS; k++) {
+				uint32_t c;
+
+				for (c = 0U; c < 4U; c++) {
+					if (flag_period_matches(tx_period(k),
+					    clocks[c & 1U], (c & 2U) != 0U))
+						seen[c] = 1;
+				}
+			}
+		}
+		for (k = 0U; k < 4U; k++)
+			check(seen[k] == (k == combo),
+			      "flags: the open flags choose clock and "
+			      "interpolation",
+			      fmt("opened %u, output matches %u: %d", combo, k,
+			      seen[k]));
+	}
 }
 
 static void scenario_stamps(void)
@@ -1050,6 +1327,48 @@ static void scenario_upload(void)
 	      fmt("rejected=%u", st32(AUDIO_VOICE_STATUS_OFF_REJECTED)));
 }
 
+/* ---- H2. a client in the middle of a long upload is alive ---- */
+
+static void scenario_upload_liveness(void)
+{
+	struct audio_voice_session_upload up;
+	uint32_t i;
+
+	fresh();
+	check(open_session(7680U, 4U) == SDK_STATUS_OK, "liveness: open", "");
+	memset(&up, 0, sizeof(up));
+	up.flags = AUDIO_VOICE_UPLOAD_COPY;
+	up.length = 64U;
+	/* A chunk every 200 ms for 6 s, resets in between, the ring
+	 * heartbeat never moves: the open session counts as alive. */
+	for (i = 0U; i < 300U; i++) {
+		bench_clock += 20U;
+		if (i % 10U == 0U)
+			check(audio_voice_session_upload(g_grant.session,
+			      &up) == SDK_STATUS_OK, "liveness: chunk", "");
+		if (i % 10U == 5U)
+			check(audio_voice_session_reset(g_grant.session) ==
+			      SDK_STATUS_OK, "liveness: reset", "");
+		audio_voice_session_poll();
+	}
+	check(audio_voice_session_active() && g_release_calls == 0,
+	      "liveness: uploads and resets keep the session open past the "
+	      "heartbeat timeout", "");
+	/* A request that names no session of the client's is no sign of
+	 * life. */
+	for (i = 0U; i < 110U; i++) {
+		bench_clock += 20U;
+		if (i % 10U == 0U)
+			check(audio_voice_session_upload(g_grant.session + 1U,
+			      &up) == SDK_STATUS_BAD_HANDLE,
+			      "liveness: wrong session", "");
+		audio_voice_session_poll();
+	}
+	check(!audio_voice_session_active() && g_release_calls == 1,
+	      "liveness: without a valid request the session times out",
+	      fmt("active=%d", audio_voice_session_active()));
+}
+
 /* Redefining a playing sample takes effect only at the next START. */
 static void scenario_redefine(void)
 {
@@ -1120,6 +1439,10 @@ int main(void)
 	scenario_open_refused();
 	scenario_ring_geometry();
 	scenario_stamps();
+	scenario_ring_wrap();
+	scenario_cursor_wrap();
+	scenario_ring_overrun();
+	scenario_open_flags();
 	scenario_lead(7680U);
 	scenario_lead(24000U);
 	scenario_stall();
@@ -1131,6 +1454,7 @@ int main(void)
 	scenario_warm_reset();
 	scenario_cache();
 	scenario_upload();
+	scenario_upload_liveness();
 	scenario_redefine();
 	if (failures != 0)
 		printf("audio_voice_session_test: %d FAILED\n", failures);

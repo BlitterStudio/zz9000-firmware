@@ -141,6 +141,16 @@ static uint64_t now_ms(void)
 	return (uint64_t)t * 1000U / COUNTS_PER_SECOND;
 }
 
+/*
+ * Every request the client makes of its open session proves it is there, so
+ * the heartbeat timeout restarts: a long multi-chunk upload keeps a session
+ * open that the ring heartbeat alone would let lapse.
+ */
+static void client_alive(void)
+{
+	g_s.heartbeat_ms = now_ms();
+}
+
 /* ---- producer ops: the voice slot as the fabric sees it ---- */
 
 static int voice_snapshot(struct audio_fabric_source *source)
@@ -370,10 +380,19 @@ static uint32_t largest_power_of_two_at_most(uint32_t n)
 	return p;
 }
 
-uint16_t audio_voice_session_check(uint32_t ring_len, uint32_t status_len,
-	uint32_t bank_len, uint32_t voices, uint32_t flags)
+uint16_t audio_voice_session_check(uint32_t ring_len,
+	uintptr_t status_address, uint32_t status_len, uint32_t bank_len,
+	uint32_t voices, uint32_t flags)
 {
-	if (status_len < AUDIO_VOICE_STATUS_BYTES ||
+	/*
+	 * The firmware writes and flushes the status block: a block that
+	 * shares a cache line with another buffer would write that
+	 * buffer's stale line back over the client's data. The ring and
+	 * staging buffers are only read (invalidated), so they need no
+	 * alignment.
+	 */
+	if ((status_address & (AUDIO_VOICE_STATUS_ALIGN - 1U)) != 0U ||
+	    status_len < AUDIO_VOICE_STATUS_BYTES ||
 	    ring_len < AUDIO_VOICE_RING_HEADER_BYTES +
 		AUDIO_VOICE_RING_MIN_RECORDS * AUDIO_VOICE_RING_RECORD_BYTES)
 		return SDK_STATUS_BAD_REQUEST;
@@ -396,7 +415,8 @@ uint16_t audio_voice_session_open(const struct audio_voice_session_open *open,
 	if (open->ring == NULL || open->status == NULL ||
 	    open->staging == NULL || open->bank == NULL)
 		return SDK_STATUS_BAD_REQUEST;
-	rc = audio_voice_session_check(open->ring_len, open->status_len,
+	rc = audio_voice_session_check(open->ring_len,
+		(uintptr_t)open->status, open->status_len,
 		open->bank_len, open->voices, open->flags);
 	if (rc != SDK_STATUS_OK)
 		return rc;
@@ -477,6 +497,7 @@ uint16_t audio_voice_session_reset(uint32_t session)
 
 	if (g_s.state == AUDIO_VOICE_STATE_CLOSED || session != g_s.id)
 		return SDK_STATUS_BAD_HANDLE;
+	client_alive();
 	/* Every record the client has written so far, and everything queued. */
 	g_s.read_cursor = ring_write_cursor();
 	g_s.queue_head = 0U;
@@ -512,6 +533,7 @@ uint16_t audio_voice_session_upload(uint32_t session,
 {
 	if (g_s.state == AUDIO_VOICE_STATE_CLOSED || session != g_s.id)
 		return SDK_STATUS_BAD_HANDLE;
+	client_alive();
 	if ((up->flags & ~AUDIO_VOICE_UPLOAD_KNOWN) != 0U || up->flags == 0U)
 		return SDK_STATUS_BAD_REQUEST;
 	/* Validate both halves before changing anything. */
