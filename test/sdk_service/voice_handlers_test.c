@@ -565,6 +565,26 @@ static void test_zorro3_buffers(void)
 	cleanup();
 }
 
+/* QUERY_SERVICE for the audio service through the production dispatcher:
+ * the voice flag follows the bus and the opcode count covers the range. */
+static void test_discovery_flag(void)
+{
+	uint8_t payload[48];
+
+	memset(payload, 0, sizeof(payload));
+	put32(payload, SDK_SERVICE_AUDIO);
+
+	g_zorro3 = 1;
+	CHECK(call(SDK_OP_QUERY_SERVICE, 1U, payload, 4U) == SDK_STATUS_OK);
+	CHECK((get32(g_comp.payload + 12) & SDK_SERVICE_FLAG_AUDIO_VOICE) != 0U);
+	CHECK(get32(g_comp.payload + 20) == 28U);
+
+	g_zorro3 = 0;
+	CHECK(call(SDK_OP_QUERY_SERVICE, 1U, payload, 4U) == SDK_STATUS_OK);
+	CHECK((get32(g_comp.payload + 12) & SDK_SERVICE_FLAG_AUDIO_VOICE) == 0U);
+	CHECK(get32(g_comp.payload + 20) == 28U);
+}
+
 static void test_upload(void)
 {
 	struct fixture f;
@@ -667,6 +687,7 @@ int main(void)
 	test_open_refused();
 	test_zorro3_buffers();
 	test_upload();
+	test_discovery_flag();
 	test_client_release();
 	printf("%d checks, %d failures\n", checks, failures);
 	return failures != 0;

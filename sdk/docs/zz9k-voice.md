@@ -366,16 +366,17 @@ it. A 4096-record ring needs more than the 16 KiB window.
 
 ## Discovery
 
-The firmware defines `ZZ9K_SERVICE_FLAG_AUDIO_VOICE` (bit 28 of the audio
-service flags, printed as `audio-voice`) but does not set it yet. It will
-advertise the engine after hardware qualification. The audio service opcode
-count stays 23 until then, and does not cover `0x0518` to `0x051B`. The
-opcodes dispatch regardless.
+The firmware sets `ZZ9K_SERVICE_FLAG_AUDIO_VOICE` (bit 28 of the audio
+service flags, printed as `audio-voice`) on Zorro III. It does not set the
+flag on Zorro II yet, because the engine has not been tested on a Zorro II
+machine. The audio service opcode count is 28 and covers `0x0500` to
+`0x051B`, including the voice opcodes. The opcodes dispatch on both buses
+regardless of the flag.
 
-Until the flag is set, a client that wants the engine calls OPEN and handles
-the refusal. `ZZ9K_STATUS_UNSUPPORTED` means the firmware has no voice engine;
-`zz9k-voiceplay` reports it that way. Once the flag is advertised, a client
-should check it first, as it does for other optional services.
+A client should check the flag first, as it does for other optional services.
+A client that opens without checking handles the refusal:
+`ZZ9K_STATUS_UNSUPPORTED` means the firmware has no voice engine, and
+`zz9k-voiceplay` reports it that way.
 
 ## zz9k-voiceplay
 
@@ -475,4 +476,28 @@ have its bytes rewritten.
 
 ## Hardware measurements
 
-Measurements on hardware are recorded here after qualification.
+These runs used a ZZ9000 on Zorro III in an A4000 with a 68060, under
+AmigaOS 3.2, with the firmware lead floor of 7680 frames. The maintainer
+listened to each run. All runs used `zz9k-voiceplay`.
+
+| Run | Result |
+| --- | --- |
+| Click test, 10 s | 0 late, 0 underruns |
+| `MOD.CannonFodder` (4 channels), 30 s | 0 late, 0 underruns, sound correct |
+| A real 8-channel (`8CHN`) module, 30 s | 0 late, 0 underruns, sound correct. 68k time per replayer tick averaged 0.7 ms, maximum 4 ms |
+| The synthetic 32-channel test module from libpt4, 30 s | 0 late, 0 underruns, average 1.35 ms per tick |
+| The 8-channel module with an MPEG-2 video in ZZPlay (direct AX audio) at the same time, 30 s | 0 late, 1 underrun, sound and video clean to the ear and eye |
+| The 8-channel module with a 440 Hz tone through AHI (ZZ9000AX 16 bit Stereo++ mode) at the same time | 0 late, 0 underruns, both clean |
+
+The smallest scheduling margin seen was 4752 frames.
+
+No real module with more than 8 channels was available, so the 32-voice run
+used a synthetic test module. It shows that the engine and the replayer keep
+up with 32 voices, not how a real 32-channel tune sounds.
+
+`zz9k-voiceplay` queues records about one lead ahead of the floor, so its
+record latency read 160 to 320 ms. The engine rate measured against the 68k
+EClock read 47790 to 47989 Hz. That spread comes from the EClock comparison
+and the status sampling, not from a measured DAC rate.
+
+Zorro II has not been tested. The flag stays clear there until it is.

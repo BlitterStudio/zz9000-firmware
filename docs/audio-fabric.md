@@ -84,10 +84,10 @@ does not pass through mailbox payloads.
 | `SDK_OP_AUDIO_RING_ACQUIRE` | `0x0513` | Acquire a generation-bound PCM ring and control block |
 | `SDK_OP_AUDIO_RING_RELEASE` | `0x0514` | Release a generation-bound lease |
 
-The audio service advertises 23 opcodes, `0x0500` through `0x0516`. The
-retired copy-submit range `0x050f` through `0x0511` remains reserved. The
-voice engine opcodes `0x0518` through `0x051B` dispatch but are not counted
-until the engine is advertised.
+The audio service advertises 28 opcodes, `0x0500` through `0x051B`. The
+retired copy-submit range `0x050f` through `0x0511` remains reserved, as do
+`0x0501` and `0x0502`. The voice engine opcodes `0x0518` through `0x051B` are
+inside the count, and the voice service flag is set on Zorro III only.
 
 A successful acquire zeroes the PCM ring and control block, publishes a fresh
 generation, and begins in `LEASED`. The slot becomes `ACTIVE` after the first
@@ -151,7 +151,7 @@ at 48 kHz and never needs conversion.
 | `SDK_CAP_AUDIO_FABRIC` | bit 27 | Audio fabric is available |
 | `SDK_SERVICE_FLAG_AUDIO_FABRIC` | bit 22 | Direct-ring audio fabric is available in the audio service |
 | `SDK_SERVICE_FLAG_AUDIO_FABRIC_RATE` | bit 23 | Source-rate leases are available |
-| `SDK_SERVICE_FLAG_AUDIO_VOICE` | bit 28 | Voice engine opcodes are advertised; firmware does not set it yet |
+| `SDK_SERVICE_FLAG_AUDIO_VOICE` | bit 28 | Voice engine opcodes are advertised. The firmware sets it on Zorro III; it is not set on Zorro II yet |
 
 Clients should check the capability and service flags before using the
 opcodes. Firmware that does not recognize the source-rate flag returns

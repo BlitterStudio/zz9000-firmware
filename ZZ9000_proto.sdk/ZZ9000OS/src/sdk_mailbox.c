@@ -1535,9 +1535,8 @@ static uint32_t service_flags(const struct SDKServiceDescriptor *service)
 		flags |= sdk_jpeg_service_flags();
 		flags |= SDK_SERVICE_FLAG_IMAGE_PNG_DIRECT_BGRA;
 	}
-	if (service->service_id == SDK_SERVICE_MEMORY &&
-	    sdk_aperture_runtime_is_zorro3())
-		flags |= SDK_SERVICE_FLAG_MEMORY_MEDIA_INPUT;
+	flags |= sdk_service_bus_flags(service->service_id,
+				       sdk_aperture_runtime_is_zorro3());
 	if (service->service_id == SDK_SERVICE_VIDEO &&
 	    audio_codec_present())
 		flags |= SDK_SERVICE_FLAG_VIDEO_AUDIO_BIND;

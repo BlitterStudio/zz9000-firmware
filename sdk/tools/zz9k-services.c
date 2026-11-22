@@ -105,8 +105,10 @@ static const ReleaseServiceRequirement release_services[] = {
       ZZ9K_SERVICE_FLAG_AUDIO_FABRIC_RATE |
       ZZ9K_SERVICE_FLAG_AUDIO_STREAM_GAIN,
     ZZ9K_SERVICE_AUDIO,
-    22U /* 0x0500..0x0515 incl. control plane + fabric leases
-         * (0x0512-0x0514) and per-stream gain (0x0515) */
+    22U /* minimum count: 0x0500..0x0515 incl. control plane + fabric
+         * leases (0x0512-0x0514) and per-stream gain (0x0515). Current
+         * firmware reports 28 (through 0x051b); this floor is the oldest
+         * firmware the release check accepts. */
   },
   {
     ZZ9K_SERVICE_CRYPTO,

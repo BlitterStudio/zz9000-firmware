@@ -173,9 +173,10 @@
 /* AUDIO_STREAM_BEGIN and BEGIN_EX honour output_hz and output_channels
  * (audio_reduce.h). */
 #define SDK_SERVICE_FLAG_AUDIO_STREAM_REDUCE (1U << 27)
-/* Wavetable voice engine opcodes (0x0518+) dispatch, but the capability
- * stays unadvertised until the engine is qualified on hardware: neither
- * the service catalog nor the audio opcode count mention it yet. */
+/* Wavetable voice engine opcodes (0x0518..0x051b). Set at runtime by
+ * sdk_service_bus_flags on Zorro III, where the engine passed hardware
+ * qualification. Not set on Zorro II until it is tested on a Zorro II
+ * machine; the opcodes dispatch on both buses. */
 #define SDK_SERVICE_FLAG_AUDIO_VOICE (1U << 28)
 #define SDK_SERVICE_FLAG_CODEC_DEFLATE_RAW      (1U << 16)
 #define SDK_SERVICE_FLAG_CODEC_ZLIB             (1U << 17)

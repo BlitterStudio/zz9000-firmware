@@ -20,7 +20,7 @@ static const struct ExpectedService expected[] = {
 	{ 0x0200U, 6U, "surface" },
 	{ 0x0400U, 12U, "image" },
 	{ 0x0600U, 7U, "codec" },
-	{ 0x0500U, 23U, "audio" },
+	{ 0x0500U, 28U, "audio" },
 	{ 0x0800U, 5U, "crypto" },
 	{ 0x0900U, 4U, "diag" },
 	{ 0x0b00U, 14U, "video" },
@@ -63,17 +63,51 @@ int main(void)
 			       (unsigned)expected[i].id);
 			return 1;
 		}
-		/*
-		 * The voice opcodes (0x0518..0x051B) are in the firmware but
-		 * unadvertised: the audio descriptor keeps its flag clear and
-		 * its opcode count at 23 until the engine is qualified on
-		 * hardware. Setting the flag and raising the count is the
-		 * change that flips this assertion.
-		 */
+		/* The static audio descriptor never carries the voice flag:
+		 * it depends on the bus (checked after the loop). */
 		if (expected[i].id == SDK_SERVICE_AUDIO &&
-		    ((read_be32(info.flags) & SDK_SERVICE_FLAG_AUDIO_VOICE) != 0U ||
-		     read_be32(info.opcode_count) != 23U)) {
-			puts("service discovery: audio advertises the voice engine");
+		    (service->flags & SDK_SERVICE_FLAG_AUDIO_VOICE) != 0U) {
+			puts("service discovery: static audio flags carry voice");
+			return 1;
+		}
+	}
+
+	/* The voice engine is advertised on Zorro III only; the other flag
+	 * that follows the bus is the memory media input flag. */
+	for (i = 0; i < sizeof(expected) / sizeof(expected[0]); i++) {
+		uint32_t z3_flags, z2_flags;
+
+		service = find_service(expected[i].id);
+		sdk_service_write_info(&info, service, service->capability_bits,
+			service->flags | sdk_service_bus_flags(service->service_id, 1),
+			48U);
+		z3_flags = read_be32(info.flags);
+		sdk_service_write_info(&info, service, service->capability_bits,
+			service->flags | sdk_service_bus_flags(service->service_id, 0),
+			48U);
+		z2_flags = read_be32(info.flags);
+		if (z2_flags != service->flags) {
+			printf("service discovery: Zorro II changed flags of 0x%04x\n",
+			       (unsigned)expected[i].id);
+			return 1;
+		}
+		if (expected[i].id == SDK_SERVICE_AUDIO) {
+			if ((z3_flags & SDK_SERVICE_FLAG_AUDIO_VOICE) == 0U ||
+			    (z2_flags & SDK_SERVICE_FLAG_AUDIO_VOICE) != 0U ||
+			    (z3_flags & ~SDK_SERVICE_FLAG_AUDIO_VOICE) !=
+				service->flags) {
+				puts("service discovery: voice flag is not Zorro III only");
+				return 1;
+			}
+		} else if (expected[i].id == SDK_SERVICE_MEMORY) {
+			if (z3_flags != (service->flags |
+					 SDK_SERVICE_FLAG_MEMORY_MEDIA_INPUT)) {
+				puts("service discovery: memory media input flag wrong");
+				return 1;
+			}
+		} else if (z3_flags != service->flags) {
+			printf("service discovery: Zorro III changed flags of 0x%04x\n",
+			       (unsigned)expected[i].id);
 			return 1;
 		}
 	}

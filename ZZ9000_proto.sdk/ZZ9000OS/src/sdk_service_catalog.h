@@ -121,10 +121,13 @@ static const struct SDKServiceDescriptor sdk_services[] = {
 			SDK_SERVICE_FLAG_AUDIO_VORBIS_STREAM |
 			SDK_SERVICE_FLAG_AUDIO_STREAM_REDUCE,
 		.opcode_base = SDK_SERVICE_AUDIO,
-		.opcode_count = 23,	/* 0x0500..0x0516 incl. audio control plane,
+		.opcode_count = 28,	/* 0x0500..0x051b incl. audio control plane,
 			 * fabric lease plane (0x0512-0x0514; 0x050f..0x0511
-			 * reserved gaps), per-stream gain (0x0515), and
-			 * codec-aware stream begin (0x0516). */
+			 * reserved gaps), per-stream gain (0x0515),
+			 * codec-aware stream begin (0x0516), output clock
+			 * (0x0517) and the voice engine (0x0518..0x051b).
+			 * 0x0501 and 0x0502 are unassigned gaps. The voice
+			 * flag is added per bus by sdk_service_bus_flags. */
 		.name = "audio"
 	},
 	{
@@ -194,6 +197,24 @@ static const struct SDKServiceDescriptor sdk_services[] = {
 		.name = "console"
 	}
 };
+
+/* Service flags that depend on the bus the card is on. The static
+ * descriptors carry no bus-dependent flag; the firmware ORs these in when
+ * it serves a descriptor. The voice engine is advertised on Zorro III only:
+ * it passed hardware qualification there, and a Zorro II machine has not
+ * been tested. Its opcodes dispatch on both buses. */
+static uint32_t sdk_service_bus_flags(uint32_t service_id, int zorro3)
+{
+	uint32_t flags = 0U;
+
+	if (!zorro3)
+		return 0U;
+	if (service_id == SDK_SERVICE_MEMORY)
+		flags |= SDK_SERVICE_FLAG_MEMORY_MEDIA_INPUT;
+	if (service_id == SDK_SERVICE_AUDIO)
+		flags |= SDK_SERVICE_FLAG_AUDIO_VOICE;
+	return flags;
+}
 
 static const struct SDKServiceDescriptor *find_service(uint32_t service_id)
 {

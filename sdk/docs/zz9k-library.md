@@ -444,7 +444,7 @@ All multi-byte mailbox fields use the byte order defined by `zz9k/abi.h`. The se
 | Module | `0x0a00` MODULE_STATUS |
 | Video | `0x0b00`–`0x0b03` video-session begin/write/decode/close; `0x0b04`–`0x0b0d` media-session begin/write/decode/audio-read/present/discard/status/audio-bind/audio-unbind/close |
 
-The voice engine opcodes `0x0518` through `0x051b` dispatch in firmware, but the audio service descriptor still reports 23 opcodes through `0x0516` and `ZZ9K_SERVICE_FLAG_AUDIO_VOICE` is not set. See [zz9k-voice.md](zz9k-voice.md).
+The voice engine opcodes `0x0518` through `0x051b` dispatch in firmware on both buses. The audio service descriptor covers them (28 opcodes through `0x051b`) and sets `ZZ9K_SERVICE_FLAG_AUDIO_VOICE` on Zorro III. The flag is not set on Zorro II yet, because the engine has not been tested on a Zorro II machine. See [zz9k-voice.md](zz9k-voice.md).
 
 `ZZ9K_OP_MODULE_STATUS` takes a 48-byte `ZZ9KModuleStatusRequestPayload`:
 the only nonzero field is the big-endian zero-based `index`. It returns a
@@ -1357,7 +1357,7 @@ most recent settled status afterwards.
 
 Calibrated matched firmware advertises `ZZ9K_CAP_AUDIO_CONTROL` (bit
 25), `ZZ9K_CAP_AUDIO_METERING` (bit 26), and
-`ZZ9K_SERVICE_FLAG_AUDIO_CONTROL` (bit 21). The current audio service descriptor reports 23 opcode slots through `0x0516`, including the reserved `0x050f`–`0x0511` gap. The control-plane subset occupies `0x0509` through `0x050e`. Older or uncalibrated firmware omits the bits, so clients must still gate exactly like every other surface:
+`ZZ9K_SERVICE_FLAG_AUDIO_CONTROL` (bit 21). The current audio service descriptor reports 28 opcode slots through `0x051b`, including the reserved `0x050f`–`0x0511` gap and the unassigned `0x0501` and `0x0502`. The control-plane subset occupies `0x0509` through `0x050e`. Older or uncalibrated firmware omits the bits, so clients must still gate exactly like every other surface:
 
 ```c
 if (!zz9k_has_capabilities(caps.capability_bits, ZZ9K_CAP_AUDIO_CONTROL)) {
@@ -1442,9 +1442,10 @@ every 500 ms: the firmware closes a session whose heartbeat stays unchanged
 for 2 seconds.
 
 The mailbox opcodes are `ZZ9K_OP_AUDIO_VOICE_OPEN` (`0x0518`), `_CLOSE`
-(`0x0519`), `_RESET` (`0x051a`) and `_UPLOAD` (`0x051b`). The firmware does
-not set `ZZ9K_SERVICE_FLAG_AUDIO_VOICE` yet, so a client tries Open and
-handles the refusal; see the discovery section of the voice guide.
+(`0x0519`), `_RESET` (`0x051a`) and `_UPLOAD` (`0x051b`). The firmware sets
+`ZZ9K_SERVICE_FLAG_AUDIO_VOICE` on Zorro III and does not set it on Zorro II
+yet, so a client on a card without the flag tries Open and handles the
+refusal; see the discovery section of the voice guide.
 
 ## Decompression Jobs
 
