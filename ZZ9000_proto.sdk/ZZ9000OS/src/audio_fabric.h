@@ -187,6 +187,25 @@ void audio_fabric_output_clock(uint64_t *retired_frames,
 	uint64_t *lead_frames, uint32_t *output_rate);
 
 /*
+ * Fill-ahead: how many periods the compositor keeps the TX ring ahead of
+ * the DMA. The default is 6 of the 8-period ring (120 ms). A session that
+ * wants a shorter path to the DAC asks for fewer, down to 2, and gives the
+ * request back with 0 when it ends. The request is main-loop owned with one
+ * owner at a time (the low-latency voice session); the compositor ISR walks
+ * its own value toward it, down at once and up one period per tick, so
+ * restoring the default never makes one ISR fill several periods. A shorter
+ * fill-ahead applies to every producer: the ISR may run late by about
+ * (periods - 1) * 20 ms before the DMA catches the frontier. Rebase
+ * detection keeps the 6-period bound whatever the request.
+ */
+#define AUDIO_FABRIC_FILL_AHEAD_DEFAULT_PERIODS 6U
+#define AUDIO_FABRIC_FILL_AHEAD_MIN_PERIODS     2U
+/* 0 restores the default; other values are clamped to 2 through 6. */
+void audio_fabric_fill_ahead_set(uint32_t periods);
+/* The requested fill-ahead in periods (the default when none is set). */
+uint32_t audio_fabric_fill_ahead_get(void);
+
+/*
  * The widened ownership gate for legacy register entry points
  * (REG_ZZ_AUDIO_CONFIG play bit, REG_ZZ_AUDIO_SWAB,
  * AP_TX_BUF_OFFS): nonzero exactly while the fabric owns the output,

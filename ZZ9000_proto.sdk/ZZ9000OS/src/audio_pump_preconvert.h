@@ -9,8 +9,9 @@
 /* Rebuild reserve (plan U3): fill stops this many periods short of the
  * staged cursor so the bytes a queued-period rebuild replays (a
  * direct-ring lease detach rebuilds future TX periods from peers'
- * staged-not-yet-credited windows, at most the TX fill target of six
- * periods below staged) can never be overwritten by the decode side.
+ * staged-not-yet-credited windows, at most the default TX fill-ahead of six
+ * periods below staged; a shorter fill-ahead never queues more) can never be
+ * overwritten by the decode side.
  * Matches AUDIO_FABRIC_TARGET_AHEAD / AUDIO_FABRIC_PERIOD_BYTES. */
 #define AUDIO_PUMP_PRECONVERT_REPLAY_PERIODS 6U
 #define AUDIO_PUMP_PRECONVERT_REPLAY_KEEP \

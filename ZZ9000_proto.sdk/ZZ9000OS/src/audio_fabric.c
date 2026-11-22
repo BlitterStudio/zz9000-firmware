@@ -54,6 +54,10 @@
 #define AUDIO_FABRIC_RING_BYTES    AUDIO_TX_BUFFER_SIZE
 #define AUDIO_FABRIC_TARGET_AHEAD \
 	(AUDIO_FABRIC_RING_BYTES - 2U * AUDIO_FABRIC_PERIOD_BYTES)
+typedef char fabric_target_is_default_fill_ahead[
+	(AUDIO_FABRIC_TARGET_AHEAD ==
+	 AUDIO_FABRIC_FILL_AHEAD_DEFAULT_PERIODS *
+	 AUDIO_FABRIC_PERIOD_BYTES) ? 1 : -1];
 #define AUDIO_FABRIC_RING_PERIODS \
 	(AUDIO_FABRIC_RING_BYTES / AUDIO_FABRIC_PERIOD_BYTES)
 #define AUDIO_FABRIC_MULTISLOT_MAX_FILLS 2U
@@ -68,6 +72,11 @@ static struct {
 	uint32_t fill_offset;     /* next TX-ring byte, period-aligned */
 	uint8_t rebuild_pending;  /* queued-period rebuild armed by a
 	                           * direct-ring lease detach */
+	/* Fill-ahead in periods; 0 is the default. The request is written by
+	 * the main loop only, the effective value by the compositor ISR
+	 * only (audio_fabric_fill_ahead_set). */
+	uint8_t fill_ahead_request;
+	uint8_t fill_ahead_effective;
 	/* Playback clock. Retired frames are DMA periods crossed while a
 	 * producer was live. The last offset is period-aligned; armed is
 	 * clear across pause and idle so that gap is not billed. */
@@ -964,6 +973,35 @@ void audio_fabric_request_rebuild(uint32_t slot)
 			AUDIO_FABRIC_RING_BYTES;
 	}
 }
+
+/* Effective fill-ahead in periods; the zeroed state is the default. */
+static uint32_t fabric_fill_ahead_periods(void)
+{
+	return g_audio_fabric.fill_ahead_effective != 0U
+		? g_audio_fabric.fill_ahead_effective
+		: AUDIO_FABRIC_FILL_AHEAD_DEFAULT_PERIODS;
+}
+
+static uint32_t fabric_fill_ahead_bytes(void)
+{
+	return fabric_fill_ahead_periods() * AUDIO_FABRIC_PERIOD_BYTES;
+}
+
+/* Once per formatter period: lower at once, raise one period. */
+static void fabric_fill_ahead_step(void)
+{
+	uint32_t request = g_audio_fabric.fill_ahead_request != 0U
+		? g_audio_fabric.fill_ahead_request
+		: AUDIO_FABRIC_FILL_AHEAD_DEFAULT_PERIODS;
+	uint32_t effective = fabric_fill_ahead_periods();
+
+	if (effective > request)
+		effective = request;
+	else if (effective < request)
+		effective++;
+	g_audio_fabric.fill_ahead_effective = (uint8_t)effective;
+}
+
 /* Fill/retire work shared by the formatter ISR and isolated startup priming.
  * The latter must not execute the once-per-period lease lifecycle tick. */
 static void audio_fabric_compositor_fill(void)
@@ -972,6 +1010,7 @@ static void audio_fabric_compositor_fill(void)
 	uint32_t pos_period;
 	uint32_t ahead;
 	uint32_t guard;
+	uint32_t target_ahead;
 	uint32_t i;
 #ifdef AUDIO_FABRIC_BENCH
 	uint64_t bench_isr;
@@ -1039,6 +1078,10 @@ static void audio_fabric_compositor_fill(void)
 		    g_audio_fabric.fill_offset, pos_period,
 		    AUDIO_FABRIC_TARGET_AHEAD, AUDIO_FABRIC_RING_BYTES))
 		ahead = AUDIO_FABRIC_PERIOD_BYTES;
+	/* The fill target is the effective fill-ahead, 6 periods unless a
+	 * session asked for fewer. The rebase tests above keep the fixed
+	 * ring bound. */
+	target_ahead = fabric_fill_ahead_bytes();
 	{
 		uint32_t deficit = 0U;
 		uint32_t cap;
@@ -1050,8 +1093,8 @@ static void audio_fabric_compositor_fill(void)
 			? AUDIO_FABRIC_MULTISLOT_MAX_FILLS
 			: AUDIO_FABRIC_RING_PERIODS;
 
-		if (ahead < AUDIO_FABRIC_TARGET_AHEAD)
-			deficit = (AUDIO_FABRIC_TARGET_AHEAD - ahead) /
+		if (ahead < target_ahead)
+			deficit = (target_ahead - ahead) /
 				AUDIO_FABRIC_PERIOD_BYTES;
 		if (deficit > cap)
 			deficit = cap;
@@ -1130,8 +1173,11 @@ static void audio_fabric_compositor_fill(void)
 	}
 	/* A vanished last producer returns the fabric to IDLE here too
 	 * (the pump's abrupt ISR unbind: state clear, no ring silence). */
-	if (!fabric_any_attached())
+	if (!fabric_any_attached()) {
 		g_audio_fabric.ownership = (uint8_t)AUDIO_FABRIC_IDLE;
+		/* An idle fabric restarts at the default fill-ahead. */
+		g_audio_fabric.fill_ahead_effective = 0U;
+	}
 	if (!fabric_any_live())
 		return;
 
@@ -1196,9 +1242,9 @@ static void audio_fabric_compositor_fill(void)
 			g_audio_fabric.fill_offset, pos_period,
 			AUDIO_FABRIC_RING_BYTES);
 		/* Stop AT the target, never past it: the frontier must stay
-		 * inside [PERIOD, TARGET_AHEAD] so the caught-up reset above
+		 * inside [PERIOD, target] so the caught-up reset above
 		 * only fires on a genuine DMA overrun. */
-		if (ahead >= AUDIO_FABRIC_TARGET_AHEAD)
+		if (ahead >= target_ahead)
 			break;   /* frontier far enough ahead */
 		index = g_audio_fabric.fill_offset / AUDIO_FABRIC_PERIOD_BYTES;
 		for (i = 0U; i < AUDIO_FABRIC_SLOT_COUNT; i++) {
@@ -1367,6 +1413,7 @@ void audio_fabric_isr(void)
 {
 	if (g_audio_fabric.ownership != AUDIO_FABRIC_ACTIVE)
 		return;
+	fabric_fill_ahead_step();
 	fabric_lease_isr_tick();
 	audio_fabric_compositor_fill();
 }
@@ -1449,6 +1496,7 @@ void audio_fabric_producer_detach(uint32_t slot)
 		 * pending queued-period rebuild (nothing queued can
 		 * remain). */
 		g_audio_fabric.rebuild_pending = 0U;
+		g_audio_fabric.fill_ahead_effective = 0U;
 		audio_silence();
 	}
 }
@@ -1619,6 +1667,22 @@ void audio_fabric_reset(void)
 	     i++)
 		g_audio_fabric.slot[i].epoch = epoch[i] + 1U;
 	fabric_lease_reset_rings();
+}
+
+void audio_fabric_fill_ahead_set(uint32_t periods)
+{
+	if (periods != 0U && periods < AUDIO_FABRIC_FILL_AHEAD_MIN_PERIODS)
+		periods = AUDIO_FABRIC_FILL_AHEAD_MIN_PERIODS;
+	if (periods > AUDIO_FABRIC_FILL_AHEAD_DEFAULT_PERIODS)
+		periods = AUDIO_FABRIC_FILL_AHEAD_DEFAULT_PERIODS;
+	g_audio_fabric.fill_ahead_request = (uint8_t)periods;
+}
+
+uint32_t audio_fabric_fill_ahead_get(void)
+{
+	return g_audio_fabric.fill_ahead_request != 0U
+		? g_audio_fabric.fill_ahead_request
+		: AUDIO_FABRIC_FILL_AHEAD_DEFAULT_PERIODS;
 }
 
 enum audio_fabric_ownership audio_fabric_ownership(void)
