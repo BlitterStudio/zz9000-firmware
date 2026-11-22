@@ -7,7 +7,10 @@
  *
  *  - a sleeper never runs before start + us, whatever the phase within the
  *    millisecond at which it began and whatever the duration (around the
- *    5000 us scheduler granule included), and not much later either;
+ *    5000 us scheduler granule included), and it runs at the deadline, not
+ *    at the next millisecond boundary: the overshoot is bounded by the
+ *    interval between two looks at the clock and reaches none over the
+ *    phases (a coarse tick sees it within one tick);
  *  - a sleep without a stop request lasts at least its time, whatever the
  *    system passes in between do.
  *
@@ -50,32 +53,58 @@ static void start_running_app(uint64_t t0)
     zzapp_kernel_set_current_thread(0);
 }
 
+/* The ways the kernel looks at the clock while the app sleeps. */
+enum looker {
+    LOOK_IDLE_TICK,     /* idle_begin/idle_end around a WFE, or a switch */
+    LOOK_SYSTEM_POLL    /* the system thread's loop: zzapp_kernel_sleep_poll */
+};
+
 /* The core stops running the app (it parked) and the kernel looks at the
- * clock, as the timer tick does. */
-static void kernel_tick(uint64_t now)
+ * clock, as the timer tick or the system loop does. */
+static void kernel_look(enum looker how, uint64_t now)
 {
     zzapp_kernel_t *kernel = zzapp_runtime_kernel();
 
     zzapp_test_set_xtime(now);
+    if (how == LOOK_SYSTEM_POLL) {
+        (void)zzapp_kernel_sleep_poll(kernel, ZZAPP_TICK_US);
+        return;
+    }
     zzapp_kernel_idle_begin(kernel);
     zzapp_kernel_idle_end(kernel);
 }
 
+static void kernel_tick(uint64_t now)
+{
+    kernel_look(LOOK_IDLE_TICK, now);
+}
+
 /* The microsecond at which a sleeper of `us`, begun at `start`, runs again,
- * polling the kernel every `step` microseconds; 0 if it never does. */
-static uint64_t wake_time(uint64_t start, uint32_t us, uint32_t step)
+ * looking at the kernel every `step` microseconds; 0 if it never does. */
+static uint64_t wake_time(enum looker how, uint64_t start, uint32_t us,
+                          uint32_t step)
 {
     uint64_t t;
     uint64_t limit = start + (uint64_t)us + 3U * ZZAPP_TICK_US;
 
     zzapp_kernel_set_current_thread(-1);
     for (t = start; t <= limit; t += step) {
-        kernel_tick(t);
+        kernel_look(how, t);
         if (THREAD0.state == ZZAPP_THREAD_RUNNABLE)
             return t;
     }
     return 0U;
 }
+
+/* Looks every 10 us (the finest the model sees) or every scheduler tick. */
+static const struct {
+    enum looker how;
+    uint32_t step;
+} lookers[] = {
+    { LOOK_IDLE_TICK, 10u },
+    { LOOK_SYSTEM_POLL, 10u },
+    { LOOK_IDLE_TICK, ZZAPP_TICK_US },
+};
 
 static void test_never_wakes_early(void)
 {
@@ -85,37 +114,57 @@ static void test_never_wakes_early(void)
     static const uint32_t phases[] = { 0u, 1u, 113u, 500u, 887u, 998u, 999u };
     size_t d;
     size_t p;
+    size_t l;
     unsigned run;
+    uint32_t min_over[sizeof(lookers) / sizeof(lookers[0])];
 
+    for (l = 0U; l < sizeof(lookers) / sizeof(lookers[0]); l++)
+        min_over[l] = UINT32_MAX;
     for (d = 0U; d < sizeof(durations) / sizeof(durations[0]); d++) {
         for (p = 0U; p < sizeof(phases) / sizeof(phases[0]); p++) {
             for (run = 0U; run < 3U; run++) {
-                uint64_t t0 = 7000000ull + 1000ull * run * 137u;
-                uint64_t start = t0 + 2000u + phases[p] + 1000u * run;
-                uint64_t woke;
+                for (l = 0U; l < sizeof(lookers) / sizeof(lookers[0]); l++) {
+                    uint64_t t0 = 7000000ull + 1000ull * run * 137u;
+                    uint64_t start = t0 + 2000u + phases[p] + 1000u * run;
+                    uint64_t woke;
+                    uint32_t over;
 
-                start_running_app(t0);
-                zzapp_test_set_xtime(start);
-                zzapp_api_table()->sleep_us(durations[d]);
-                CHECK(THREAD0.state == ZZAPP_THREAD_SLEEPING);
-                woke = wake_time(start, durations[d], 10u);
-                if (woke == 0U) {
-                    printf("never woke: us=%u phase=%u\n",
-                           (unsigned)durations[d], (unsigned)phases[p]);
-                    CHECK(woke != 0U);
-                    continue;
+                    start_running_app(t0);
+                    zzapp_test_set_xtime(start);
+                    zzapp_api_table()->sleep_us(durations[d]);
+                    CHECK(THREAD0.state == ZZAPP_THREAD_SLEEPING);
+                    /* The system loop keeps looking (no WFE) when the
+                     * deadline is within a tick, and idles beyond. */
+                    CHECK((zzapp_kernel_sleep_poll(zzapp_runtime_kernel(),
+                                                   ZZAPP_TICK_US) != 0) ==
+                          (durations[d] <= ZZAPP_TICK_US));
+                    woke = wake_time(lookers[l].how, start, durations[d],
+                                     lookers[l].step);
+                    if (woke == 0U) {
+                        printf("never woke: us=%u phase=%u\n",
+                               (unsigned)durations[d], (unsigned)phases[p]);
+                        CHECK(woke != 0U);
+                        continue;
+                    }
+                    if (woke < start + durations[d])
+                        printf("EARLY: us=%u phase=%u slept=%u\n",
+                               (unsigned)durations[d], (unsigned)phases[p],
+                               (unsigned)(woke - start));
+                    CHECK(woke >= start + durations[d]);
+                    over = (uint32_t)(woke - (start + durations[d]));
+                    /* Not late by more than the interval between two looks
+                     * at the clock: the sleep ends at the deadline, not at
+                     * the next millisecond boundary. */
+                    CHECK(over < lookers[l].step + 1u);
+                    if (over < min_over[l])
+                        min_over[l] = over;
                 }
-                if (woke < start + durations[d])
-                    printf("EARLY: us=%u phase=%u slept=%u\n",
-                           (unsigned)durations[d], (unsigned)phases[p],
-                           (unsigned)(woke - start));
-                CHECK(woke >= start + durations[d]);
-                /* Rounding up to the next millisecond step is fine; a
-                 * whole granule late is not. */
-                CHECK(woke - (start + durations[d]) <= 1000u);
             }
         }
     }
+    /* Over the phases the overshoot reaches (close to) none. */
+    CHECK(min_over[0] == 0u);
+    CHECK(min_over[1] == 0u);
 }
 
 static void test_sleep_without_stop_lasts_its_time(void)
@@ -138,7 +187,7 @@ static void test_sleep_without_stop_lasts_its_time(void)
         if (t < start + us - 1000u)
             CHECK(THREAD0.state == ZZAPP_THREAD_SLEEPING);
     }
-    woke = wake_time(start + us - 1000u, 1000u, 10u);
+    woke = wake_time(LOOK_IDLE_TICK, start + us - 1000u, 1000u, 10u);
     CHECK(woke >= start + us);
     CHECK(zzapp_api_table()->should_stop() == 0);
 }

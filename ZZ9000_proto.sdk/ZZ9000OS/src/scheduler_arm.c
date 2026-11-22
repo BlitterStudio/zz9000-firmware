@@ -852,6 +852,11 @@ void scheduler_core1_worker(void)
 #if ZZAPP_PERF_COUNTERS
     zzapp_kernel_perf_print_reports(zzapp_runtime_kernel());
 #endif
+    /* Wake the sleepers whose microsecond deadline has passed. One whose
+     * deadline is within a tick keeps this loop looking at the clock: idling
+     * in WFE would end the sleep at the next tick, up to 5 ms late. */
+    if (zzapp_kernel_sleep_poll(zzapp_runtime_kernel(), ZZAPP_TICK_US))
+      should_wfe = 0;
     /* A runnable app gets the core back at once. Idling in WFE while an
      * app could run left it waiting for the next 5 ms tick after every
      * service pass, which made swquake take minutes to load (kit 66). */

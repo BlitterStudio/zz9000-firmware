@@ -245,12 +245,17 @@ pass wakes it itself when its record has a stop latched, and a sleep begun
 with a stop already latched returns at once: the app returns from the call,
 reads `aar_should_stop()` true and has the stop grace to finish. A sleep ends
 early only on a stop. `aar_sleep_us(us)` lasts at least `us` microseconds of
-the `aar_time_us` clock. The scheduler counts whole milliseconds of that
-clock, so the deadline is the first millisecond boundary at or after the
-start plus `us` (start's millisecond plus `us` rounded up would end the sleep
-early by the fraction of the millisecond already elapsed); the tick that
-finds it due wakes the sleeper. `aar_event_poll` and `aar_display_vsync` do
-not park; the latter only yields once.
+the `aar_time_us` clock and ends at the first look at the clock after that:
+the thread keeps a microsecond deadline, and every advance of the scheduler
+(a tick, a switch) and every pass of the system thread's loop compares it to
+the clock. The loop does not idle in WFE while a sleeper's deadline is within
+a tick (`ZZAPP_TICK_US`), so a sleep ends within the loop's pass time of its
+deadline; a longer one is looked at by the tick that precedes it. The
+scheduler's millisecond deadline (the first boundary at or after the
+microsecond one) is only a backstop: a deadline of the start's millisecond
+plus `us` rounded up would end the sleep early by the fraction of the
+millisecond already elapsed. `aar_event_poll` and `aar_display_vsync` do not
+park; the latter only yields once.
 
 A service the app asks of its client is a request on the SQ. A record has
 four request table entries: a blocking one (file, list, console read,
