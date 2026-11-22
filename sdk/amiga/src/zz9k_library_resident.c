@@ -245,6 +245,13 @@ static void zz9k_lib_dispatcher_stop(struct ZZ9KBase *base);
 } while (0)
 #define ZZ9K_LIB_SYNC_WAIT_FALLBACK(record) \
   zz9k_lib_sync_call_fallback(record)
+#define ZZ9K_LIB_SYNC_DISPATCHER_STOP_REQUESTED(base) \
+  (((struct ZZ9KBase *)(base))->dispatcher_stop_requested)
+#define ZZ9K_LIB_SYNC_DISPATCHER_POLL(base, completed) \
+  ZZ9KPoll(&((struct ZZ9KBase *)(base))->core, 16, (completed))
+#define ZZ9K_LIB_SYNC_DISPATCHER_RESIGNAL(base) \
+  Signal(((struct ZZ9KBase *)(base))->dispatcher_task, \
+         ((struct ZZ9KBase *)(base))->dispatcher_signal_mask)
 #include "zz9k_library_resident_sync.h"
 #undef ZZ9K_LIB_SYNC_OBTAIN
 #undef ZZ9K_LIB_SYNC_ATTEMPT
@@ -276,6 +283,9 @@ static void zz9k_lib_dispatcher_stop(struct ZZ9KBase *base);
 #undef ZZ9K_LIB_SYNC_WAIT_BLOCK
 #undef ZZ9K_LIB_SYNC_WAIT_FINISH_TICK
 #undef ZZ9K_LIB_SYNC_WAIT_FALLBACK
+#undef ZZ9K_LIB_SYNC_DISPATCHER_STOP_REQUESTED
+#undef ZZ9K_LIB_SYNC_DISPATCHER_POLL
+#undef ZZ9K_LIB_SYNC_DISPATCHER_RESIGNAL
 
 
 static int zz9k_lib_query_caps(REG(a6, struct ZZ9KBase *base),
@@ -1028,6 +1038,7 @@ static void zz9k_lib_dispatcher_proc(void)
   ULONG signal_mask;
   ULONG stop_signal_mask;
   int status;
+  unsigned int lock_misses = 0U;
 
   process = (struct Process *)FindTask(0);
   base = (struct ZZ9KBase *)process->pr_Task.tc_UserData;
@@ -1104,26 +1115,7 @@ static void zz9k_lib_dispatcher_proc(void)
     if (signals & SIGBREAKF_CTRL_C) {
       break;
     }
-
-    for (;;) {
-      uint32_t completed;
-
-      completed = 0;
-      if (!zz9k_lib_dispatcher_service(base, &base->lock)) {
-        break;
-      }
-      if (base->dispatcher_stop_requested) {
-        ReleaseSemaphore(&base->lock);
-        signals = SIGBREAKF_CTRL_C;
-        break;
-      }
-      status = ZZ9KPoll(&base->core, 16, &completed);
-      ReleaseSemaphore(&base->lock);
-      if (status != ZZ9K_STATUS_OK || completed == 0) {
-        break;
-      }
-    }
-    if (signals & SIGBREAKF_CTRL_C) {
+    if (zz9k_lib_dispatcher_wake(base, &base->lock, &lock_misses)) {
       break;
     }
   }

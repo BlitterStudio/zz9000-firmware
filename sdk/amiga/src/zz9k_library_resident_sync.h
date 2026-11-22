@@ -34,7 +34,10 @@
     !defined(ZZ9K_LIB_SYNC_WAIT_BREAK_MASK) || \
     !defined(ZZ9K_LIB_SYNC_WAIT_BLOCK) || \
     !defined(ZZ9K_LIB_SYNC_WAIT_FINISH_TICK) || \
-    !defined(ZZ9K_LIB_SYNC_WAIT_FALLBACK)
+    !defined(ZZ9K_LIB_SYNC_WAIT_FALLBACK) || \
+    !defined(ZZ9K_LIB_SYNC_DISPATCHER_STOP_REQUESTED) || \
+    !defined(ZZ9K_LIB_SYNC_DISPATCHER_POLL) || \
+    !defined(ZZ9K_LIB_SYNC_DISPATCHER_RESIGNAL)
 #error "resident synchronization bindings are required"
 #endif
 
@@ -53,6 +56,53 @@ static inline int zz9k_lib_dispatcher_service(void *base, void *transport_lock)
     ZZ9K_LIB_SYNC_REAP_RELEASE(base);
   }
   return got_transport;
+}
+
+/* Consecutive dispatcher wakes that may find the transport lock busy and
+ * signal the dispatcher again before it stops retrying. */
+#ifndef ZZ9K_LIB_DISPATCHER_MISS_LIMIT
+#define ZZ9K_LIB_DISPATCHER_MISS_LIMIT 200U
+#endif
+
+/*
+ * One wake of the dispatcher, run for every signal it receives (the card's
+ * completion interrupt, the vertical-blank tick, a stop request). Returns 1
+ * when a stop was requested and the caller must leave, 0 otherwise.
+ *
+ * The dispatcher only attempts the transport lock: an owner that holds it
+ * may be waiting for the dispatcher to stop, so blocking could deadlock. A
+ * wake that finds the lock busy has still consumed its signal. It signals
+ * the dispatcher again, for at most ZZ9K_LIB_DISPATCHER_MISS_LIMIT
+ * consecutive misses; after that the vertical-blank tick is the safety net.
+ */
+static inline int zz9k_lib_dispatcher_wake(void *base, void *transport_lock,
+                                           unsigned int *misses)
+{
+  for (;;) {
+    uint32_t completed = 0;
+    int status;
+
+    if (!zz9k_lib_dispatcher_service(base, transport_lock)) {
+      /* The signal this wake consumed may have been the card's completion
+       * interrupt. Raise it again so the retry drains the ring as soon as
+       * the lock frees, instead of leaving the owner to its tick. */
+      if (*misses < ZZ9K_LIB_DISPATCHER_MISS_LIMIT) {
+        (*misses)++;
+        ZZ9K_LIB_SYNC_DISPATCHER_RESIGNAL(base);
+      }
+      return 0;
+    }
+    *misses = 0U;
+    if (ZZ9K_LIB_SYNC_DISPATCHER_STOP_REQUESTED(base)) {
+      ZZ9K_LIB_SYNC_RELEASE(transport_lock);
+      return 1;
+    }
+    status = ZZ9K_LIB_SYNC_DISPATCHER_POLL(base, &completed);
+    ZZ9K_LIB_SYNC_RELEASE(transport_lock);
+    if (status != ZZ9K_STATUS_OK || completed == 0U) {
+      return 0;
+    }
+  }
 }
 
 

@@ -81,6 +81,11 @@ struct TestState {
   int completion_pending;
   struct ReapWorld reap;
   uint32_t last_wait_mask;
+  int stop_requested;
+  int irq_completion_waiting;
+  int dispatcher_signal_pending;
+  unsigned int resignals;
+  unsigned int release_lock_after_attempts;
 };
 
 static struct TestState *test_state;
@@ -104,11 +109,42 @@ static int mock_attempt(void *opaque)
   struct TestSemaphore *semaphore = (struct TestSemaphore *)opaque;
 
   semaphore->attempts++;
+  if (test_state && test_state->release_lock_after_attempts != 0U &&
+      semaphore->attempts == test_state->release_lock_after_attempts) {
+    semaphore->owner = TEST_OWNER_NONE;
+  }
   if (semaphore->owner != TEST_OWNER_NONE) {
     return 0;
   }
   semaphore->owner = TEST_OWNER_DISPATCHER;
   return 1;
+}
+
+static void mock_complete(struct TestCall *call);
+
+static int mock_dispatcher_poll(void *base, uint32_t *completed)
+{
+  struct TestState *state = (struct TestState *)base;
+
+  if (state->transport_lock.owner != TEST_OWNER_DISPATCHER) {
+    printf("the dispatcher polled the ring without the transport lock\n");
+    failures++;
+  }
+  *completed = 0U;
+  if (state->irq_completion_waiting) {
+    state->irq_completion_waiting = 0;
+    mock_complete(&state->first);
+    *completed = 1U;
+  }
+  return ZZ9K_STATUS_OK;
+}
+
+static void mock_dispatcher_resignal(void *base)
+{
+  struct TestState *state = (struct TestState *)base;
+
+  state->dispatcher_signal_pending = 1;
+  state->resignals++;
 }
 
 static void mock_release(void *opaque)
@@ -386,6 +422,12 @@ struct FakeNode {
 #define ZZ9K_LIB_SYNC_WAIT_FINISH_TICK(record) \
   (((struct TestCall *)(record))->tick_armed = 0U)
 #define ZZ9K_LIB_SYNC_WAIT_FALLBACK(record) ZZ9K_STATUS_TIMEOUT
+#define ZZ9K_LIB_SYNC_DISPATCHER_STOP_REQUESTED(base) \
+  (((struct TestState *)(base))->stop_requested)
+#define ZZ9K_LIB_SYNC_DISPATCHER_POLL(base, completed) \
+  mock_dispatcher_poll(base, completed)
+#define ZZ9K_LIB_SYNC_DISPATCHER_RESIGNAL(base) \
+  mock_dispatcher_resignal(base)
 #include "zz9k_library_resident_sync.h"
 #undef ZZ9K_LIB_SYNC_OBTAIN
 #undef ZZ9K_LIB_SYNC_ATTEMPT
@@ -417,6 +459,9 @@ struct FakeNode {
 #undef ZZ9K_LIB_SYNC_WAIT_BLOCK
 #undef ZZ9K_LIB_SYNC_WAIT_FINISH_TICK
 #undef ZZ9K_LIB_SYNC_WAIT_FALLBACK
+#undef ZZ9K_LIB_SYNC_DISPATCHER_STOP_REQUESTED
+#undef ZZ9K_LIB_SYNC_DISPATCHER_POLL
+#undef ZZ9K_LIB_SYNC_DISPATCHER_RESIGNAL
 
 static void expect(int condition, const char *message)
 {
@@ -582,6 +627,77 @@ static void test_dispatcher_defers_to_a_busy_transport(void)
   expect(state.reap.scan_pending == 0U &&
              state.transport_lock.owner == TEST_OWNER_NONE,
          "the pending check did not run once the transport was free");
+}
+
+/* Run the dispatcher as its task does: one wake per pending signal. A wake
+ * that wants a retry signals the dispatcher again, which shows up here as a
+ * pending signal. Returns how many wakes ran. */
+static unsigned int run_dispatcher(struct TestState *state,
+                                   unsigned int *misses)
+{
+  unsigned int wakes = 0U;
+
+  while (state->dispatcher_signal_pending && wakes < 10000U) {
+    state->dispatcher_signal_pending = 0;
+    wakes++;
+    if (zz9k_lib_dispatcher_wake(state, &state->transport_lock, misses)) {
+      break;
+    }
+  }
+  return wakes;
+}
+
+/* The card's completion interrupt signals the dispatcher while another task
+ * holds the transport lock. The dispatcher only attempts the lock, so it
+ * must not drop that signal: the completion has to be delivered when the
+ * lock frees, not at the next 20 ms tick. */
+static void test_dispatcher_retries_when_the_owner_holds_the_transport(void)
+{
+  struct TestState state;
+  unsigned int misses = 0U;
+  unsigned int wakes;
+
+  init_state(&state);
+  state.first.submitted = 1U;
+  state.irq_completion_waiting = 1;
+  state.transport_lock.owner = TEST_OWNER_OTHER;
+  state.release_lock_after_attempts = 3U;
+  state.dispatcher_signal_pending = 1;
+  wakes = run_dispatcher(&state, &misses);
+  expect(state.first.completed && state.first.signaled,
+         "a completion interrupt that found the transport busy was dropped "
+         "until the next tick");
+  expect(wakes == 3U, "the dispatcher did not retry until the lock freed");
+  expect(state.transport_lock.obtains == 0U,
+         "dispatcher blocked obtaining a busy transport");
+  expect(state.transport_lock.owner == TEST_OWNER_NONE,
+         "dispatcher kept the transport lock after delivering");
+  expect(misses == 0U, "a delivered wake kept its miss count");
+}
+
+/* A lock held for a long time does not make the dispatcher spin: it retries
+ * a bounded number of consecutive misses, then waits for the vertical-blank
+ * tick, which delivers once the lock is free. */
+static void test_dispatcher_retries_are_bounded_and_the_tick_recovers(void)
+{
+  struct TestState state;
+  unsigned int misses = 0U;
+  unsigned int wakes;
+
+  init_state(&state);
+  state.first.submitted = 1U;
+  state.irq_completion_waiting = 1;
+  state.transport_lock.owner = TEST_OWNER_OTHER;
+  state.dispatcher_signal_pending = 1;
+  wakes = run_dispatcher(&state, &misses);
+  expect(wakes == ZZ9K_LIB_DISPATCHER_MISS_LIMIT + 1U,
+         "the dispatcher retry count is not bounded by the miss limit");
+  expect(!state.first.completed, "nothing can complete behind a held lock");
+  state.transport_lock.owner = TEST_OWNER_NONE;
+  state.dispatcher_signal_pending = 1;
+  wakes = run_dispatcher(&state, &misses);
+  expect(wakes == 1U && state.first.completed && state.first.signaled,
+         "the tick did not deliver once the transport was free");
 }
 
 static void test_reap_leaves_a_live_owner_alone(void)
@@ -882,6 +998,8 @@ int main(void)
   test_late_completion_self_drains_on_tick();
   test_deadline_drains_late_completion();
   test_dispatcher_defers_to_a_busy_transport();
+  test_dispatcher_retries_when_the_owner_holds_the_transport();
+  test_dispatcher_retries_are_bounded_and_the_tick_recovers();
   test_reap_leaves_a_live_owner_alone();
   test_task_lookup_walks_the_exec_lists();
   test_opener_ownership_rules();
