@@ -102,18 +102,20 @@ void audio_fabric_host_set_tx_base(uint8_t *base)
 #endif
 
 /* Per-slot preconvert staging rings (converting leases only; slot 0
- * is the pump and never converts through staging). Whole 48-kHz
+ * is the pump and the voice slot is a firmware-owned 48-kHz producer,
+ * neither converts through staging). Whole 48-kHz
  * periods, 16 deep: the ISR never wants more than the fill target
  * ahead, and the queued-period rebuild replays at most the TX ring. */
 static uint8_t g_lease_staging
-	[AUDIO_FABRIC_SLOT_COUNT - 1U]
+	[AUDIO_FABRIC_LEASE_SLOTS]
 	[AUDIO_FABRIC_LEASE_STAGING_PERIODS * AUDIO_FABRIC_PERIOD_BYTES];
 
 uint8_t *fabric_lease_staging_ring(uint32_t slot)
 {
-	if (slot == AUDIO_FABRIC_SLOT_PUMP || slot >= AUDIO_FABRIC_SLOT_COUNT)
+	if (slot < AUDIO_FABRIC_SLOT_MAILBOX ||
+	    slot >= AUDIO_FABRIC_LEASE_SLOT_END)
 		return NULL;
-	return g_lease_staging[slot - 1U];
+	return g_lease_staging[slot - AUDIO_FABRIC_SLOT_MAILBOX];
 }
 
 #ifdef AUDIO_FABRIC_HOST_TEST

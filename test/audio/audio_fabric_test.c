@@ -419,6 +419,76 @@ static void scenario_mix(void)
 	mix_case("cancel", 12345, -12345);    /* 0 */
 }
 
+/* The voice slot is a firmware-owned producer the compositor mixes
+ * like any other slot. The pump carries a ramp tone (64-word period,
+ * -32000..31000) and the voice producer a constant S16 stereo source;
+ * every committed word must be the saturating sum. */
+#define VOICE_TONE_WORDS 64U
+
+static int16_t voice_tone_word(uint32_t k)
+{
+	return (int16_t)(((int32_t)(k % VOICE_TONE_WORDS) - 32) * 1000);
+}
+
+static void voice_mix_case(const char *label, int16_t voice_value)
+{
+	const int16_t *period;
+	uint32_t saturated = 0U;
+	uint32_t j;
+
+	fabric_reset_state();
+	model_init(&g_model_b, 48000U, 2U, SDK_AUDIO_SAMPLE_FORMAT_S16LE);
+	model_init(&g_model_c, 48000U, 2U, SDK_AUDIO_SAMPLE_FORMAT_S16LE);
+	model_prefill_constant(&g_model_b, 0);
+	for (j = 0U; j < MODEL_RING_BYTES / 2U; j++) {
+		int16_t w = voice_tone_word(j);
+
+		g_model_b.ring[2U * j] = (uint8_t)w;
+		g_model_b.ring[2U * j + 1U] = (uint8_t)((uint16_t)w >> 8);
+	}
+	model_prefill_constant(&g_model_c, voice_value);
+	g_dma_count = 0;
+	fabric_pump_start();
+	check(audio_fabric_producer_attach(AUDIO_FABRIC_SLOT_VOICE,
+	                                   &g_ops_c) == 1,
+	      "voice slot attach", label);
+	audio_fabric_producer_restart(AUDIO_FABRIC_SLOT_VOICE);
+	audio_fabric_producer_go_live(AUDIO_FABRIC_SLOT_VOICE);
+	for (j = 0U; j < 2U; j++) {
+		dma_tick(1);
+		audio_fabric_isr();
+	}
+	check(g_model_b.staged != 0U && g_model_c.staged != 0U,
+	      "voice slot staged like a peer",
+	      fmt("%s: pump=%llu voice=%llu", label,
+	          (unsigned long long)g_model_b.staged,
+	          (unsigned long long)g_model_c.staged));
+
+	period = (const int16_t *)&g_fabric_tx[2 * TICK_BYTES];
+	for (j = 0U; j < TICK_BYTES / 2U; j++) {
+		int32_t raw = (int32_t)voice_tone_word(j) + voice_value;
+		int16_t expected = raw > 32767 ? 32767
+			: raw < -32768 ? -32768 : (int16_t)raw;
+
+		if (expected == 32767 || expected == -32768)
+			saturated++;
+		if (period[j] != expected) {
+			check(0, "voice slot saturating sum",
+			      fmt("%s: word %u = %d, expected %d", label,
+			          (unsigned)j, period[j], expected));
+			return;
+		}
+	}
+	check(saturated != 0U, "voice slot sum reached the rails", label);
+	check(1, "voice slot saturating sum", label);
+}
+
+static void scenario_voice_slot_mix(void)
+{
+	voice_mix_case("voice+", 5000);
+	voice_mix_case("voice-", -5000);
+}
+
 /* The first formatter period after a media bind must find actual source PCM
  * already committed.  This covers both direct 48 kHz and preconverted views:
  * the fabric only sees their common producer snapshot. */
@@ -1397,6 +1467,7 @@ int main(int argc, char **argv)
 	characterization_invariants();
 
 	scenario_mix();
+	scenario_voice_slot_mix();
 	scenario_start_prime();
 	scenario_app_first_write_activation();
 	scenario_sdk_prime_starvation();
