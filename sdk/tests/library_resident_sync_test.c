@@ -59,6 +59,7 @@ struct TestCall {
   unsigned char cancelled;
   unsigned char signaled;
   unsigned char tick_armed;
+  uint32_t tick_micros;
   unsigned int writes;
   int status;
 };
@@ -81,6 +82,16 @@ struct TestState {
   int completion_pending;
   struct ReapWorld reap;
   uint32_t last_wait_mask;
+  int stop_requested;
+  int irq_completion_waiting;
+  int dispatcher_signal_pending;
+  unsigned int resignals;
+  unsigned int release_lock_after_attempts;
+  unsigned int dispatcher_ensures;
+  int complete_on_first_poll;
+  int clocked;
+  uint32_t now_micros;
+  uint32_t arrive_micros;
 };
 
 static struct TestState *test_state;
@@ -104,11 +115,53 @@ static int mock_attempt(void *opaque)
   struct TestSemaphore *semaphore = (struct TestSemaphore *)opaque;
 
   semaphore->attempts++;
+  if (test_state && test_state->release_lock_after_attempts != 0U &&
+      semaphore->attempts == test_state->release_lock_after_attempts) {
+    semaphore->owner = TEST_OWNER_NONE;
+  }
   if (semaphore->owner != TEST_OWNER_NONE) {
     return 0;
   }
   semaphore->owner = TEST_OWNER_DISPATCHER;
   return 1;
+}
+
+static void mock_complete(struct TestCall *call);
+
+static int mock_dispatcher_poll(void *base, uint32_t *completed)
+{
+  struct TestState *state = (struct TestState *)base;
+
+  if (state->transport_lock.owner != TEST_OWNER_DISPATCHER) {
+    printf("the dispatcher polled the ring without the transport lock\n");
+    failures++;
+  }
+  *completed = 0U;
+  if (state->irq_completion_waiting) {
+    state->irq_completion_waiting = 0;
+    mock_complete(&state->first);
+    *completed = 1U;
+  }
+  return ZZ9K_STATUS_OK;
+}
+
+static void mock_dispatcher_resignal(void *base)
+{
+  struct TestState *state = (struct TestState *)base;
+
+  state->dispatcher_signal_pending = 1;
+  state->resignals++;
+}
+
+static void mock_dispatcher_ensure(void *base)
+{
+  struct TestState *state = (struct TestState *)base;
+
+  if (state->transport_lock.owner != TEST_OWNER_NONE) {
+    printf("the dispatcher was requested with the transport lock held\n");
+    failures++;
+  }
+  state->dispatcher_ensures++;
 }
 
 static void mock_release(void *opaque)
@@ -182,6 +235,14 @@ static int mock_call_poll(void *base, void *opaque)
     test_state->complete_on_next_poll = 0;
     mock_complete(call);
   }
+  if (test_state->complete_on_first_poll && call == &test_state->first) {
+    test_state->complete_on_first_poll = 0;
+    mock_complete(call);
+  }
+  if (test_state->clocked && call == &test_state->first &&
+      !call->completed && test_state->now_micros >= test_state->arrive_micros) {
+    mock_complete(call);
+  }
   if (test_state->completion_pending && call == &test_state->first) {
     test_state->completion_pending = 0;
     mock_complete(call);
@@ -221,6 +282,10 @@ static uint32_t mock_wait_block(void *opaque, uint32_t signal_mask)
   int status;
 
   test_state->last_wait_mask = signal_mask;
+  if (test_state->clocked) {
+    test_state->now_micros += call->tick_micros;
+    return 4U;
+  }
   status = mock_call_wait(opaque);
   if (status == ZZ9K_STATUS_TIMEOUT) {
     return 2U;
@@ -369,15 +434,17 @@ struct FakeNode {
 #define ZZ9K_LIB_SYNC_WAIT_BUSY_AVAILABLE(record) 0
 #define ZZ9K_LIB_SYNC_WAIT_BUSY_DONE(record) 1
 #define ZZ9K_LIB_SYNC_WAIT_MARK_BUSY_DONE(record) do { } while (0)
-#define ZZ9K_LIB_SYNC_WAIT_START_BUSY(record) do { } while (0)
+#define ZZ9K_LIB_SYNC_WAIT_START_BUSY(record, micros) do { } while (0)
 #define ZZ9K_LIB_SYNC_WAIT_BUSY_EXPIRED(record) 1
 #define ZZ9K_LIB_SYNC_WAIT_FINISH_BUSY(record) do { } while (0)
 #define ZZ9K_LIB_SYNC_WAIT_TIMEOUT_ZERO(record) 0
 #define ZZ9K_LIB_SYNC_WAIT_TIMERS_AVAILABLE(record) 1
 #define ZZ9K_LIB_SYNC_WAIT_TICK_ARMED(record) \
   ((struct TestCall *)(record))->tick_armed
-#define ZZ9K_LIB_SYNC_WAIT_ARM_TICK(record) \
-  (((struct TestCall *)(record))->tick_armed = 1U)
+#define ZZ9K_LIB_SYNC_WAIT_ARM_TICK(record, micros) do { \
+  ((struct TestCall *)(record))->tick_armed = 1U; \
+  ((struct TestCall *)(record))->tick_micros = (micros); \
+} while (0)
 #define ZZ9K_LIB_SYNC_WAIT_OWNER_MASK(record) 1U
 #define ZZ9K_LIB_SYNC_WAIT_DEADLINE_MASK(record) 2U
 #define ZZ9K_LIB_SYNC_WAIT_TICK_MASK(record) 4U
@@ -386,6 +453,14 @@ struct FakeNode {
 #define ZZ9K_LIB_SYNC_WAIT_FINISH_TICK(record) \
   (((struct TestCall *)(record))->tick_armed = 0U)
 #define ZZ9K_LIB_SYNC_WAIT_FALLBACK(record) ZZ9K_STATUS_TIMEOUT
+#define ZZ9K_LIB_SYNC_DISPATCHER_STOP_REQUESTED(base) \
+  (((struct TestState *)(base))->stop_requested)
+#define ZZ9K_LIB_SYNC_DISPATCHER_POLL(base, completed) \
+  mock_dispatcher_poll(base, completed)
+#define ZZ9K_LIB_SYNC_DISPATCHER_RESIGNAL(base) \
+  mock_dispatcher_resignal(base)
+#define ZZ9K_LIB_SYNC_DISPATCHER_ENSURE(base) \
+  mock_dispatcher_ensure(base)
 #include "zz9k_library_resident_sync.h"
 #undef ZZ9K_LIB_SYNC_OBTAIN
 #undef ZZ9K_LIB_SYNC_ATTEMPT
@@ -417,6 +492,10 @@ struct FakeNode {
 #undef ZZ9K_LIB_SYNC_WAIT_BLOCK
 #undef ZZ9K_LIB_SYNC_WAIT_FINISH_TICK
 #undef ZZ9K_LIB_SYNC_WAIT_FALLBACK
+#undef ZZ9K_LIB_SYNC_DISPATCHER_STOP_REQUESTED
+#undef ZZ9K_LIB_SYNC_DISPATCHER_POLL
+#undef ZZ9K_LIB_SYNC_DISPATCHER_RESIGNAL
+#undef ZZ9K_LIB_SYNC_DISPATCHER_ENSURE
 
 static void expect(int condition, const char *message)
 {
@@ -468,6 +547,54 @@ static void test_late_completion_self_drains_on_tick(void)
          "self-drained completion did not wake its owner");
   expect((state.last_wait_mask & 4U) != 0U,
          "sync wait omitted the periodic drain tick");
+}
+
+/* A synchronous caller that has to sleep asks for the dispatcher before it
+ * does, so the card's completion interrupt can drain the ring and signal the
+ * owner instead of leaving it to its tick. A call answered by its first poll
+ * never needs one. */
+static void test_slow_sync_call_asks_for_the_dispatcher_once_per_wait(void)
+{
+  struct TestState state;
+
+  init_state(&state);
+  state.complete_after_tick = 1;
+  expect(zz9k_lib_sync_call(&state, &state.transport_lock, &state.first) ==
+             ZZ9K_STATUS_OK,
+         "slow sync call did not complete");
+  expect(state.dispatcher_ensures == 1U,
+         "a sync caller that slept did not ask for the dispatcher");
+  expect(state.transport_lock.owner == TEST_OWNER_NONE,
+         "the dispatcher was requested with the transport lock held");
+
+  init_state(&state);
+  state.complete_on_first_poll = 1;
+  expect(zz9k_lib_sync_call(&state, &state.transport_lock, &state.first) ==
+             ZZ9K_STATUS_OK,
+         "fast sync call did not complete");
+  expect(state.dispatcher_ensures == 0U,
+         "a sync call answered by its first poll started a dispatcher");
+}
+
+/* A reply that misses the busy window is found by the owner's own tick when
+ * no dispatcher drains the ring for it. The tick must be short: a ZZPlay
+ * frame makes several such calls, and one DOS tick (20 ms) each halved its
+ * frame rate. The clock here advances by each armed tick. */
+static void test_late_reply_is_found_within_a_short_tick(void)
+{
+  struct TestState state;
+
+  init_state(&state);
+  state.clocked = 1;
+  state.arrive_micros = 2000U;
+  expect(zz9k_lib_sync_call(&state, &state.transport_lock, &state.first) ==
+             ZZ9K_STATUS_OK,
+         "sync caller did not receive a reply that missed the busy window");
+  expect(state.first.completed, "late reply was not delivered");
+  expect(state.now_micros >= state.arrive_micros &&
+             state.now_micros - state.arrive_micros < 2000U,
+         "a reply that missed the busy window waited a long tick for its "
+         "owner to look again");
 }
 
 static void test_deadline_drains_late_completion(void)
@@ -582,6 +709,77 @@ static void test_dispatcher_defers_to_a_busy_transport(void)
   expect(state.reap.scan_pending == 0U &&
              state.transport_lock.owner == TEST_OWNER_NONE,
          "the pending check did not run once the transport was free");
+}
+
+/* Run the dispatcher as its task does: one wake per pending signal. A wake
+ * that wants a retry signals the dispatcher again, which shows up here as a
+ * pending signal. Returns how many wakes ran. */
+static unsigned int run_dispatcher(struct TestState *state,
+                                   unsigned int *misses)
+{
+  unsigned int wakes = 0U;
+
+  while (state->dispatcher_signal_pending && wakes < 10000U) {
+    state->dispatcher_signal_pending = 0;
+    wakes++;
+    if (zz9k_lib_dispatcher_wake(state, &state->transport_lock, misses)) {
+      break;
+    }
+  }
+  return wakes;
+}
+
+/* The card's completion interrupt signals the dispatcher while another task
+ * holds the transport lock. The dispatcher only attempts the lock, so it
+ * must not drop that signal: the completion has to be delivered when the
+ * lock frees, not at the next 20 ms tick. */
+static void test_dispatcher_retries_when_the_owner_holds_the_transport(void)
+{
+  struct TestState state;
+  unsigned int misses = 0U;
+  unsigned int wakes;
+
+  init_state(&state);
+  state.first.submitted = 1U;
+  state.irq_completion_waiting = 1;
+  state.transport_lock.owner = TEST_OWNER_OTHER;
+  state.release_lock_after_attempts = 3U;
+  state.dispatcher_signal_pending = 1;
+  wakes = run_dispatcher(&state, &misses);
+  expect(state.first.completed && state.first.signaled,
+         "a completion interrupt that found the transport busy was dropped "
+         "until the next tick");
+  expect(wakes == 3U, "the dispatcher did not retry until the lock freed");
+  expect(state.transport_lock.obtains == 0U,
+         "dispatcher blocked obtaining a busy transport");
+  expect(state.transport_lock.owner == TEST_OWNER_NONE,
+         "dispatcher kept the transport lock after delivering");
+  expect(misses == 0U, "a delivered wake kept its miss count");
+}
+
+/* A lock held for a long time does not make the dispatcher spin: it retries
+ * a bounded number of consecutive misses, then waits for the vertical-blank
+ * tick, which delivers once the lock is free. */
+static void test_dispatcher_retries_are_bounded_and_the_tick_recovers(void)
+{
+  struct TestState state;
+  unsigned int misses = 0U;
+  unsigned int wakes;
+
+  init_state(&state);
+  state.first.submitted = 1U;
+  state.irq_completion_waiting = 1;
+  state.transport_lock.owner = TEST_OWNER_OTHER;
+  state.dispatcher_signal_pending = 1;
+  wakes = run_dispatcher(&state, &misses);
+  expect(wakes == ZZ9K_LIB_DISPATCHER_MISS_LIMIT + 1U,
+         "the dispatcher retry count is not bounded by the miss limit");
+  expect(!state.first.completed, "nothing can complete behind a held lock");
+  state.transport_lock.owner = TEST_OWNER_NONE;
+  state.dispatcher_signal_pending = 1;
+  wakes = run_dispatcher(&state, &misses);
+  expect(wakes == 1U && state.first.completed && state.first.signaled,
+         "the tick did not deliver once the transport was free");
 }
 
 static void test_reap_leaves_a_live_owner_alone(void)
@@ -880,8 +1078,12 @@ int main(void)
   test_timeout_abandons_pending_record();
   test_break_signal_remains_pending();
   test_late_completion_self_drains_on_tick();
+  test_late_reply_is_found_within_a_short_tick();
+  test_slow_sync_call_asks_for_the_dispatcher_once_per_wait();
   test_deadline_drains_late_completion();
   test_dispatcher_defers_to_a_busy_transport();
+  test_dispatcher_retries_when_the_owner_holds_the_transport();
+  test_dispatcher_retries_are_bounded_and_the_tick_recovers();
   test_reap_leaves_a_live_owner_alone();
   test_task_lookup_walks_the_exec_lists();
   test_opener_ownership_rules();

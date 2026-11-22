@@ -33,7 +33,6 @@ struct DosLibrary *DOSBase;
 extern struct Library *UtilityBase;
 
 #define ZZ9K_LIB_IRQ_WAIT_MICROS 10UL
-#define ZZ9K_LIB_SYNC_POLL_MICROS 20000UL
 struct ZZ9KOpener {
   struct ZZ9KOpener *next;
   struct Task *task;
@@ -77,6 +76,7 @@ struct ZZ9KBase {
   UBYTE dispatcher_running;
   UBYTE dispatcher_starting;
   UBYTE dispatcher_stop_requested;
+  UBYTE dispatcher_start_failed;
   struct ZZ9KOpener *openers;
   uint16_t next_client_id;
   /* Vertical blanks counted by the VBlank interrupt, the clock of the
@@ -127,6 +127,7 @@ static int zz9k_lib_sync_call_completed(void *record);
 static int zz9k_lib_sync_call_status(void *record);
 static int zz9k_lib_sync_call_cancel(void *opaque, void *record);
 static int zz9k_lib_sync_call_wait(void *record);
+static void zz9k_lib_sync_call_ensure_dispatcher(void *opaque);
 static void zz9k_lib_timer_wait_arm(struct ZZ9KTimerWait *timer,
                                     uint32_t seconds, uint32_t micros);
 static int zz9k_lib_sync_call_fallback(void *record);
@@ -203,10 +204,10 @@ static void zz9k_lib_dispatcher_stop(struct ZZ9KBase *base);
   (((struct ZZ9KSyncCall *)(record))->busy_done)
 #define ZZ9K_LIB_SYNC_WAIT_MARK_BUSY_DONE(record) \
   (((struct ZZ9KSyncCall *)(record))->busy_done = 1U)
-#define ZZ9K_LIB_SYNC_WAIT_START_BUSY(record) do { \
+#define ZZ9K_LIB_SYNC_WAIT_START_BUSY(record, micros) do { \
   struct ZZ9KSyncCall *wait_call = (struct ZZ9KSyncCall *)(record); \
   if (!wait_call->busy_armed) { \
-    zz9k_lib_timer_wait_arm(&wait_call->busy_timer, 0U, 250U); \
+    zz9k_lib_timer_wait_arm(&wait_call->busy_timer, 0U, (micros)); \
     wait_call->busy_armed = 1U; \
   } \
 } while (0)
@@ -224,10 +225,9 @@ static void zz9k_lib_dispatcher_stop(struct ZZ9KBase *base);
    ((struct ZZ9KSyncCall *)(record))->busy_timer.request != 0)
 #define ZZ9K_LIB_SYNC_WAIT_TICK_ARMED(record) \
   (((struct ZZ9KSyncCall *)(record))->tick_armed)
-#define ZZ9K_LIB_SYNC_WAIT_ARM_TICK(record) do { \
+#define ZZ9K_LIB_SYNC_WAIT_ARM_TICK(record, micros) do { \
   struct ZZ9KSyncCall *wait_call = (struct ZZ9KSyncCall *)(record); \
-  zz9k_lib_timer_wait_arm(&wait_call->busy_timer, 0U, \
-                          ZZ9K_LIB_SYNC_POLL_MICROS); \
+  zz9k_lib_timer_wait_arm(&wait_call->busy_timer, 0U, (micros)); \
   wait_call->tick_armed = 1U; \
 } while (0)
 #define ZZ9K_LIB_SYNC_WAIT_OWNER_MASK(record) \
@@ -245,6 +245,15 @@ static void zz9k_lib_dispatcher_stop(struct ZZ9KBase *base);
 } while (0)
 #define ZZ9K_LIB_SYNC_WAIT_FALLBACK(record) \
   zz9k_lib_sync_call_fallback(record)
+#define ZZ9K_LIB_SYNC_DISPATCHER_STOP_REQUESTED(base) \
+  (((struct ZZ9KBase *)(base))->dispatcher_stop_requested)
+#define ZZ9K_LIB_SYNC_DISPATCHER_POLL(base, completed) \
+  ZZ9KPoll(&((struct ZZ9KBase *)(base))->core, 16, (completed))
+#define ZZ9K_LIB_SYNC_DISPATCHER_RESIGNAL(base) \
+  Signal(((struct ZZ9KBase *)(base))->dispatcher_task, \
+         ((struct ZZ9KBase *)(base))->dispatcher_signal_mask)
+#define ZZ9K_LIB_SYNC_DISPATCHER_ENSURE(base) \
+  zz9k_lib_sync_call_ensure_dispatcher(base)
 #include "zz9k_library_resident_sync.h"
 #undef ZZ9K_LIB_SYNC_OBTAIN
 #undef ZZ9K_LIB_SYNC_ATTEMPT
@@ -276,6 +285,10 @@ static void zz9k_lib_dispatcher_stop(struct ZZ9KBase *base);
 #undef ZZ9K_LIB_SYNC_WAIT_BLOCK
 #undef ZZ9K_LIB_SYNC_WAIT_FINISH_TICK
 #undef ZZ9K_LIB_SYNC_WAIT_FALLBACK
+#undef ZZ9K_LIB_SYNC_DISPATCHER_STOP_REQUESTED
+#undef ZZ9K_LIB_SYNC_DISPATCHER_POLL
+#undef ZZ9K_LIB_SYNC_DISPATCHER_RESIGNAL
+#undef ZZ9K_LIB_SYNC_DISPATCHER_ENSURE
 
 
 static int zz9k_lib_query_caps(REG(a6, struct ZZ9KBase *base),
@@ -1028,6 +1041,7 @@ static void zz9k_lib_dispatcher_proc(void)
   ULONG signal_mask;
   ULONG stop_signal_mask;
   int status;
+  unsigned int lock_misses = 0U;
 
   process = (struct Process *)FindTask(0);
   base = (struct ZZ9KBase *)process->pr_Task.tc_UserData;
@@ -1104,26 +1118,7 @@ static void zz9k_lib_dispatcher_proc(void)
     if (signals & SIGBREAKF_CTRL_C) {
       break;
     }
-
-    for (;;) {
-      uint32_t completed;
-
-      completed = 0;
-      if (!zz9k_lib_dispatcher_service(base, &base->lock)) {
-        break;
-      }
-      if (base->dispatcher_stop_requested) {
-        ReleaseSemaphore(&base->lock);
-        signals = SIGBREAKF_CTRL_C;
-        break;
-      }
-      status = ZZ9KPoll(&base->core, 16, &completed);
-      ReleaseSemaphore(&base->lock);
-      if (status != ZZ9K_STATUS_OK || completed == 0) {
-        break;
-      }
-    }
-    if (signals & SIGBREAKF_CTRL_C) {
+    if (zz9k_lib_dispatcher_wake(base, &base->lock, &lock_misses)) {
       break;
     }
   }
@@ -1222,6 +1217,23 @@ static int zz9k_lib_dispatcher_ensure(struct ZZ9KBase *base)
 
   FreeSignal(signal_bit);
   return status;
+}
+
+/* Called by a synchronous caller about to sleep, with the transport lock
+ * released. The first one starts the dispatcher, so the completion
+ * interrupt can drain the ring and signal the owner; the owner's tick stays
+ * the fallback. A dispatcher that cannot start is not retried on every
+ * call. */
+static void zz9k_lib_sync_call_ensure_dispatcher(void *opaque)
+{
+  struct ZZ9KBase *base = (struct ZZ9KBase *)opaque;
+
+  if (base->dispatcher_running || base->dispatcher_start_failed) {
+    return;
+  }
+  if (zz9k_lib_dispatcher_ensure(base) != ZZ9K_STATUS_OK) {
+    base->dispatcher_start_failed = 1;
+  }
 }
 
 static void zz9k_lib_dispatcher_stop(struct ZZ9KBase *base)

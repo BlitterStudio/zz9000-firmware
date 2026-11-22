@@ -486,12 +486,23 @@ lock while a synchronous caller waits.
 
 For an empty completion ring, synchronous calls poll its producer index for up
 to 250 microseconds. They then wait on their own completion signal, while a
-short DOS-tick timer returns them to the drain path when no dispatcher is
-running. Another task can drain the ring while a caller waits; it routes that
-caller's reply to its pending record and signals the owner. The caller's timeout
-remains a wall-clock DOS-tick budget. Firmware normally answers in about 6
-microseconds, so this avoids a tick-scale latency for short calls without making
-a slow call block another task's submission.
+1 ms timer returns them to the drain path when no dispatcher is running (a
+DOS tick, 20 ms, would cost every reply slower than the poll window a whole
+tick: ZZPlay's per-frame calls then ran at half the frame rate). Another task
+can drain the ring while a caller waits; it routes that caller's reply to its
+pending record and signals the owner. The caller's timeout remains a
+wall-clock DOS-tick budget. Firmware normally answers in about 6 microseconds,
+so this avoids a tick-scale latency for short calls without making a slow call
+block another task's submission. A completion interrupt that reaches the
+dispatcher while another task holds the transport lock is not dropped: the
+dispatcher signals itself again, up to 200 consecutive times, and the
+vertical-blank tick remains the backstop.
+
+The first synchronous call that outlasts the poll window starts the dispatcher
+if it is not running, with the transport lock released, so the card's
+completion interrupt drains the ring and signals the sleeping owner. A
+dispatcher that cannot start is not retried on every call; the 1 ms timer
+keeps working without it.
 
 ```c
 ZZ9KCaps caps;
