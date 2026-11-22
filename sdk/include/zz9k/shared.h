@@ -56,17 +56,21 @@ static inline int zz9k_shared_copy_to(ZZ9KSharedBuffer *buffer,
     volatile uint32_t *dst32 = (volatile uint32_t *)dst8;
     const uint32_t *src32 = (const uint32_t *)src8;
 #if defined(__GNUC__) && (defined(__m68k__) || defined(__mc68000__))
+    /* Numbered asm operands (%0 dst, %1 src, %2 count) in all six copy loops,
+     * not [name] operands: the adtools GCC 2.95.3 that builds the AmiSSL
+     * provider (sdk/integration/amissl) predates named operands (GCC 3.1)
+     * and cannot parse them. Keep every asm here 2.95-parsable. */
     uint32_t count = length >> 2;
     if (count != 0U) {
       uint32_t dbf_cnt = count - 1U;
       __asm__ volatile(
           "1:\n\t"
-          "move.l (%[src])+,(%[dst])+\n\t"
-          "dbf %[cnt],1b\n\t"
-          "clr.w %[cnt]\n\t"
-          "subq.l #1,%[cnt]\n\t"
+          "move.l (%1)+,(%0)+\n\t"
+          "dbf %2,1b\n\t"
+          "clr.w %2\n\t"
+          "subq.l #1,%2\n\t"
           "bcc.s 1b"
-          : [dst] "+a"(dst32), [src] "+a"(src32), [cnt] "+d"(dbf_cnt)
+          : "+a"(dst32), "+a"(src32), "+d"(dbf_cnt)
           :
           : "cc", "memory");
       length &= 3U;
@@ -90,12 +94,12 @@ static inline int zz9k_shared_copy_to(ZZ9KSharedBuffer *buffer,
       uint32_t dbf_cnt = count - 1U;
       __asm__ volatile(
           "1:\n\t"
-          "move.w (%[src])+,(%[dst])+\n\t"
-          "dbf %[cnt],1b\n\t"
-          "clr.w %[cnt]\n\t"
-          "subq.l #1,%[cnt]\n\t"
+          "move.w (%1)+,(%0)+\n\t"
+          "dbf %2,1b\n\t"
+          "clr.w %2\n\t"
+          "subq.l #1,%2\n\t"
           "bcc.s 1b"
-          : [dst] "+a"(dst16), [src] "+a"(src16), [cnt] "+d"(dbf_cnt)
+          : "+a"(dst16), "+a"(src16), "+d"(dbf_cnt)
           :
           : "cc", "memory");
       length &= 1U;
@@ -114,12 +118,12 @@ static inline int zz9k_shared_copy_to(ZZ9KSharedBuffer *buffer,
     uint32_t dbf_cnt = length - 1U;
     __asm__ volatile(
         "1:\n\t"
-        "move.b (%[src])+,(%[dst])+\n\t"
-        "dbf %[cnt],1b\n\t"
-        "clr.w %[cnt]\n\t"
-        "subq.l #1,%[cnt]\n\t"
+        "move.b (%1)+,(%0)+\n\t"
+        "dbf %2,1b\n\t"
+        "clr.w %2\n\t"
+        "subq.l #1,%2\n\t"
         "bcc.s 1b"
-        : [dst] "+a"(dst8), [src] "+a"(src8), [cnt] "+d"(dbf_cnt)
+        : "+a"(dst8), "+a"(src8), "+d"(dbf_cnt)
         :
         : "cc", "memory");
     length = 0U;
@@ -158,12 +162,12 @@ static inline int zz9k_shared_copy_from(void *dst,
       uint32_t dbf_cnt = count - 1U;
       __asm__ volatile(
           "1:\n\t"
-          "move.l (%[src])+,(%[dst])+\n\t"
-          "dbf %[cnt],1b\n\t"
-          "clr.w %[cnt]\n\t"
-          "subq.l #1,%[cnt]\n\t"
+          "move.l (%1)+,(%0)+\n\t"
+          "dbf %2,1b\n\t"
+          "clr.w %2\n\t"
+          "subq.l #1,%2\n\t"
           "bcc.s 1b"
-          : [dst] "+a"(dst32), [src] "+a"(src32), [cnt] "+d"(dbf_cnt)
+          : "+a"(dst32), "+a"(src32), "+d"(dbf_cnt)
           :
           : "cc", "memory");
       length &= 3U;
@@ -187,12 +191,12 @@ static inline int zz9k_shared_copy_from(void *dst,
       uint32_t dbf_cnt = count - 1U;
       __asm__ volatile(
           "1:\n\t"
-          "move.w (%[src])+,(%[dst])+\n\t"
-          "dbf %[cnt],1b\n\t"
-          "clr.w %[cnt]\n\t"
-          "subq.l #1,%[cnt]\n\t"
+          "move.w (%1)+,(%0)+\n\t"
+          "dbf %2,1b\n\t"
+          "clr.w %2\n\t"
+          "subq.l #1,%2\n\t"
           "bcc.s 1b"
-          : [dst] "+a"(dst16), [src] "+a"(src16), [cnt] "+d"(dbf_cnt)
+          : "+a"(dst16), "+a"(src16), "+d"(dbf_cnt)
           :
           : "cc", "memory");
       length &= 1U;
@@ -211,12 +215,12 @@ static inline int zz9k_shared_copy_from(void *dst,
     uint32_t dbf_cnt = length - 1U;
     __asm__ volatile(
         "1:\n\t"
-        "move.b (%[src])+,(%[dst])+\n\t"
-        "dbf %[cnt],1b\n\t"
-        "clr.w %[cnt]\n\t"
-        "subq.l #1,%[cnt]\n\t"
+        "move.b (%1)+,(%0)+\n\t"
+        "dbf %2,1b\n\t"
+        "clr.w %2\n\t"
+        "subq.l #1,%2\n\t"
         "bcc.s 1b"
-        : [dst] "+a"(dst8), [src] "+a"(src8), [cnt] "+d"(dbf_cnt)
+        : "+a"(dst8), "+a"(src8), "+d"(dbf_cnt)
         :
         : "cc", "memory");
     length = 0U;
