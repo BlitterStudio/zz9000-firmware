@@ -59,6 +59,7 @@ struct TestCall {
   unsigned char cancelled;
   unsigned char signaled;
   unsigned char tick_armed;
+  uint32_t tick_micros;
   unsigned int writes;
   int status;
 };
@@ -86,6 +87,9 @@ struct TestState {
   int dispatcher_signal_pending;
   unsigned int resignals;
   unsigned int release_lock_after_attempts;
+  int clocked;
+  uint32_t now_micros;
+  uint32_t arrive_micros;
 };
 
 static struct TestState *test_state;
@@ -218,6 +222,10 @@ static int mock_call_poll(void *base, void *opaque)
     test_state->complete_on_next_poll = 0;
     mock_complete(call);
   }
+  if (test_state->clocked && call == &test_state->first &&
+      !call->completed && test_state->now_micros >= test_state->arrive_micros) {
+    mock_complete(call);
+  }
   if (test_state->completion_pending && call == &test_state->first) {
     test_state->completion_pending = 0;
     mock_complete(call);
@@ -257,6 +265,10 @@ static uint32_t mock_wait_block(void *opaque, uint32_t signal_mask)
   int status;
 
   test_state->last_wait_mask = signal_mask;
+  if (test_state->clocked) {
+    test_state->now_micros += call->tick_micros;
+    return 4U;
+  }
   status = mock_call_wait(opaque);
   if (status == ZZ9K_STATUS_TIMEOUT) {
     return 2U;
@@ -405,15 +417,17 @@ struct FakeNode {
 #define ZZ9K_LIB_SYNC_WAIT_BUSY_AVAILABLE(record) 0
 #define ZZ9K_LIB_SYNC_WAIT_BUSY_DONE(record) 1
 #define ZZ9K_LIB_SYNC_WAIT_MARK_BUSY_DONE(record) do { } while (0)
-#define ZZ9K_LIB_SYNC_WAIT_START_BUSY(record) do { } while (0)
+#define ZZ9K_LIB_SYNC_WAIT_START_BUSY(record, micros) do { } while (0)
 #define ZZ9K_LIB_SYNC_WAIT_BUSY_EXPIRED(record) 1
 #define ZZ9K_LIB_SYNC_WAIT_FINISH_BUSY(record) do { } while (0)
 #define ZZ9K_LIB_SYNC_WAIT_TIMEOUT_ZERO(record) 0
 #define ZZ9K_LIB_SYNC_WAIT_TIMERS_AVAILABLE(record) 1
 #define ZZ9K_LIB_SYNC_WAIT_TICK_ARMED(record) \
   ((struct TestCall *)(record))->tick_armed
-#define ZZ9K_LIB_SYNC_WAIT_ARM_TICK(record) \
-  (((struct TestCall *)(record))->tick_armed = 1U)
+#define ZZ9K_LIB_SYNC_WAIT_ARM_TICK(record, micros) do { \
+  ((struct TestCall *)(record))->tick_armed = 1U; \
+  ((struct TestCall *)(record))->tick_micros = (micros); \
+} while (0)
 #define ZZ9K_LIB_SYNC_WAIT_OWNER_MASK(record) 1U
 #define ZZ9K_LIB_SYNC_WAIT_DEADLINE_MASK(record) 2U
 #define ZZ9K_LIB_SYNC_WAIT_TICK_MASK(record) 4U
@@ -513,6 +527,27 @@ static void test_late_completion_self_drains_on_tick(void)
          "self-drained completion did not wake its owner");
   expect((state.last_wait_mask & 4U) != 0U,
          "sync wait omitted the periodic drain tick");
+}
+
+/* A reply that misses the busy window is found by the owner's own tick when
+ * no dispatcher drains the ring for it. The tick must be short: a ZZPlay
+ * frame makes several such calls, and one DOS tick (20 ms) each halved its
+ * frame rate. The clock here advances by each armed tick. */
+static void test_late_reply_is_found_within_a_short_tick(void)
+{
+  struct TestState state;
+
+  init_state(&state);
+  state.clocked = 1;
+  state.arrive_micros = 2000U;
+  expect(zz9k_lib_sync_call(&state, &state.transport_lock, &state.first) ==
+             ZZ9K_STATUS_OK,
+         "sync caller did not receive a reply that missed the busy window");
+  expect(state.first.completed, "late reply was not delivered");
+  expect(state.now_micros >= state.arrive_micros &&
+             state.now_micros - state.arrive_micros < 2000U,
+         "a reply that missed the busy window waited a long tick for its "
+         "owner to look again");
 }
 
 static void test_deadline_drains_late_completion(void)
@@ -996,6 +1031,7 @@ int main(void)
   test_timeout_abandons_pending_record();
   test_break_signal_remains_pending();
   test_late_completion_self_drains_on_tick();
+  test_late_reply_is_found_within_a_short_tick();
   test_deadline_drains_late_completion();
   test_dispatcher_defers_to_a_busy_transport();
   test_dispatcher_retries_when_the_owner_holds_the_transport();

@@ -41,6 +41,18 @@
 #error "resident synchronization bindings are required"
 #endif
 
+/* A synchronous caller polls the completion ring for ZZ9K_LIB_SYNC_BUSY_MICROS
+ * after it submits. Past that it sleeps until its own completion signal or,
+ * when no dispatcher drains the ring for it, until its tick timer fires and
+ * it polls the ring itself. The tick is the longest a reply that missed the
+ * busy window waits, so it must stay far below a DOS tick (20 ms). */
+#ifndef ZZ9K_LIB_SYNC_BUSY_MICROS
+#define ZZ9K_LIB_SYNC_BUSY_MICROS 250UL
+#endif
+#ifndef ZZ9K_LIB_SYNC_TICK_MICROS
+#define ZZ9K_LIB_SYNC_TICK_MICROS 1000UL
+#endif
+
 /*
  * One pass of the dispatcher: note whether an owner check is due, then, when
  * the transport lock is free, release what the check found. Stopping or
@@ -119,7 +131,7 @@ static inline int zz9k_lib_sync_call_wait_step(void *record)
     if (!ZZ9K_LIB_SYNC_WAIT_BUSY_AVAILABLE(record)) {
       ZZ9K_LIB_SYNC_WAIT_MARK_BUSY_DONE(record);
     } else {
-      ZZ9K_LIB_SYNC_WAIT_START_BUSY(record);
+      ZZ9K_LIB_SYNC_WAIT_START_BUSY(record, ZZ9K_LIB_SYNC_BUSY_MICROS);
       if (!ZZ9K_LIB_SYNC_WAIT_BUSY_EXPIRED(record)) {
         return ZZ9K_STATUS_OK;
       }
@@ -135,7 +147,7 @@ static inline int zz9k_lib_sync_call_wait_step(void *record)
     return ZZ9K_LIB_SYNC_WAIT_FALLBACK(record);
   }
   if (!ZZ9K_LIB_SYNC_WAIT_TICK_ARMED(record)) {
-    ZZ9K_LIB_SYNC_WAIT_ARM_TICK(record);
+    ZZ9K_LIB_SYNC_WAIT_ARM_TICK(record, ZZ9K_LIB_SYNC_TICK_MICROS);
   }
   /*
    * A caller owns its break signals.  In particular, the break mask is

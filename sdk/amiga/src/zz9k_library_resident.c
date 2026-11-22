@@ -33,7 +33,6 @@ struct DosLibrary *DOSBase;
 extern struct Library *UtilityBase;
 
 #define ZZ9K_LIB_IRQ_WAIT_MICROS 10UL
-#define ZZ9K_LIB_SYNC_POLL_MICROS 20000UL
 struct ZZ9KOpener {
   struct ZZ9KOpener *next;
   struct Task *task;
@@ -203,10 +202,10 @@ static void zz9k_lib_dispatcher_stop(struct ZZ9KBase *base);
   (((struct ZZ9KSyncCall *)(record))->busy_done)
 #define ZZ9K_LIB_SYNC_WAIT_MARK_BUSY_DONE(record) \
   (((struct ZZ9KSyncCall *)(record))->busy_done = 1U)
-#define ZZ9K_LIB_SYNC_WAIT_START_BUSY(record) do { \
+#define ZZ9K_LIB_SYNC_WAIT_START_BUSY(record, micros) do { \
   struct ZZ9KSyncCall *wait_call = (struct ZZ9KSyncCall *)(record); \
   if (!wait_call->busy_armed) { \
-    zz9k_lib_timer_wait_arm(&wait_call->busy_timer, 0U, 250U); \
+    zz9k_lib_timer_wait_arm(&wait_call->busy_timer, 0U, (micros)); \
     wait_call->busy_armed = 1U; \
   } \
 } while (0)
@@ -224,10 +223,9 @@ static void zz9k_lib_dispatcher_stop(struct ZZ9KBase *base);
    ((struct ZZ9KSyncCall *)(record))->busy_timer.request != 0)
 #define ZZ9K_LIB_SYNC_WAIT_TICK_ARMED(record) \
   (((struct ZZ9KSyncCall *)(record))->tick_armed)
-#define ZZ9K_LIB_SYNC_WAIT_ARM_TICK(record) do { \
+#define ZZ9K_LIB_SYNC_WAIT_ARM_TICK(record, micros) do { \
   struct ZZ9KSyncCall *wait_call = (struct ZZ9KSyncCall *)(record); \
-  zz9k_lib_timer_wait_arm(&wait_call->busy_timer, 0U, \
-                          ZZ9K_LIB_SYNC_POLL_MICROS); \
+  zz9k_lib_timer_wait_arm(&wait_call->busy_timer, 0U, (micros)); \
   wait_call->tick_armed = 1U; \
 } while (0)
 #define ZZ9K_LIB_SYNC_WAIT_OWNER_MASK(record) \
