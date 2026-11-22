@@ -56,6 +56,7 @@ typedef char voice_period_is_960_frames[
 struct voice_session {
 	uint8_t state;           /* AUDIO_VOICE_STATE_* */
 	uint8_t slot_live;       /* the fabric slot was published */
+	uint8_t low_latency;     /* the session lowered the fabric fill-ahead */
 	uint32_t id;
 	struct audio_voice_session_open res; /* resolved buffers and hook */
 	uint32_t voices;
@@ -398,6 +399,13 @@ static void session_end(void)
 	if (g_s.slot_live)
 		g_s.underruns = audio_fabric_slot_underruns(VOICE_SLOT) -
 			g_s.underrun_base;
+	/* Give the fabric its default fill-ahead back before the slot goes:
+	 * every end path (close, heartbeat loss, client release, warm reset)
+	 * runs through here. */
+	if (g_s.low_latency) {
+		audio_fabric_fill_ahead_set(0U);
+		g_s.low_latency = 0U;
+	}
 	/* Arm the queued-period rebuild while the slot's tags still exist,
 	 * then detach: only the period the DMA is in may still carry voice
 	 * audio. Both under one critical section so the compositor ISR
@@ -461,6 +469,7 @@ uint16_t audio_voice_session_open(const struct audio_voice_session_open *open,
 {
 	uint32_t records;
 	uint32_t lead;
+	uint32_t lead_floor;
 	uint16_t rc;
 
 	if (g_s.state != AUDIO_VOICE_STATE_CLOSED)
@@ -480,9 +489,12 @@ uint16_t audio_voice_session_open(const struct audio_voice_session_open *open,
 		records = AUDIO_VOICE_RING_MAX_RECORDS;
 	/* Floor, cap, and a whole number of periods: the engine renders whole
 	 * periods, so a lead that is not one would be overshot by the poll. */
+	lead_floor = (open->flags & AUDIO_VOICE_OPEN_LOW_LATENCY) != 0U ?
+		AUDIO_VOICE_LL_LEAD_FLOOR_FRAMES :
+		AUDIO_VOICE_LEAD_FLOOR_FRAMES;
 	lead = open->lead_frames;
-	if (lead < AUDIO_VOICE_LEAD_FLOOR_FRAMES)
-		lead = AUDIO_VOICE_LEAD_FLOOR_FRAMES;
+	if (lead < lead_floor)
+		lead = lead_floor;
 	if (lead > AUDIO_VOICE_LEAD_MAX_FRAMES)
 		lead = AUDIO_VOICE_LEAD_MAX_FRAMES;
 	lead = (lead + AUDIO_VOICE_PERIOD_FRAMES - 1U) /
@@ -516,6 +528,12 @@ uint16_t audio_voice_session_open(const struct audio_voice_session_open *open,
 	g_s.heartbeat = rd32(open->ring + AUDIO_VOICE_RING_OFF_HEARTBEAT);
 	g_s.heartbeat_ms = now_ms();
 	g_s.state = AUDIO_VOICE_STATE_OPEN;
+	/* Only now, with the slot attached and the session built: a refused
+	 * open leaves the fabric alone. */
+	if ((open->flags & AUDIO_VOICE_OPEN_LOW_LATENCY) != 0U) {
+		audio_fabric_fill_ahead_set(AUDIO_VOICE_LL_FILL_AHEAD_PERIODS);
+		g_s.low_latency = 1U;
+	}
 	publish_status();
 
 	memset(grant, 0, sizeof(*grant));
@@ -523,7 +541,7 @@ uint16_t audio_voice_session_open(const struct audio_voice_session_open *open,
 	grant->voices = open->voices;
 	grant->bank_bytes = open->bank_len;
 	grant->lead_frames = lead;
-	grant->lead_floor_frames = AUDIO_VOICE_LEAD_FLOOR_FRAMES;
+	grant->lead_floor_frames = lead_floor;
 	grant->lead_max_frames = AUDIO_VOICE_LEAD_MAX_FRAMES;
 	grant->ring_records = records;
 	grant->output_rate = AUDIO_VOICE_OUT_HZ;

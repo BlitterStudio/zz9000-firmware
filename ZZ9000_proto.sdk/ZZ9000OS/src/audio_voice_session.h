@@ -29,10 +29,18 @@
 
 /*
  * Lead: how far past the playing frame the engine may render. The floor is
- * the fabric fill-ahead (6 periods) plus 2 periods of main-loop jitter.
+ * the fabric fill-ahead plus 2 periods of main-loop jitter: 6 + 2 periods.
+ * A low-latency session shortens the fabric fill-ahead while it is open and
+ * its floor is the fill-ahead plus one period, the least that serves a poll
+ * in every 20 ms window (the tolerated poll gap is
+ * (lead - fill-ahead) * 20 ms minus the render time). Hardware qualification
+ * fixes the two low-latency constants; see docs/audio-fabric.md.
  */
 #define AUDIO_VOICE_LEAD_FLOOR_FRAMES (8U * AUDIO_VOICE_PERIOD_FRAMES)
 #define AUDIO_VOICE_LEAD_MAX_FRAMES   24000U
+#define AUDIO_VOICE_LL_FILL_AHEAD_PERIODS 2U
+#define AUDIO_VOICE_LL_LEAD_FLOOR_FRAMES \
+	((AUDIO_VOICE_LL_FILL_AHEAD_PERIODS + 1U) * AUDIO_VOICE_PERIOD_FRAMES)
 
 /* Sample bank, 1 byte .. 32 MiB. */
 #define AUDIO_VOICE_BANK_MAX_BYTES (32U * 1024U * 1024U)
@@ -40,8 +48,12 @@
 /* Open flags. */
 #define AUDIO_VOICE_OPEN_NTSC   (1U << 0)
 #define AUDIO_VOICE_OPEN_LINEAR (1U << 1)
+/* Low-latency session: fabric fill-ahead of AUDIO_VOICE_LL_FILL_AHEAD_PERIODS
+ * while open, lead floor AUDIO_VOICE_LL_LEAD_FLOOR_FRAMES. */
+#define AUDIO_VOICE_OPEN_LOW_LATENCY (1U << 2)
 #define AUDIO_VOICE_OPEN_KNOWN \
-	(AUDIO_VOICE_OPEN_NTSC | AUDIO_VOICE_OPEN_LINEAR)
+	(AUDIO_VOICE_OPEN_NTSC | AUDIO_VOICE_OPEN_LINEAR | \
+	 AUDIO_VOICE_OPEN_LOW_LATENCY)
 
 /* Command ring: 16-byte header, then 16-byte records. */
 #define AUDIO_VOICE_RING_HEADER_BYTES 16U

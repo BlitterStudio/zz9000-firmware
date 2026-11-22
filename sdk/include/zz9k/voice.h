@@ -54,8 +54,15 @@ extern "C" {
 
 #define ZZ9K_VOICE_OPEN_FLAG_NTSC   (1U << 0) /* NTSC clock, else PAL */
 #define ZZ9K_VOICE_OPEN_FLAG_LINEAR (1U << 1) /* linear interpolation */
+/* Low-latency session (low-latency work): the firmware shortens its audio
+ * fill-ahead while the session is open, and the lead floor drops from 8
+ * periods (7680 frames) to 3 (2880 frames). Firmware without the mode
+ * answers ZZ9K_STATUS_BAD_REQUEST; zz9k.library before revision 43 refuses
+ * the flag locally with the same status. */
+#define ZZ9K_VOICE_OPEN_FLAG_LOW_LATENCY (1U << 2)
 #define ZZ9K_VOICE_OPEN_FLAG_KNOWN \
-  (ZZ9K_VOICE_OPEN_FLAG_NTSC | ZZ9K_VOICE_OPEN_FLAG_LINEAR)
+  (ZZ9K_VOICE_OPEN_FLAG_NTSC | ZZ9K_VOICE_OPEN_FLAG_LINEAR | \
+   ZZ9K_VOICE_OPEN_FLAG_LOW_LATENCY)
 
 /* ---- UPLOAD flags and sample formats ---- */
 

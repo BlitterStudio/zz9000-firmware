@@ -10,8 +10,8 @@
 
 #define ZZ9K_LIBRARY_NAME "zz9k.library"
 #define ZZ9K_LIBRARY_VERSION 2
-#define ZZ9K_LIBRARY_REVISION 42
-#define ZZ9K_LIBRARY_ID_STRING "zz9k.library 2.42 (22.11.2026)"
+#define ZZ9K_LIBRARY_REVISION 43
+#define ZZ9K_LIBRARY_ID_STRING "zz9k.library 2.43 (22.11.2026)"
 /* Revision 41 removes the ZZ9KApp* calls (LVOs -354 to -414). The ARM app
  * runtime is reached through aar.library instead, which carries its mailbox
  * calls through this library. Revision 42 reuses -354 and up for the voice
@@ -63,6 +63,9 @@
  * ZZ9KVoiceGetStatus. They take the vectors from -354 up that the removed
  * ZZ9KApp* calls held in revisions 35 to 40. */
 #define ZZ9K_LIBRARY_MIN_REVISION_AUDIO_VOICE 42
+/* Revision 43 accepts ZZ9K_VOICE_OPEN_FLAG_LOW_LATENCY in ZZ9KVoiceOpen().
+ * It adds no calls. Revision 42 refuses the flag as an unknown bit. */
+#define ZZ9K_LIBRARY_MIN_REVISION_VOICE_LOW_LATENCY 43
 
 #define ZZ9K_LVO_OPEN (-6)
 #define ZZ9K_LVO_CLOSE (-12)
