@@ -21,6 +21,13 @@
  * of eight voices, with the pitch set by the key. It is for the ear test of
  * the low-latency session, and counts the records the engine found late.
  *
+ * LOAD mode is a steady synthetic load for the firmware's render bench: it
+ * loops one 16-bit sample (a few sine cycles plus a little noise, mono or
+ * interleaved stereo) on VOICES voices (1 to 32, default 32) at rates spread
+ * from half to twice RATE (default 22050 Hz), volume 65535 divided by the
+ * voice count per side, for SECONDS (default 20). The AUDIO_VOICE_BENCH
+ * firmware prints its per-period render times when the session closes.
+ *
  * LOWLAT opens a low-latency session: the firmware shortens its audio
  * fill-ahead while it runs and the lead floor drops from 8 periods to 3. The
  * tool falls back to the standard floor, and says so, when zz9k.library is
@@ -63,14 +70,18 @@
 
 #include "zz9k-voice-pt4.h"
 
-#define TEMPLATE "MODULE,LEAD/K/N,NTSC/S,LINEAR/S,SECONDS/K/N,LOWLAT/S"
+#define TEMPLATE "MODULE,LEAD/K/N,NTSC/S,LINEAR/S,SECONDS/K/N,LOWLAT/S," \
+                 "VOICES/K/N,STEREO/S,RATE/K/N"
 #define OPT_MODULE 0
 #define OPT_LEAD 1
 #define OPT_NTSC 2
 #define OPT_LINEAR 3
 #define OPT_SECONDS 4
 #define OPT_LOWLAT 5
-#define OPT_COUNT 6
+#define OPT_VOICES 6
+#define OPT_STEREO 7
+#define OPT_RATE 8
+#define OPT_COUNT 9
 
 /* The lead floor of a session without the low-latency flag. */
 #define STANDARD_FLOOR_FRAMES 7680U
@@ -87,6 +98,19 @@
 #define CLICK_VOLUME 0x4000UL
 #define CLICK_DEFAULT_SECONDS 10UL
 #define BANK_ROUND 64U
+
+/* LOAD mode: one looping 16-bit sample of 4096 frames. The left side is 8
+ * sine cycles and the right side of a stereo sample 11, so both wrap
+ * seamlessly; the noise is +-256 on a peak of 20000. */
+#define LOAD_FRAMES 4096U
+#define LOAD_PEAK 20000L
+#define LOAD_CYCLES_LEFT 8U
+#define LOAD_CYCLES_RIGHT 11U
+#define LOAD_DEFAULT_VOICES 32U
+#define LOAD_DEFAULT_RATE 22050U
+#define LOAD_DEFAULT_SECONDS 20UL
+/* next_frame once the load records are written: never produce again. */
+#define LOAD_DONE_FRAME 0xFFFFFFFFUL
 
 /* libnix stack size request, honoured by the swapstack.o the build links:
  * libpt4's pt4_open keeps about 3 KiB of its own on the stack. */
@@ -183,12 +207,20 @@ static void usage(void)
   puts("usage: zz9k-voiceplay MODULE [LEAD=frames] [NTSC] [LINEAR] [SECONDS=n] [LOWLAT]");
   puts("       zz9k-voiceplay CLICK [LEAD=frames] [SECONDS=n] [LOWLAT]");
   puts("       zz9k-voiceplay LIVE [LEAD=frames] [SECONDS=n] [LOWLAT]");
+  puts("       zz9k-voiceplay LOAD VOICES=n SECONDS=n [LINEAR] [STEREO] [RATE=hz] [LOWLAT]");
   puts("  MODULE   ProTracker module to play (DYN envelopes and EFx funk are refused)");
   puts("  CLICK    a short pulse once per second at 48000 Hz, for listening and");
   puts("           for checking the scheduling margin; 10 seconds unless SECONDS");
   puts("  LIVE     play notes from the keyboard: zsxdcvgbhnjm is one octave, then");
   puts("           q2w3er5t6y7u and i; ESC stops. Each key starts a note at the");
   puts("           earliest frame the engine has not rendered");
+  puts("  LOAD     a steady load for the firmware render bench: VOICES voices (1 to");
+  puts("           32, default 32) loop one 16-bit sine sample at rates spread from");
+  puts("           half to twice RATE (default 22050 Hz, at most 192000), volume");
+  puts("           65535 / VOICES per side; 20 seconds unless SECONDS. STEREO uses an");
+  puts("           interleaved stereo sample (needs a firmware with the stereo");
+  puts("           formats). Meant for a firmware built with AUDIO_VOICE_BENCH,");
+  puts("           which prints the render times on its UART when the session closes");
   puts("  LEAD     lead in 48 kHz frames; 0 or absent is the firmware floor");
   puts("  NTSC     Paula clock of the module is NTSC (else PAL)");
   puts("  LINEAR   linear interpolation (else nearest)");
@@ -406,6 +438,7 @@ static void make_click(void)
 
 typedef struct Source {
   int click;
+  int load;
   uint32_t next_frame;  /* song frame of the next tick, or click */
   uint32_t click_count;
   int ended;
@@ -434,6 +467,104 @@ static void click_produce(Source *source)
   }
   source->click_count++;
   source->next_frame += ZZ9K_VOICE_OUTPUT_RATE;
+}
+
+/* ---- Load source ---- */
+
+static uint8_t load_sample[LOAD_FRAMES * 4U];
+static uint32_t load_voices;
+static uint32_t load_rate;
+static uint32_t load_stereo;
+static uint32_t load_bytes;
+static int load_linear;
+static int load_mode;
+
+/* A sine of LOAD_PEAK at phase (0 to LOAD_FRAMES - 1 is one cycle), by
+ * Bhaskara's rational approximation on each half cycle. */
+static long load_sine(uint32_t phase)
+{
+  const unsigned long long half = LOAD_FRAMES / 2U;
+  unsigned long long p = phase % half;
+  unsigned long long a = p * (half - p);
+  long value = (long)(((unsigned long long)LOAD_PEAK * 16ULL * a) /
+                      (5ULL * half * half - 4ULL * a));
+
+  return phase >= half ? -value : value;
+}
+
+/* Big-endian 16-bit samples, interleaved when stereo, with a little noise
+ * so the data is not a pure table. */
+static void make_load_sample(void)
+{
+  uint32_t noise = 0x2545F491UL;
+  uint32_t out = 0U;
+  uint32_t i;
+
+  for (i = 0U; i < LOAD_FRAMES; i++) {
+    uint32_t side;
+
+    for (side = 0U; side <= load_stereo; side++) {
+      uint32_t cycles = side == 0U ? LOAD_CYCLES_LEFT : LOAD_CYCLES_RIGHT;
+      long value;
+      uint16_t raw;
+
+      noise = noise * 1664525UL + 1013904223UL;
+      value = load_sine((i * cycles) % LOAD_FRAMES) +
+              (long)((noise >> 16) & 0x1FFU) - 256L;
+      raw = (uint16_t)(int16_t)value;
+      load_sample[out++] = (uint8_t)(raw >> 8);
+      load_sample[out++] = (uint8_t)(raw & 0xFFU);
+    }
+  }
+  load_bytes = out;
+}
+
+/* Half to twice RATE spread evenly over the voices; one voice plays RATE. */
+static uint32_t load_voice_rate(uint32_t voice)
+{
+  uint32_t rate = load_rate;
+
+  if (load_voices > 1U) {
+    rate = load_rate / 2U +
+           (uint32_t)(((unsigned long long)(load_rate + load_rate / 2U) *
+                       voice) / (load_voices - 1U));
+  }
+  if (rate > ZZ9K_VOICE_RATE_MAX_HZ) {
+    rate = ZZ9K_VOICE_RATE_MAX_HZ;
+  }
+  return rate == 0U ? 1U : rate;
+}
+
+/* Every voice gets its rate and volume, a start and a loop over the whole
+ * sample, all at the granted lead. Written once. */
+static void load_produce(Source *source)
+{
+  uint32_t stamp = lead_frames + source->next_frame;
+  uint32_t volume = 0xFFFFU / load_voices;
+  uint32_t voice;
+
+  for (voice = 0U; voice < load_voices; voice++) {
+    ZZ9KVoiceRecord *record = pending_next(stamp, voice, ZZ9K_VOICE_OP_SET);
+
+    if (record) {
+      record->flags = ZZ9K_VOICE_SET_RATE | ZZ9K_VOICE_SET_RATE_HZ |
+                      ZZ9K_VOICE_SET_VOLUME;
+      record->arg0 = load_voice_rate(voice);
+      record->arg1 = (volume << 16) | volume;
+    }
+    record = pending_next(stamp, voice, ZZ9K_VOICE_OP_START);
+    if (record) {
+      record->flags = 0U;
+      record->arg0 = 0U;
+      record->arg1 = 0U;
+    }
+    record = pending_next(stamp, voice, ZZ9K_VOICE_OP_LOOP);
+    if (record) {
+      record->arg0 = 0U;
+      record->arg1 = load_bytes;
+    }
+  }
+  source->next_frame = LOAD_DONE_FRAME;
 }
 
 static void module_produce(Source *source)
@@ -633,6 +764,8 @@ static const char *play(Source *source, uint32_t limit_frames)
       tick_work = 0U;
       if (source->click) {
         click_produce(source);
+      } else if (source->load) {
+        load_produce(source);
       } else {
         module_produce(source);
         if (source->ended) {
@@ -673,6 +806,15 @@ static void report(const char *reason)
          (unsigned long)stat_records, (unsigned long)stat_ring_waits);
   if (live_mode) {
     printf("  keys played %lu\n", (unsigned long)stat_keys);
+  }
+  if (load_mode) {
+    printf("  load: %lu voices, %s samples, %s, rates %lu to %lu Hz, volume "
+           "%lu per side\n", (unsigned long)load_voices,
+           load_stereo ? "stereo" : "mono",
+           load_linear ? "linear" : "nearest",
+           (unsigned long)load_voice_rate(0U),
+           (unsigned long)load_voice_rate(load_voices - 1U),
+           (unsigned long)(0xFFFFU / load_voices));
   }
   printf("  session: %s, lead floor %lu frames\n",
          session.grant.lead_floor_frames < STANDARD_FLOOR_FRAMES
@@ -764,6 +906,7 @@ int main(void)
   const char *name;
   int click;
   int live;
+  int load;
   int want_low_latency;
   uint32_t seconds = 0U;
   uint32_t lead_request = 0U;
@@ -795,6 +938,38 @@ int main(void)
   }
   click = is_word(name, "CLICK");
   live = is_word(name, "LIVE");
+  load = is_word(name, "LOAD");
+  if (!load && (options[OPT_VOICES] || options[OPT_STEREO] ||
+                options[OPT_RATE])) {
+    puts("zz9k-voiceplay: VOICES, STEREO and RATE belong to LOAD mode");
+    FreeArgs(rdargs);
+    usage();
+    return 10;
+  }
+  load_voices = LOAD_DEFAULT_VOICES;
+  load_rate = LOAD_DEFAULT_RATE;
+  if (options[OPT_VOICES]) {
+    LONG value = *(LONG *)options[OPT_VOICES];
+
+    if (value < 1 || value > (LONG)ZZ9K_VOICE_MAX_VOICES) {
+      FreeArgs(rdargs);
+      usage();
+      return 10;
+    }
+    load_voices = (uint32_t)value;
+  }
+  if (options[OPT_RATE]) {
+    LONG value = *(LONG *)options[OPT_RATE];
+
+    if (value < 1 || value > (LONG)ZZ9K_VOICE_RATE_MAX_HZ) {
+      FreeArgs(rdargs);
+      usage();
+      return 10;
+    }
+    load_rate = (uint32_t)value;
+  }
+  load_stereo = options[OPT_STEREO] != 0;
+  load_linear = options[OPT_LINEAR] != 0;
   if (options[OPT_LEAD]) {
     LONG value = *(LONG *)options[OPT_LEAD];
 
@@ -816,6 +991,8 @@ int main(void)
     seconds = (uint32_t)value;
   } else if (click) {
     seconds = (uint32_t)CLICK_DEFAULT_SECONDS;
+  } else if (load) {
+    seconds = (uint32_t)LOAD_DEFAULT_SECONDS;
   }
   if (options[OPT_NTSC]) {
     flags |= ZZ9K_VOICE_OPEN_FLAG_NTSC;
@@ -828,6 +1005,7 @@ int main(void)
   memset(&session, 0, sizeof(session));
   memset(&source, 0, sizeof(source));
   source.click = click;
+  source.load = load;
 
   /* The module is read and checked before the card is touched. */
   if (live && !IsInteractive(Input())) {
@@ -841,6 +1019,13 @@ int main(void)
     bank_data = click_sample;
     bank_size = CLICK_BYTES;
     bank_bytes = CLICK_BANK_BYTES;
+  } else if (load) {
+    make_load_sample();
+    load_mode = 1;
+    voice_count = load_voices;
+    bank_data = load_sample;
+    bank_size = load_bytes;
+    bank_bytes = load_bytes;
   } else if (live) {
     make_live_sample();
     live_mode = 1;
@@ -981,11 +1166,17 @@ int main(void)
   upload.bank_offset = 0U;
   upload.data = bank_data;
   upload.length = bank_size;
-  upload.format = ZZ9K_VOICE_FORMAT_S8;
+  upload.format = load ? (load_stereo ? ZZ9K_VOICE_FORMAT_S16S
+                                      : ZZ9K_VOICE_FORMAT_S16)
+                       : ZZ9K_VOICE_FORMAT_S8;
   result = ZZ9KVoiceUpload(&session, &upload);
   if (result != ZZ9K_STATUS_OK) {
     printf("zz9k-voiceplay: sample upload failed: %s (%d)\n",
            zz9k_status_text(result), result);
+    if (load && load_stereo) {
+      puts("  the firmware may lack the stereo sample formats "
+           "(audio-voice-stereo)");
+    }
     code = 20;
     goto close_session;
   }

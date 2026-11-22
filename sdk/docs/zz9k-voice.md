@@ -571,20 +571,24 @@ without the stereo support refuses a DEFINE in format 2 or 3 with
 
 ## zz9k-voiceplay
 
-`zz9k-voiceplay` plays a ProTracker module, a click, or the keyboard through
-the engine with `zz9k.library`. The SDK build script builds it as
-`build/zz9k-voiceplay`. It needs `zz9k.library` revision 42, revision 43 for
-`LOWLAT`, and `timer.device`.
+`zz9k-voiceplay` plays a ProTracker module, a click, the keyboard, or a
+synthetic load through the engine with `zz9k.library`. The SDK build script
+builds it as `build/zz9k-voiceplay`. It needs `zz9k.library` revision 42,
+revision 43 for `LOWLAT`, and `timer.device`.
 
 ```text
 zz9k-voiceplay MODULE [LEAD=frames] [NTSC] [LINEAR] [SECONDS=n] [LOWLAT]
 zz9k-voiceplay CLICK [LEAD=frames] [SECONDS=n] [LOWLAT]
 zz9k-voiceplay LIVE [LEAD=frames] [SECONDS=n] [LOWLAT]
+zz9k-voiceplay LOAD VOICES=n SECONDS=n [LINEAR] [STEREO] [RATE=hz] [LOWLAT]
 ```
 
 | Argument | Meaning |
 | --- | --- |
-| `MODULE` | The module file. The word `CLICK` in any case selects click mode, and `LIVE` selects live mode |
+| `MODULE` | The module file. The word `CLICK` in any case selects click mode, `LIVE` selects live mode and `LOAD` selects load mode |
+| `VOICES` | LOAD mode only: the number of voices, 1 to 32 (default 32) |
+| `STEREO` | LOAD mode only: the sample is interleaved stereo S16S instead of mono S16 |
+| `RATE` | LOAD mode only: the centre rate in Hz, 1 to 192000 (default 22050) |
 | `LEAD` | The lead in 48 kHz frames; 0 or absent asks for the firmware floor |
 | `NTSC` | The module uses the NTSC Paula clock (PAL otherwise) |
 | `LINEAR` | Linear interpolation (nearest otherwise) |
@@ -607,6 +611,16 @@ whose heartbeat stops.
 In click mode it plays a 1 ms pulse on voice 0 once per second at 48000 Hz,
 the first at the granted lead. It runs for 10 seconds unless `SECONDS` says
 otherwise. It is for listening and for checking the scheduling margin.
+
+Load mode exists for the firmware render bench (`AUDIO_VOICE_BENCH`, see
+`docs/audio-fabric.md`). It defines one looping 16-bit sample of 4096 frames,
+a few sine cycles with a little noise, mono or interleaved stereo with
+`STEREO`. It starts `VOICES` voices on it at rates spread evenly from half to
+twice `RATE` (one voice plays `RATE`; a rate above 192000 is clamped), at
+volume 65535 divided by the voice count on each side, and keeps them playing
+for `SECONDS` (default 20) before it stops and closes. With a high `RATE`
+some voices step above 48 kHz. The stereo sample needs a firmware that plays
+the stereo formats.
 
 In live mode the keys `zsxdcvgbhnjm` play one octave from middle C and
 `q2w3er5t6y7u` the next, with `i` the top C; ESC stops. Each key writes a SET
