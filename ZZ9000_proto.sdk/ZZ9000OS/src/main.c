@@ -1433,10 +1433,14 @@ int main() {
 		usb_proxy_periodic_pump();
 		usb_proxy_iso_pump();
 #ifdef AUDIO_FABRIC_BENCH
-		/* Instrument build (U5): one aggregate cost report per
-		 * second on the console; compiles away entirely in
-		 * production builds. */
-		audio_fabric_bench_poll();
+		/* Instrument build: one aggregate cost report per second on
+		 * the console; compiles away entirely in production builds.
+		 * The report's console output holds this loop for longer than
+		 * a voice session keeps audio in hand, which starved the
+		 * voice slot once a second (about 180 underruns per
+		 * session), so it is skipped while a session is open. */
+		if (!audio_voice_session_active())
+			audio_fabric_bench_poll();
 #endif
 #if ENABLE_LEGACY_USB_BLOCK_STORAGE
 		if (usb_read_pending) {
