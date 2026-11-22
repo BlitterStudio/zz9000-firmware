@@ -68,6 +68,11 @@ struct zz_state {
 	int attached;
 	int abi_ok;                 /* QUERY said: ABI and Z3 as required */
 	aar_barrier_fn acquire, release;
+	uint32_t events_token;      /* QUERY: the event block, 0: none */
+	volatile uint8_t *events;   /* its mapping; set last, NULL: no events */
+	uint8_t events_sampled;     /* the counts below are valid */
+	uint32_t events_global;     /* the global count at the last change */
+	uint32_t events_group[ZZAPP_EVENT_GROUPS];
 };
 
 static struct zz_state zz;
@@ -77,6 +82,8 @@ struct zz_claim {
 	volatile uint8_t *load;     /* the load buffer, NULL once gone */
 	uint32_t chunk_max, argv_off;
 	uint8_t load_begun, started;
+	uint8_t news_asked;         /* claim_news answered 1 once */
+	uint32_t news_seen;         /* the count that answer saw */
 	volatile uint8_t bell_busy; /* try-lock of the doorbell below */
 	uint8_t bell_inflight;
 	aar_zz_bell bell;
@@ -184,8 +191,26 @@ static int claim_call(const struct zz_state *s, struct aar_plat_claim *c,
 
 /* ---- Query -------------------------------------------------------------------- */
 
+/* The card's event block (zzapp_proto.h) is mapped by the first QUERY that
+ * names one (the claim's, in the owner's context), cache-inhibited like the
+ * control blocks, and read by the dispatcher: one word per pass, the group
+ * words only when it moved. The sampled values are kept in `zz` and a claim
+ * compares against them without touching the card. */
+static void events_map(struct zz_state *s)
+{
+	volatile uint8_t *ptr;
+
+	if (s->events || s->events_token == 0u || !s->board.map)
+		return;
+	if (s->board.map(s->board.user, s->events_token, ZZAPP_EVENT_BLOCK_BYTES,
+			 &ptr) != AAR_OK || !ptr)
+		return;
+	s->events_sampled = 0u;
+	s->events = ptr;
+}
+
 struct zz_query {
-	uint32_t abi_major, abi_minor, state, caps, hostheap_largest;
+	uint32_t abi_major, abi_minor, events, caps, hostheap_largest;
 	uint32_t queue_depth, commit_free, commit_total, records_free;
 	uint32_t tables_free, tables_total, hostheap_free;
 };
@@ -204,7 +229,7 @@ static int query_raw(struct zz_state *s, struct zz_query *qi)
 		return AAR_E_NOSYS;
 	qi->abi_major = be32(p + ZZAPP_QUERY_ABI_MAJOR);
 	qi->abi_minor = be32(p + ZZAPP_QUERY_ABI_MINOR);
-	qi->state = be32(p + ZZAPP_QUERY_STATE);
+	qi->events = be32(p + ZZAPP_QUERY_EVENTS);
 	qi->caps = be32(p + ZZAPP_QUERY_CAPS);
 	qi->hostheap_largest = be32(p + ZZAPP_QUERY_HOSTHEAP_LARGEST);
 	qi->queue_depth = be32(p + ZZAPP_QUERY_QUEUE_DEPTH);
@@ -221,6 +246,11 @@ static int query_raw(struct zz_state *s, struct zz_query *qi)
 		return AAR_E_NOSYS;
 	}
 	s->abi_ok = 1;
+	/* An older firmware reports 0 here (the word held the state, always 0). */
+	if (!s->events) {
+		s->events_token = qi->events;
+		events_map(s);
+	}
 	return AAR_OK;
 }
 
@@ -604,18 +634,60 @@ static int zz_kick(struct aar_plat *p, struct aar_plat_claim *c,
 	return rc;
 }
 
-static void zz_poll(struct aar_plat *p, struct aar_plat_claim *c)
+/* 1 while the doorbell request is still in flight, so the dispatcher keeps
+ * polling this claim; 0 when there is nothing left to retire. */
+static int zz_poll(struct aar_plat *p, struct aar_plat_claim *c)
 {
 	struct zz_state *s = state_of(p);
 	struct zz_claim *zc = claim_of(c);
 
 	if (c->handle == 0u || !zc->bell_inflight)
-		return;
+		return 0;
 	if (!bell_try(zc))
-		return;
+		return 1;
 	if (zc->bell_inflight && s->board.bell_done(s->board.user, &zc->bell))
 		zc->bell_inflight = 0u;
 	bell_unlock(zc);
+	return zc->bell_inflight != 0u;
+}
+
+/* ---- Event counts ----------------------------------------------------------------- */
+
+static int zz_events_sample(struct aar_plat *p)
+{
+	struct zz_state *s = state_of(p);
+	volatile uint8_t *ev = s->events;
+	uint32_t global, i;
+
+	if (!ev)
+		return AAR_PLAT_EVENTS_NONE;
+	global = aar_get_be32(ev);
+	if (s->events_sampled && global == s->events_global)
+		return AAR_PLAT_EVENTS_QUIET;
+	for (i = 0u; i < ZZAPP_EVENT_GROUPS; i++)
+		s->events_group[i] = aar_get_be32(ev + 4u * (1u + i));
+	s->events_global = global;
+	s->events_sampled = 1u;
+	return AAR_PLAT_EVENTS_NEWS;
+}
+
+static int zz_claim_news(struct aar_plat *p, struct aar_plat_claim *c)
+{
+	struct zz_state *s = state_of(p);
+	struct zz_claim *zc = claim_of(c);
+	uint32_t group = (c->handle & 0xffffu) / ZZAPP_EVENT_GROUP_RECORDS;
+	uint32_t now;
+
+	/* Nothing sampled yet: take it as news, the queues decide. */
+	if (!s->events_sampled)
+		return 1;
+	now = group < ZZAPP_EVENT_GROUPS ? s->events_group[group] :
+					   s->events_global;
+	if (zc->news_asked && zc->news_seen == now)
+		return 0;
+	zc->news_asked = 1u;
+	zc->news_seen = now;
+	return 1;
 }
 
 /* ---- Barriers ------------------------------------------------------------------- */
@@ -728,6 +800,9 @@ static void zz_detach(struct aar_plat *p)
 	if (!s->attached)
 		return;
 	s->attached = 0;
+	s->events = NULL;
+	s->events_token = 0u;
+	s->events_sampled = 0u;
 	board_detach(s);
 }
 
@@ -753,6 +828,8 @@ static const struct aar_plat_ops zz_ops = {
 	ZZ_BARRIER_RELEASE,
 	NULL,   /* cache_publish: the mappings are cache-inhibited */
 	NULL,   /* cache_acquire */
+	zz_events_sample,
+	zz_claim_news,
 };
 
 static struct aar_plat zz_plat = {

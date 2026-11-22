@@ -625,7 +625,10 @@ the control block, and the display is bound when the client completes
 the table does not list is unsupported.
 
 `QUERY` (no handle) fills 48 bytes: the ABI major and minor words (0 and 5),
-the state at 8, the capability word at 12 (`Z3`, `DISPLAY`, `AUDIO`, `GL`,
+`EVENTS` at 8 (the board offset of the event block, described with the
+control block below; 0 when there is none, which is also what a firmware
+without the block sends there: the word held the state, always `IDLE` = 0,
+and nothing read it), the capability word at 12 (`Z3`, `DISPLAY`, `AUDIO`, `GL`,
 `CLUT8`), `HOSTHEAP_LARGEST` at 16 (the largest free block of the
 host-visible heap), `QUEUE_DEPTH` at 20 (the depth of a new claim's queues,
 64), `COMMIT_FREE` at 24 and `COMMIT_TOTAL` at 28 (the bytes still admissible
@@ -758,6 +761,28 @@ Barriers are the ARM
 `dmb ish` at the places `transport.h` names: after an index is read, and before
 one is written. There is no cache maintenance on the ARM side, because the
 pair is normal cacheable memory that the Zorro master reaches through the ACP.
+
+The event block is a hint that lets the client skip claims that have nothing
+new, instead of reading every armed claim's control block each vertical
+blank. It is one 64-byte table of big-endian words in the host-visible heap,
+allocated once at runtime start (again after an Amiga reset rebuilt the heap)
+and named by `QUERY` `EVENTS`. Word 0 is the global event count; word
+`1 + g` is the count of group `g`, the records `g * 32` to `g * 32 + 31` by
+record index (the low 16 bits of the handle). There are 15 groups, for
+records 0 to 479; a record from 480 up has no group and moves only word 0.
+An event is anything new the card makes visible to a client: an SQ entry
+(`zzapp_xport_post_request`, `_post_msg`, `_post_log`) or a non-zero
+`AAR_CB_END_REASON` (`zzapp_xport_cb_put`, and `zzapp_xport_cb_set_state`,
+which counts after the state store). After that store the card runs a `dmb`,
+then adds 1 to the group word and then to the global word, each atomically
+with an exclusive load and store, since both cores post. The counts only
+grow and wrap at 32 bits. A client reads word 0 and, only when it differs
+from the last value it saw, the group words, and compares them for equality;
+the queues stay authoritative, so a client may ignore the block. The table
+sits in an 8 KiB block, 8 KiB aligned, in the cacheable part of the heap
+(placed like a pair), so a cache-inhibited page of the client holds nothing
+else; the client maps it like a control block. If the heap had no room at
+start, `EVENTS` is 0 and nothing counts.
 
 `KICK` (`0x0c0b`) is the client's doorbell. The flags are `CQ_POSTED` (1) and
 `SQ_SPACE` (2). Core 0 looks the handle up, ORs the flags into the claim's

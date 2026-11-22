@@ -2977,6 +2977,9 @@ void zzapp_boot_init(void)
 #else
     zzapp_xport_init(&g_card_xport_env);
 #endif
+    /* The host-visible heap is empty here (card: just rebuilt, host: just
+     * reset), so the block goes first. No block: QUERY reports 0. */
+    (void)zzapp_xport_events_init();
     /* Without a record arena (the boot carve found no memory, apps are
      * unavailable) the kernel still needs a valid state: the shared worker
      * takes the system lock at start, and a zeroed static kernel reads as

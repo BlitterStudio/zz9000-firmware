@@ -4962,11 +4962,11 @@ static void put_query(uint8_t *reply, uint16_t *reply_len, uint32_t caps)
 	memset(reply, 0, ZZAPP_MAILBOX_PAYLOAD_BYTES);
 	zzapp_put_be32(reply + ZZAPP_QUERY_ABI_MAJOR, ZZAPP_ABI_MAJOR);
 	zzapp_put_be32(reply + ZZAPP_QUERY_ABI_MINOR, ZZAPP_ABI_MINOR);
-	zzapp_put_be32(reply + ZZAPP_QUERY_STATE, ZZAPP_ST_IDLE);
 	zzapp_put_be32(reply + ZZAPP_QUERY_CAPS, caps);
 	*reply_len = ZZAPP_MAILBOX_PAYLOAD_BYTES;
 	if (caps == 0U)
 		return;
+	zzapp_put_be32(reply + ZZAPP_QUERY_EVENTS, zzapp_xport_events_token());
 	commit_free = zzapp_loader_pool_free ? zzapp_loader_pool_free() : 0U;
 	zzapp_rec_stats(&records);
 	zzapp_as_stats(&tables);

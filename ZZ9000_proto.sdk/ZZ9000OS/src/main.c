@@ -80,6 +80,7 @@ void Xil_AssertNonVoid() {}
 #include "zzapp_proto.h"
 #include "zzapp_rec.h"
 #include "zzapp_services.h"
+#include "zzapp_xport.h"
 #include "card_pool.h"
 #include "rasterix_fence_guard.h"
 #include "overlay.h"
@@ -1016,6 +1017,8 @@ void handle_amiga_reset(enum amiga_reset_mode mode) {
 	surface_allocator_init(HOST_VISIBLE_HEAP_ADDRESS, HOST_VISIBLE_HEAP_SIZE);
 	if (!reserve_host_control_ranges() || !video_videocap_backing_reserve())
 		printf("[video] host-control or videocap backing unavailable after reset\n");
+	// the app runtime's event block lived in it too
+	(void)zzapp_xport_events_init();
 	// the overlay shadows lived in that heap: drop the overlay too
 	overlay_amiga_reset(video_state);
 

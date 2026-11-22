@@ -142,6 +142,37 @@ const zzapp_xport_env_t *zzapp_xport_env(void);
  * and full barrier on a host). */
 void zzapp_xport_dmb(void);
 
+/* ---- Event counts ---------------------------------------------------------- */
+
+/*
+ * The event block: 16 big-endian words in the host-visible heap, allocated once
+ * at runtime start (zzapp_xport_events_init). Word 0 counts every event, word
+ * 1 + g counts the events of the records g * 32 to g * 32 + 31 (the record
+ * index is the handle & 0xffff; records from 480 up have no group and only
+ * move word 0). An event is anything new the card makes visible to the client
+ * of a record: an SQ entry or a non-zero end reason. After the visible store
+ * the card runs a barrier, then adds 1 to the group word and then to the
+ * global word, each atomically (the words are shared by both cores). The counts
+ * only grow and wrap; a client reads them as a hint to skip a claim whose
+ * queues it need not read, and the queues stay authoritative. QUERY reports
+ * the block's token (ZZAPP_QUERY_EVENTS), 0 when there is none.
+ */
+
+/* Allocate the event block from the environment's heap (the cacheable window,
+ * one 8 KiB block step so a cache-inhibited client page holds nothing else) and
+ * zero it. Called once the host-visible heap is empty: at boot and after an
+ * Amiga reset rebuilt the heap (the previous block is forgotten, not freed).
+ * 0, or -1 when nothing fits or there is no allocator: then there is no block,
+ * nothing increments and QUERY reports 0. */
+int zzapp_xport_events_init(void);
+/* The block's token (card address less the token adjustment), 0 if none. */
+uint32_t zzapp_xport_events_token(void);
+/* The ARM view of the block, NULL if none. */
+volatile uint8_t *zzapp_xport_events_block(void);
+/* One event for the record: barrier, group word, global word. Callable from
+ * either core. */
+void zzapp_xport_event_post(const zzapp_rec_t *rec);
+
 /* ---- Buffers ------------------------------------------------------------ */
 
 /* A buffer the client can reach: `ptr` is the ARM view, `token` the shared
