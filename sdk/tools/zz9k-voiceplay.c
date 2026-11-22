@@ -16,6 +16,16 @@
  * 48000 Hz so it plays 1:1. It is for listening, and for checking the
  * scheduling margin.
  *
+ * LIVE mode plays notes from the keyboard: each key writes a START at the
+ * status horizon, the earliest frame the engine has not rendered, on the next
+ * of eight voices, with the pitch set by the key. It is for the ear test of
+ * the low-latency session, and counts the records the engine found late.
+ *
+ * LOWLAT opens a low-latency session: the firmware shortens its audio
+ * fill-ahead while it runs and the lead floor drops from 8 periods to 3. The
+ * tool falls back to the standard floor, and says so, when zz9k.library is
+ * older than revision 43 or the firmware refuses the flag.
+ *
  * The report counts what the firmware saw (late, rejected, underruns,
  * dropped), the smallest scheduling margin (record stamp minus the engine
  * horizon when the record was written, in frames), and the 68k time one tick
@@ -53,13 +63,20 @@
 
 #include "zz9k-voice-pt4.h"
 
-#define TEMPLATE "MODULE,LEAD/K/N,NTSC/S,LINEAR/S,SECONDS/K/N"
+#define TEMPLATE "MODULE,LEAD/K/N,NTSC/S,LINEAR/S,SECONDS/K/N,LOWLAT/S"
 #define OPT_MODULE 0
 #define OPT_LEAD 1
 #define OPT_NTSC 2
 #define OPT_LINEAR 3
 #define OPT_SECONDS 4
-#define OPT_COUNT 5
+#define OPT_LOWLAT 5
+#define OPT_COUNT 6
+
+/* The lead floor of a session without the low-latency flag. */
+#define STANDARD_FLOOR_FRAMES 7680U
+/* About 10.7 ms in the formatter FIFO, inferred from the RTL and not
+ * measured; with the lead it bounds when a record sounds. */
+#define FIFO_FRAMES 514U
 
 /* One tick of a 32 voice module is at most six events per voice. */
 #define MAX_PENDING 256U
@@ -141,12 +158,11 @@ static void pause_pass(void)
   DoIO((struct IORequest *)timer_request);
 }
 
-static int is_click_name(const char *name)
+static int is_word(const char *name, const char *word)
 {
-  static const char word[] = "CLICK";
   uint32_t i;
 
-  for (i = 0U; i < sizeof(word); i++) {
+  for (i = 0U;; i++) {
     char c = name[i];
 
     if (c >= 'a' && c <= 'z') {
@@ -155,27 +171,37 @@ static int is_click_name(const char *name)
     if (c != word[i]) {
       return 0;
     }
+    if (word[i] == '\0') {
+      return 1;
+    }
   }
-  return 1;
 }
 
 static void usage(void)
 {
-  puts("zz9k-voiceplay: plays a module or a click through the ZZ9000AX voice engine");
-  puts("usage: zz9k-voiceplay MODULE [LEAD=frames] [NTSC] [LINEAR] [SECONDS=n]");
-  puts("       zz9k-voiceplay CLICK [LEAD=frames] [SECONDS=n]");
+  puts("zz9k-voiceplay: plays a module, a click or the keyboard through the ZZ9000AX voice engine");
+  puts("usage: zz9k-voiceplay MODULE [LEAD=frames] [NTSC] [LINEAR] [SECONDS=n] [LOWLAT]");
+  puts("       zz9k-voiceplay CLICK [LEAD=frames] [SECONDS=n] [LOWLAT]");
+  puts("       zz9k-voiceplay LIVE [LEAD=frames] [SECONDS=n] [LOWLAT]");
   puts("  MODULE   ProTracker module to play (DYN envelopes and EFx funk are refused)");
   puts("  CLICK    a short pulse once per second at 48000 Hz, for listening and");
   puts("           for checking the scheduling margin; 10 seconds unless SECONDS");
+  puts("  LIVE     play notes from the keyboard: zsxdcvgbhnjm is one octave, then");
+  puts("           q2w3er5t6y7u and i; ESC stops. Each key starts a note at the");
+  puts("           earliest frame the engine has not rendered");
   puts("  LEAD     lead in 48 kHz frames; 0 or absent is the firmware floor");
   puts("  NTSC     Paula clock of the module is NTSC (else PAL)");
   puts("  LINEAR   linear interpolation (else nearest)");
   puts("  SECONDS  stop after this many seconds of engine time");
+  puts("  LOWLAT   low-latency session: shorter audio fill-ahead while it runs and");
+  puts("           a lead floor of 3 periods (2880 frames) instead of 8. Without");
+  puts("           firmware or library support the standard floor is used");
   puts("Ctrl-C stops, resets and closes. The report lists frames, ticks, records,");
-  puts("ring-full waits, late, rejected, underruns, dropped, the smallest margin,");
-  puts("the record latency (min, average, max in frames and ms), the measured");
-  puts("engine rate in Hz with its ppm difference from 48000, and the 68k time");
-  puts("per tick. The engine need not be advertised as a service.");
+  puts("ring-full waits, late, rejected, underruns, dropped, the jitter the");
+  puts("firmware measured, the smallest margin, the record latency (min, average,");
+  puts("max in frames and ms), the measured engine rate in Hz with its ppm");
+  puts("difference from 48000, and the 68k time per tick. The engine need not be");
+  puts("advertised as a service.");
 }
 
 /* Frames at 48 kHz as milliseconds with two decimals, truncated. */
@@ -422,6 +448,147 @@ static void module_produce(Source *source)
   }
 }
 
+/* ---- Live keyboard ---- */
+
+#define LIVE_VOICES 8U
+#define LIVE_BYTES 4096U
+/* One 32-byte cycle played at this rate sounds middle C. */
+#define LIVE_BASE_HZ 8372UL
+#define LIVE_VOLUME 0x2800UL
+
+static uint8_t live_sample[LIVE_BYTES];
+static uint32_t live_next_voice;
+static uint32_t stat_keys;
+static int live_mode;
+
+/* A decaying triangle wave, 32 samples to the cycle. */
+static void make_live_sample(void)
+{
+  uint32_t i;
+
+  for (i = 0U; i < LIVE_BYTES; i++) {
+    long phase = (long)(i & 31U);
+    long tri = phase < 16L ? phase : 32L - phase;
+    long value = (tri - 8L) * 15L;
+
+    value = value * (long)(LIVE_BYTES - i) / (long)LIVE_BYTES;
+    live_sample[i] = (uint8_t)(int8_t)value;
+  }
+}
+
+/* Semitones above middle C for a key, or -1. */
+static int live_note(char key)
+{
+  static const char low[] = "zsxdcvgbhnjm";
+  static const char high[] = "q2w3er5t6y7u";
+  uint32_t i;
+
+  if (key >= 'A' && key <= 'Z') {
+    key = (char)(key - 'A' + 'a');
+  }
+  for (i = 0U; i < 12U; i++) {
+    if (key == low[i]) {
+      return (int)i;
+    }
+    if (key == high[i]) {
+      return (int)(12U + i);
+    }
+  }
+  return key == 'i' ? 24 : -1;
+}
+
+/* A note at stamp: the pitch, then the start, on the next voice. */
+static void live_start(int note, uint32_t stamp)
+{
+  /* 2^(n/12) in Q16. */
+  static const uint32_t ratio[12] = {
+      65536UL, 69432UL, 73562UL, 77936UL, 82570UL, 87480UL,
+      92682UL, 98193UL, 104032UL, 110218UL, 116772UL, 123715UL};
+  uint32_t voice = live_next_voice++ % LIVE_VOICES;
+  uint32_t rate = ((uint32_t)LIVE_BASE_HZ * ratio[note % 12]) >> 16;
+  ZZ9KVoiceRecord *record;
+
+  rate <<= note / 12;
+  record = pending_next(stamp, voice, ZZ9K_VOICE_OP_SET);
+  if (record) {
+    record->flags = ZZ9K_VOICE_SET_RATE | ZZ9K_VOICE_SET_RATE_HZ |
+                    ZZ9K_VOICE_SET_VOLUME;
+    record->arg0 = rate;
+    record->arg1 = (LIVE_VOLUME << 16) | LIVE_VOLUME;
+  }
+  record = pending_next(stamp, voice, ZZ9K_VOICE_OP_START);
+  if (record) {
+    record->flags = 0U;
+    record->arg0 = 0U;
+    record->arg1 = 0U;
+  }
+}
+
+/* Runs until ESC, SECONDS, Ctrl-C, or the engine stops advancing. Every
+ * pass reads the status (which is also the heartbeat), writes what is
+ * pending and waits for a key for up to one pass. Keys are stamped at the
+ * horizon of the status read of the same pass. */
+static const char *live_play(uint32_t limit_frames)
+{
+  BPTR input = Input();
+  uint32_t last_played = 0U;
+  uint64_t last_change = now_ticks();
+
+  for (;;) {
+    uint32_t played;
+    uint64_t now;
+
+    if (SetSignal(0UL, SIGBREAKF_CTRL_C) & SIGBREAKF_CTRL_C) {
+      return "Ctrl-C";
+    }
+    if (ZZ9KVoiceGetStatus(&session, &status) != ZZ9K_STATUS_OK) {
+      return "status read failed";
+    }
+    if (status.state == ZZ9K_VOICE_STATE_CLOSED) {
+      return "session closed by the card (heartbeat lost or card reset)";
+    }
+    played = status.playing_frame;
+    if (limit_frames != 0U && played >= limit_frames) {
+      return "time limit";
+    }
+    now = now_ticks();
+    if (status.state == ZZ9K_VOICE_STATE_LIVE) {
+      note_live(played, now);
+    }
+    if (played != last_played) {
+      last_played = played;
+      last_change = now;
+    } else if (status.state == ZZ9K_VOICE_STATE_LIVE &&
+               ticks_to_us(now - last_change) > STALL_MICROS) {
+      return "engine frame counter stopped advancing";
+    }
+
+    flush_pending();
+    while (status.state == ZZ9K_VOICE_STATE_LIVE &&
+           WaitForChar(input, 0L) != 0) {
+      char key;
+      int note;
+
+      if (Read(input, &key, 1L) != 1L) {
+        return "console closed";
+      }
+      if (key == 0x1b) {
+        return "ESC";
+      }
+      note = live_note(key);
+      if (note >= 0) {
+        live_start(note, status.horizon);
+        stat_keys++;
+      }
+    }
+    if (pending_overflow) {
+      return "a pass produced more records than expected";
+    }
+    flush_pending();
+    WaitForChar(input, (LONG)PASS_MICROS);
+  }
+}
+
 /* Runs until the song ends and drains, SECONDS passes, Ctrl-C, or the engine
  * stops advancing. Returns the reason. */
 static const char *play(Source *source, uint32_t limit_frames)
@@ -504,6 +671,13 @@ static void report(const char *reason)
   printf("  frames played %lu, ticks %lu, records %lu, ring-full waits %lu\n",
          (unsigned long)status.playing_frame, (unsigned long)stat_ticks,
          (unsigned long)stat_records, (unsigned long)stat_ring_waits);
+  if (live_mode) {
+    printf("  keys played %lu\n", (unsigned long)stat_keys);
+  }
+  printf("  session: %s, lead floor %lu frames\n",
+         session.grant.lead_floor_frames < STANDARD_FLOOR_FRAMES
+             ? "low latency" : "standard",
+         (unsigned long)session.grant.lead_floor_frames);
   printf("  late %lu, rejected %lu, underruns %lu, dropped %lu\n",
          (unsigned long)status.late, (unsigned long)status.rejected,
          (unsigned long)status.underruns, (unsigned long)status.dropped);
@@ -589,6 +763,8 @@ int main(void)
   struct RDArgs *rdargs;
   const char *name;
   int click;
+  int live;
+  int want_low_latency;
   uint32_t seconds = 0U;
   uint32_t lead_request = 0U;
   uint32_t flags = 0U;
@@ -617,7 +793,8 @@ int main(void)
     usage();
     return 5;
   }
-  click = is_click_name(name);
+  click = is_word(name, "CLICK");
+  live = is_word(name, "LIVE");
   if (options[OPT_LEAD]) {
     LONG value = *(LONG *)options[OPT_LEAD];
 
@@ -646,18 +823,31 @@ int main(void)
   if (options[OPT_LINEAR]) {
     flags |= ZZ9K_VOICE_OPEN_FLAG_LINEAR;
   }
+  want_low_latency = options[OPT_LOWLAT] != 0;
 
   memset(&session, 0, sizeof(session));
   memset(&source, 0, sizeof(source));
   source.click = click;
 
   /* The module is read and checked before the card is touched. */
+  if (live && !IsInteractive(Input())) {
+    puts("zz9k-voiceplay: LIVE needs an interactive console for its keys");
+    code = 10;
+    goto done;
+  }
   if (click) {
     make_click();
     voice_count = 1U;
     bank_data = click_sample;
     bank_size = CLICK_BYTES;
     bank_bytes = CLICK_BANK_BYTES;
+  } else if (live) {
+    make_live_sample();
+    live_mode = 1;
+    voice_count = LIVE_VOICES;
+    bank_data = live_sample;
+    bank_size = LIVE_BYTES;
+    bank_bytes = LIVE_BYTES;
   } else {
     uint32_t file_length = 0U;
     int err = 0;
@@ -712,6 +902,17 @@ int main(void)
     code = 20;
     goto close_library;
   }
+  if (want_low_latency) {
+    if (ZZ9KBase->lib_Revision <
+        ZZ9K_LIBRARY_MIN_REVISION_VOICE_LOW_LATENCY) {
+      printf("zz9k-voiceplay: zz9k.library %u.%u has no low-latency flag "
+             "(needs revision %u): using the standard floor\n",
+             ZZ9KBase->lib_Version, ZZ9KBase->lib_Revision,
+             ZZ9K_LIBRARY_MIN_REVISION_VOICE_LOW_LATENCY);
+    } else {
+      flags |= ZZ9K_VOICE_OPEN_FLAG_LOW_LATENCY;
+    }
+  }
 
   timer_port = CreateMsgPort();
   if (timer_port) {
@@ -734,6 +935,14 @@ int main(void)
   open_desc.lead_frames = lead_request;
   open_desc.flags = flags;
   result = ZZ9KVoiceOpen(&open_desc, &session);
+  if (result == ZZ9K_STATUS_BAD_REQUEST &&
+      (flags & ZZ9K_VOICE_OPEN_FLAG_LOW_LATENCY) != 0U) {
+    puts("zz9k-voiceplay: the firmware refused the low-latency flag, so it has "
+         "no low-latency mode: retrying with the standard floor");
+    flags &= ~ZZ9K_VOICE_OPEN_FLAG_LOW_LATENCY;
+    open_desc.flags = flags;
+    result = ZZ9KVoiceOpen(&open_desc, &session);
+  }
   if (result != ZZ9K_STATUS_OK) {
     open_failed(result);
     code = 20;
@@ -748,6 +957,18 @@ int main(void)
          (unsigned long)session.grant.lead_floor_frames,
          (unsigned long)session.grant.lead_max_frames,
          (unsigned long)session.grant.ring_records);
+  {
+    char early[24];
+    char late[24];
+
+    format_ms(early, (long long)lead_frames - 960LL + (long long)FIFO_FRAMES);
+    format_ms(late, (long long)lead_frames + (long long)FIFO_FRAMES);
+    printf("  %s session; a record written at the earliest frame should sound "
+           "%s to %s ms later (model: lead plus about 10.7 ms in the "
+           "formatter FIFO, which is inferred and not measured)\n",
+           session.grant.lead_floor_frames < STANDARD_FLOOR_FRAMES
+               ? "low-latency" : "standard", early, late);
+  }
   if (session.grant.voices < voice_count ||
       session.grant.bank_bytes < bank_size) {
     puts("zz9k-voiceplay: the engine granted less than the module needs");
@@ -782,7 +1003,15 @@ int main(void)
     }
   }
 
-  reason = play(&source, seconds * ZZ9K_VOICE_OUTPUT_RATE);
+  if (live) {
+    puts("zz9k-voiceplay: live: zsxdcvgbhnjm, q2w3er5t6y7u and i play notes, "
+         "ESC stops");
+    SetMode(Input(), 1L);
+    reason = live_play(seconds * ZZ9K_VOICE_OUTPUT_RATE);
+    SetMode(Input(), 0L);
+  } else {
+    reason = play(&source, seconds * ZZ9K_VOICE_OUTPUT_RATE);
+  }
   report(reason);
   if (strcmp(reason, "song end") != 0) {
     ZZ9KVoiceReset(&session);
