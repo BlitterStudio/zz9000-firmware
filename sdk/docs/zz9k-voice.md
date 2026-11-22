@@ -238,8 +238,8 @@ A session opened with `ZZ9K_VOICE_OPEN_FLAG_LOW_LATENCY` makes the fabric
 keep its transmit ring 2 periods ahead of the DMA instead of 6 while the
 session is open, and reports a lead floor of 3 periods, 2880 frames. The lead
 is 100 ms shorter than at the standard floor, and so is the time from a record
-written at the earliest frame to its sound. Hardware measurements of that
-time are not recorded here.
+written at the earliest frame to its sound. The measured runs are in
+[Low-latency sessions](#low-latency-sessions).
 
 - The shorter fill-ahead applies to every producer on the card while the
   session is open. Other audio, AHI and ZZPlay included, plays the same
@@ -591,3 +591,27 @@ EClock read 47790 to 47989 Hz. That spread comes from the EClock comparison
 and the status sampling, not from a measured DAC rate.
 
 Zorro II has not been tested. The flag stays clear there until it is.
+
+### Low-latency sessions
+
+The same machine, with a low-latency session (lead floor 2880 frames). Each
+run lasted 60 s with `zz9k-voiceplay`, click test and 8-channel module.
+
+| Load | Session | Result | Longest firmware poll gap |
+| --- | --- | --- | --- |
+| Idle | Standard | 0 late, 0 underruns | 3.6 ms |
+| Idle | Low latency | 0 late, 0 underruns | 3.6 ms |
+| MPEG-2 video in ZZPlay, after its first seconds | Standard | 0 late, 0 underruns | 18 ms |
+| MPEG-2 video in ZZPlay, after its first seconds | Low latency | 0 late, 0 underruns | 6.1 ms |
+| A Workbench window dragged with the mouse for a minute | Standard | 0 late, 0 underruns | 3.3 ms |
+
+In LIVE mode, where each key starts a note at the earliest frame the engine
+has not rendered, every record was 2880 frames (60 ms) ahead of the sound in
+a low-latency session and 7680 frames (160 ms) in a standard one. The
+maintainer judged the low-latency session tighter when playing from the
+keyboard. Of 41 keys in the first low-latency run, 2 notes were late.
+
+One gap remains. While a program opens its window, the firmware once stood
+still for about 255 ms in these runs. A low-latency session underruns during
+such a pause (48 underruns in one run), a standard session mostly rides it
+out. Keep that in mind when a tracker window opens during playback.
