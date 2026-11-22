@@ -122,7 +122,9 @@ static void test_layouts(void)
   CHECK(offsetof(ZZ9KVoiceStatusWire, underruns) == 20U);
   CHECK(offsetof(ZZ9KVoiceStatusWire, dropped) == 24U);
   CHECK(offsetof(ZZ9KVoiceStatusWire, session) == 28U);
-  CHECK(offsetof(ZZ9KVoiceStatusWire, reserved) == 32U);
+  CHECK(offsetof(ZZ9KVoiceStatusWire, margin_min_us) == 32U);
+  CHECK(offsetof(ZZ9KVoiceStatusWire, poll_gap_max_us) == 36U);
+  CHECK(offsetof(ZZ9KVoiceStatusWire, reserved) == 40U);
   CHECK(ZZ9K_VOICE_STATUS_PLAYING_FRAME_OFFSET == 0U);
   CHECK(ZZ9K_VOICE_STATUS_HORIZON_OFFSET == 4U);
   CHECK(ZZ9K_VOICE_STATUS_READ_CURSOR_OFFSET == 8U);
@@ -132,6 +134,9 @@ static void test_layouts(void)
   CHECK(ZZ9K_VOICE_STATUS_UNDERRUNS_OFFSET == 20U);
   CHECK(ZZ9K_VOICE_STATUS_DROPPED_OFFSET == 24U);
   CHECK(ZZ9K_VOICE_STATUS_SESSION_OFFSET == 28U);
+  CHECK(ZZ9K_VOICE_STATUS_MARGIN_OFFSET == 32U);
+  CHECK(ZZ9K_VOICE_STATUS_POLL_GAP_OFFSET == 36U);
+  CHECK(ZZ9K_VOICE_JITTER_NONE == 0xFFFFFFFFU);
 
   CHECK(ZZ9K_VOICE_OP_START == 1U && ZZ9K_VOICE_OP_LOOP == 2U &&
         ZZ9K_VOICE_OP_SET == 3U && ZZ9K_VOICE_OP_STOP == 4U &&
@@ -140,7 +145,8 @@ static void test_layouts(void)
         ZZ9K_VOICE_SET_RATE_HZ == 4U && ZZ9K_VOICE_DIR_BACKWARD == 1U);
   CHECK(ZZ9K_VOICE_STATE_CLOSED == 0U && ZZ9K_VOICE_STATE_OPEN == 1U &&
         ZZ9K_VOICE_STATE_LIVE == 2U);
-  CHECK(ZZ9K_VOICE_OPEN_FLAG_NTSC == 1U && ZZ9K_VOICE_OPEN_FLAG_LINEAR == 2U);
+  CHECK(ZZ9K_VOICE_OPEN_FLAG_NTSC == 1U && ZZ9K_VOICE_OPEN_FLAG_LINEAR == 2U &&
+        ZZ9K_VOICE_OPEN_FLAG_LOW_LATENCY == 4U);
   CHECK(ZZ9K_VOICE_UPLOAD_FLAG_COPY == 1U &&
         ZZ9K_VOICE_UPLOAD_FLAG_DEFINE == 2U);
   CHECK(ZZ9K_VOICE_FORMAT_S8 == 0U && ZZ9K_VOICE_FORMAT_S16 == 1U);
@@ -222,6 +228,33 @@ static void test_status_block_read(void)
   CHECK(s.underruns == 0x33333333UL);
   CHECK(s.dropped == 0x44444444UL);
   CHECK(s.session == 0x55555555UL);
+}
+
+static void test_jitter_read(void)
+{
+  uint8_t block[ZZ9K_VOICE_STATUS_BYTES];
+  ZZ9KVoiceJitter j;
+  ZZ9KVoiceStatus s;
+
+  /* A block from firmware that predates the telemetry: both words zero. */
+  memset(block, 0, sizeof(block));
+  zz9k_voice_jitter_read(block, &j);
+  CHECK(j.margin_min_us == 0U && j.poll_gap_max_us == 0U);
+
+  put_status_word(block, 28, 0x55555555UL);
+  put_status_word(block, ZZ9K_VOICE_STATUS_MARGIN_OFFSET, 0x00012345UL);
+  put_status_word(block, ZZ9K_VOICE_STATUS_POLL_GAP_OFFSET, 0x00067890UL);
+  zz9k_voice_jitter_read(block, &j);
+  CHECK(j.margin_min_us == 0x00012345UL);
+  CHECK(j.poll_gap_max_us == 0x00067890UL);
+  /* The status decode leaves the other words alone. */
+  zz9k_voice_status_read(block, &s);
+  CHECK(s.session == 0x55555555UL);
+
+  put_status_word(block, ZZ9K_VOICE_STATUS_MARGIN_OFFSET,
+                  ZZ9K_VOICE_JITTER_NONE);
+  zz9k_voice_jitter_read(block, &j);
+  CHECK(j.margin_min_us == ZZ9K_VOICE_JITTER_NONE);
 }
 
 /* A scripted 16-bit source that returns a queued sequence, so a tear (the
@@ -466,7 +499,11 @@ static void test_request_builders(void)
   CHECK(zz9k_request_audio_voice_open(&req, 1U, 2U, 3U, &desc) ==
         ZZ9K_STATUS_BAD_REQUEST);
   desc.bank_bytes = 4096U;
-  desc.flags = 4U;
+  desc.flags = ZZ9K_VOICE_OPEN_FLAG_LOW_LATENCY;
+  CHECK(zz9k_request_audio_voice_open(&req, 1U, 2U, 3U, &desc) ==
+        ZZ9K_STATUS_OK);
+  CHECK(zz9k_get_be32(req.entry.payload.inline_data + 20) == 4U);
+  desc.flags = 8U;
   CHECK(zz9k_request_audio_voice_open(&req, 1U, 2U, 3U, &desc) ==
         ZZ9K_STATUS_BAD_REQUEST);
 
@@ -535,6 +572,18 @@ static void test_open_reply_decoder(void)
         grant.lead_floor_frames == 7680U && grant.lead_max_frames == 24000U &&
         grant.ring_records == 64U && grant.output_rate == 48000U &&
         grant.max_samples == 256U);
+
+  /* A low-latency grant: the lower floor decodes, and a lead under it is
+   * still a firmware fault. */
+  zz9k_put_be32(p + 12, 2880U);
+  zz9k_put_be32(p + 16, 2880U);
+  CHECK(zz9k_reply_audio_voice_open_result(&reply, &grant) == ZZ9K_STATUS_OK);
+  CHECK(grant.lead_frames == 2880U && grant.lead_floor_frames == 2880U);
+  zz9k_put_be32(p + 12, 2879U);
+  CHECK(zz9k_reply_audio_voice_open_result(&reply, &grant) ==
+        ZZ9K_STATUS_INTERNAL_ERROR);
+  zz9k_put_be32(p + 12, 9000U);
+  zz9k_put_be32(p + 16, 7680U);
 
   /* A grant that breaks the contract is a firmware fault, zeroed. */
   zz9k_put_be32(p + 24, 48U); /* not a power of two */
@@ -790,6 +839,9 @@ static void mock_serve_open(const ZZ9KMailboxWireEntry *req)
   uint32_t bank = mock_req_word(req, 3);
   uint32_t lead = mock_req_word(req, 4);
   uint32_t voices = mock_req_word(req, 6);
+  uint32_t flags = mock_req_word(req, 5);
+  uint32_t floor_frames =
+      (flags & ZZ9K_VOICE_OPEN_FLAG_LOW_LATENCY) != 0U ? 2880U : 7680U;
 
   g_mock.open_calls++;
   if (g_mock.open_status != ZZ9K_STATUS_OK) {
@@ -808,8 +860,8 @@ static void mock_serve_open(const ZZ9KMailboxWireEntry *req)
   g_mock.bank_bytes = bank;
   memset(g_mock.bank, 0, sizeof(g_mock.bank));
   memset(g_mock.samples, 0, sizeof(g_mock.samples));
-  if (lead < 7680U) {
-    lead = 7680U;
+  if (lead < floor_frames) {
+    lead = floor_frames;
   }
   if (lead > 24000U) {
     lead = 24000U;
@@ -819,7 +871,7 @@ static void mock_serve_open(const ZZ9KMailboxWireEntry *req)
   mock_word(reply, 1, voices);
   mock_word(reply, 2, bank);
   mock_word(reply, 3, lead);
-  mock_word(reply, 4, 7680U);
+  mock_word(reply, 4, floor_frames);
   mock_word(reply, 5, 24000U);
   mock_word(reply, 6, g_mock.grant_ring_override != 0U
                           ? g_mock.grant_ring_override
@@ -1120,6 +1172,45 @@ static void test_open_success(uint16_t zorro_version)
   mock_detach(ctx);
 }
 
+/* A low-latency open asks for the short floor: the request carries the flag
+ * and the grant reports the lower floor, whatever lead was asked. */
+static void test_open_low_latency(void)
+{
+  ZZ9KContext *ctx = mock_attach(3U);
+  ZZ9KVoiceOpenDesc desc;
+  ZZ9KVoiceSession s;
+
+  CHECK(ctx != NULL);
+  if (!ctx) {
+    return;
+  }
+  default_desc(&desc);
+  desc.flags = ZZ9K_VOICE_OPEN_FLAG_LOW_LATENCY;
+  desc.lead_frames = 0U;
+  CHECK(zz9k_voice_open(ctx, &desc, &s) == ZZ9K_STATUS_OK);
+  CHECK(zz9k_get_be32(g_mock.log[0].payload + 20) ==
+        ZZ9K_VOICE_OPEN_FLAG_LOW_LATENCY);
+  CHECK(s.grant.lead_floor_frames == 2880U);
+  CHECK(s.grant.lead_frames == 2880U);
+  CHECK(zz9k_voice_close(ctx, &s) == ZZ9K_STATUS_OK);
+
+  default_desc(&desc);
+  desc.flags = ZZ9K_VOICE_OPEN_FLAG_LOW_LATENCY | ZZ9K_VOICE_OPEN_FLAG_LINEAR;
+  desc.lead_frames = 1000U;
+  CHECK(zz9k_voice_open(ctx, &desc, &s) == ZZ9K_STATUS_OK);
+  CHECK(s.grant.lead_floor_frames == 2880U && s.grant.lead_frames == 2880U);
+  CHECK(zz9k_voice_close(ctx, &s) == ZZ9K_STATUS_OK);
+
+  /* A request above the short floor is granted as asked. */
+  default_desc(&desc);
+  desc.flags = ZZ9K_VOICE_OPEN_FLAG_LOW_LATENCY;
+  desc.lead_frames = 5000U;
+  CHECK(zz9k_voice_open(ctx, &desc, &s) == ZZ9K_STATUS_OK);
+  CHECK(s.grant.lead_floor_frames == 2880U && s.grant.lead_frames == 5000U);
+  CHECK(zz9k_voice_close(ctx, &s) == ZZ9K_STATUS_OK);
+  mock_detach(ctx);
+}
+
 static void test_open_caller_sizes(void)
 {
   ZZ9KContext *ctx = mock_attach(3U);
@@ -1267,6 +1358,9 @@ static void test_open_rejects_bad_desc_before_allocating(void)
   CHECK(zz9k_voice_open(ctx, &desc, &s) == ZZ9K_STATUS_BAD_REQUEST);
   default_desc(&desc);
   desc.flags = 0x80U;
+  CHECK(zz9k_voice_open(ctx, &desc, &s) == ZZ9K_STATUS_BAD_REQUEST);
+  default_desc(&desc);
+  desc.flags = 8U; /* the bit after the low-latency flag is unknown */
   CHECK(zz9k_voice_open(ctx, &desc, &s) == ZZ9K_STATUS_BAD_REQUEST);
   CHECK(zz9k_voice_open(ctx, &desc, NULL) == ZZ9K_STATUS_BAD_REQUEST);
   CHECK(g_mock.allocs == 0);
@@ -1591,6 +1685,7 @@ int main(void)
   test_layouts();
   test_records();
   test_status_block_read();
+  test_jitter_read();
   test_read32_tear();
   test_ring_math();
   test_stage_then_publish();
@@ -1599,6 +1694,7 @@ int main(void)
 
   test_open_success(2U);
   test_open_success(3U);
+  test_open_low_latency();
   test_open_caller_sizes();
   test_open_refused_frees_everything();
   test_open_partial_allocation_failure();

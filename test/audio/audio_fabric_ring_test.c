@@ -378,7 +378,7 @@ static void scenario_rate_admission(void)
 
 /* ---- B2. rate-lease conversion parity (AHI migration) ---- */
 
-static void scenario_rate_conversion(void)
+static void rate_conversion_case(uint32_t fill_ahead)
 {
 	struct audio_fabric_ring_grant grant;
 	struct SDKAudioRingFirmwareLine fw;
@@ -395,6 +395,7 @@ static void scenario_rate_conversion(void)
 	uint32_t isr_conversions;
 
 	fabric_reset_state();
+	audio_fabric_fill_ahead_set(fill_ahead);
 	isr_conversions = audio_fabric_host_isr_conversions();
 	check(acquire_lease_rate(AUDIO_FABRIC_SLOT_MAILBOX, 128U, 44100U,
 	                         &grant) == AUDIO_FABRIC_LEASE_OK,
@@ -458,6 +459,14 @@ static void scenario_rate_conversion(void)
 	check(audio_fabric_ring_release(AUDIO_FABRIC_SLOT_MAILBOX,
 		grant.generation) == AUDIO_FABRIC_LEASE_OK, "", "");
 	(void)zz_audio_convert_clips(&ref);
+}
+
+static void scenario_rate_conversion(void)
+{
+	rate_conversion_case(0U);
+	/* A shorter fill-ahead leaves a converting lease's preroll and its
+	 * staging runway alone: the same image reaches the TX ring. */
+	rate_conversion_case(AUDIO_FABRIC_FILL_AHEAD_MIN_PERIODS);
 }
 
 static void scenario_rate_wrap(void)
@@ -1581,6 +1590,472 @@ static void scenario_voice_slot_hidden(void)
 	}
 }
 
+/* ---- K. fill-ahead control ---- */
+
+/*
+ * A source that never starves: a 16-period ring of the deterministic PCM
+ * stream, topped up to eight periods ahead of the staged cursor (the
+ * eight periods behind it stay intact for any queued-period replay). The
+ * same stream feeds every fill-ahead, so what the DMA reaches period by
+ * period must not depend on how far ahead the compositor runs.
+ */
+#define FA_RING_BYTES (16U * TICK_BYTES)
+#define FA_TICKS 200U
+
+static struct {
+	uint8_t ring[FA_RING_BYTES];
+	uint64_t produced;
+	uint64_t staged;
+	uint32_t rate;
+	uint32_t underruns;
+} g_fa;
+
+static int fa_snapshot(struct audio_fabric_source *s)
+{
+	memset(s, 0, sizeof(*s));
+	s->ring = g_fa.ring;
+	s->capacity = FA_RING_BYTES;
+	s->produced_bytes = g_fa.produced;
+	s->staged_bytes = g_fa.staged;
+	s->sample_rate = g_fa.rate;
+	s->channels = 2U;
+	s->sample_format = SDK_AUDIO_SAMPLE_FORMAT_S16LE;
+	s->coherent = 1U;
+	return 1;
+}
+
+static int fa_stage(uint32_t bytes)
+{
+	if (bytes > g_fa.produced - g_fa.staged)
+		return 0;
+	g_fa.staged += bytes;
+	return 1;
+}
+
+static void fa_retire(uint32_t bytes)
+{
+	(void)bytes;
+}
+
+static void fa_underrun(void)
+{
+	g_fa.underruns++;
+}
+
+static const struct audio_fabric_producer_ops g_ops_fa = {
+	.snapshot = fa_snapshot,
+	.stage = fa_stage,
+	.retire = fa_retire,
+	.underrun = fa_underrun,
+};
+
+enum fa_kind {
+	FA_PUMP48,
+	FA_PUMP44,
+	FA_LEASE,
+};
+
+static enum fa_kind g_fa_kind;
+static uint64_t g_fa_lease_written;
+static uint64_t g_fa_seq[FA_TICKS];
+static uint32_t g_fa_tick;
+
+static uint64_t fa_period_hash(uint32_t index)
+{
+	const uint8_t *p = g_fabric_tx + (index % AUDIO_NUM_PERIODS) *
+		TICK_BYTES;
+	uint64_t h = 1469598103934665603ULL;
+	uint32_t i;
+
+	for (i = 0U; i < TICK_BYTES; i++) {
+		h ^= p[i];
+		h *= 1099511628211ULL;
+	}
+	return h;
+}
+
+/* Keep the pump source eight periods ahead of its staged cursor. */
+static void fa_topup(void)
+{
+	while (g_fa.produced < g_fa.staged + FA_RING_BYTES - 8U * TICK_BYTES) {
+		pcm_byte(&g_fa.ring[g_fa.produced % FA_RING_BYTES],
+			g_fa.produced, 0);
+		g_fa.produced++;
+	}
+}
+
+/* Keep the lease ring eight periods ahead of what the firmware credited,
+ * and publish (a fresh heartbeat token with every publication). */
+static void fa_lease_topup(void)
+{
+	struct SDKAudioRingFirmwareLine fw;
+	uint64_t consumed = 0U;
+
+	firmware_snapshot(AUDIO_FABRIC_SLOT_MAILBOX, &fw);
+	if (be32(fw.status) == SDK_AUDIO_RING_STATUS_OK)
+		consumed = ((uint64_t)be32(fw.consumed_cursor_hi) << 32) |
+			be32(fw.consumed_cursor_lo);
+	while (g_fa_lease_written < consumed + RING_TEST_CAPACITY -
+	       8U * TICK_BYTES) {
+		pcm_byte(&g_ring_pcm_a[g_fa_lease_written %
+			RING_TEST_CAPACITY], g_fa_lease_written, 0);
+		g_fa_lease_written++;
+	}
+	producer_publish(AUDIO_FABRIC_SLOT_MAILBOX, g_fa_lease_written, 0U);
+}
+
+/* A fresh world with one producer of the given kind at fill-ahead
+ * `periods` (0 is the default), the DMA parked on period 3. */
+static void fa_start(enum fa_kind kind, uint32_t periods)
+{
+	struct audio_fabric_ring_grant grant;
+
+	fabric_reset_state();
+	audio_fabric_fill_ahead_set(periods);
+	g_dma_count = 3U * TICK_BYTES;
+	g_fa_kind = kind;
+	g_fa_tick = 0U;
+	g_fa_lease_written = 0U;
+	memset(&g_fa, 0, sizeof(g_fa));
+	g_fa.rate = kind == FA_PUMP44 ? 44100U : 48000U;
+	if (kind == FA_LEASE) {
+		check(acquire_lease(AUDIO_FABRIC_SLOT_MAILBOX, 128U, &grant) ==
+		      AUDIO_FABRIC_LEASE_OK, "fill-ahead: acquire lease", "");
+		g_producer[AUDIO_FABRIC_SLOT_MAILBOX].generation =
+			grant.generation;
+		fa_lease_topup();
+		return;
+	}
+	fa_topup();
+	(void)audio_fabric_producer_attach(AUDIO_FABRIC_SLOT_PUMP,
+		&g_ops_fa);
+	audio_fabric_producer_rate_set(AUDIO_FABRIC_SLOT_PUMP, g_fa.rate);
+	audio_fabric_producer_restart(AUDIO_FABRIC_SLOT_PUMP);
+	audio_fabric_producer_go_live(AUDIO_FABRIC_SLOT_PUMP);
+}
+
+/* One main-loop period: the source is topped up, the DMA moves one
+ * period, the content of the period it reaches is recorded, the ISR
+ * runs. */
+static void fa_step(void)
+{
+	if (g_fa_kind == FA_LEASE) {
+		fa_lease_topup();
+		audio_fabric_lease_poll();
+	} else {
+		fa_topup();
+	}
+	dma_tick(1);
+	if (g_fa_tick < FA_TICKS)
+		g_fa_seq[g_fa_tick++] = fa_period_hash(
+			g_dma_count / TICK_BYTES);
+	audio_fabric_isr();
+}
+
+static void fa_run(uint32_t ticks)
+{
+	while (ticks-- != 0U)
+		fa_step();
+}
+
+/* Periods the compositor is ahead of the DMA, in the output clock's
+ * frames (960 per period). */
+static uint32_t fa_lead_frames(void)
+{
+	uint64_t lead = 0U;
+
+	audio_fabric_output_clock(NULL, &lead, NULL);
+	return (uint32_t)lead;
+}
+
+static uint32_t fa_underruns(void)
+{
+	if (g_fa_kind == FA_LEASE)
+		return lease_state(AUDIO_FABRIC_SLOT_MAILBOX).underruns;
+	return g_fa.underruns;
+}
+
+static int fa_same_sequence(const uint64_t *a, const uint64_t *b,
+	uint32_t count)
+{
+	return memcmp(a, b, count * sizeof(a[0])) == 0;
+}
+
+static const char *fa_name(enum fa_kind kind)
+{
+	return kind == FA_PUMP48 ? "pump 48 kHz" :
+	       kind == FA_PUMP44 ? "converting pump" : "bypass lease";
+}
+
+/* Play-order parity: the periods the DMA reaches at fill-ahead 2, 3 and 4
+ * equal the default's, sample for sample, over 200 ticks (25 turns of the
+ * ring), with the same underrun count. */
+static void scenario_fill_ahead_order(void)
+{
+	static uint64_t reference[FA_TICKS];
+	uint32_t reference_underruns;
+	enum fa_kind kind;
+	uint32_t periods;
+
+	for (kind = FA_PUMP48; kind <= FA_LEASE; kind++) {
+		fa_start(kind, 0U);
+		fa_run(FA_TICKS);
+		memcpy(reference, g_fa_seq, sizeof(reference));
+		reference_underruns = fa_underruns();
+		check(g_fa.staged != 0U || kind == FA_LEASE,
+		      "fill-ahead order: the reference run staged source",
+		      fa_name(kind));
+		for (periods = 2U; periods <= 4U; periods++) {
+			fa_start(kind, periods);
+			fa_run(FA_TICKS);
+			check(fa_same_sequence(reference, g_fa_seq, FA_TICKS),
+			      "fill-ahead order: same periods as the default",
+			      fmt("%s at %u periods", fa_name(kind), periods));
+			check(fa_underruns() == reference_underruns,
+			      "fill-ahead order: same underrun count",
+			      fmt("%s at %u periods: %u vs %u", fa_name(kind),
+			      periods, fa_underruns(), reference_underruns));
+		}
+	}
+}
+
+/* Lowering 6 to 2 mid-stream drains the frontier one period per tick: no
+ * rebase, no underrun, nothing skipped or repeated. */
+static void scenario_fill_ahead_lower(void)
+{
+	static uint64_t reference[FA_TICKS];
+	static const uint32_t expect[] = { 5U, 4U, 3U, 2U, 2U, 2U };
+	enum fa_kind kind;
+	uint32_t i;
+
+	for (kind = FA_PUMP48; kind <= FA_LEASE; kind++) {
+		uint32_t before;
+		int steps_ok = 1;
+
+		fa_start(kind, 0U);
+		fa_run(FA_TICKS);
+		memcpy(reference, g_fa_seq, sizeof(reference));
+
+		fa_start(kind, 0U);
+		fa_run(40U);
+		check(fa_lead_frames() == 6U * 960U,
+		      "fill-ahead lower: the default holds six periods",
+		      fmt("%s: lead=%u", fa_name(kind), fa_lead_frames()));
+		before = fa_underruns();
+		audio_fabric_fill_ahead_set(2U);
+		for (i = 0U; i < sizeof(expect) / sizeof(expect[0]); i++) {
+			fa_step();
+			if (fa_lead_frames() != expect[i] * 960U)
+				steps_ok = 0;
+		}
+		check(steps_ok,
+		      "fill-ahead lower: the frontier falls one period per tick",
+		      fmt("%s: lead=%u", fa_name(kind), fa_lead_frames()));
+		fa_run(FA_TICKS - 46U);
+		check(fa_underruns() == before,
+		      "fill-ahead lower: no rebase and no underrun",
+		      fmt("%s: %u -> %u", fa_name(kind), before,
+		      fa_underruns()));
+		check(fa_same_sequence(reference, g_fa_seq, FA_TICKS),
+		      "fill-ahead lower: the played sequence is unchanged",
+		      fa_name(kind));
+	}
+}
+
+/* Raising 2 to the default grows the frontier by exactly one period per
+ * tick (a tick fills one extra period at most), and nothing is skipped or
+ * repeated. */
+static void scenario_fill_ahead_raise(void)
+{
+	static uint64_t reference[FA_TICKS];
+	static const uint32_t expect[] = { 3U, 4U, 5U, 6U, 6U, 6U };
+	enum fa_kind kind;
+	uint32_t i;
+
+	for (kind = FA_PUMP48; kind <= FA_LEASE; kind++) {
+		uint32_t before;
+		int steps_ok = 1;
+
+		fa_start(kind, 0U);
+		fa_run(FA_TICKS);
+		memcpy(reference, g_fa_seq, sizeof(reference));
+
+		fa_start(kind, 2U);
+		fa_run(40U);
+		check(fa_lead_frames() == 2U * 960U,
+		      "fill-ahead raise: the short fill-ahead holds two periods",
+		      fmt("%s: lead=%u", fa_name(kind), fa_lead_frames()));
+		before = fa_underruns();
+		audio_fabric_fill_ahead_set(0U);
+		for (i = 0U; i < sizeof(expect) / sizeof(expect[0]); i++) {
+			fa_step();
+			if (fa_lead_frames() != expect[i] * 960U)
+				steps_ok = 0;
+		}
+		check(steps_ok,
+		      "fill-ahead raise: the frontier grows one period per tick",
+		      fmt("%s: lead=%u", fa_name(kind), fa_lead_frames()));
+		fa_run(FA_TICKS - 46U);
+		check(fa_underruns() == before,
+		      "fill-ahead raise: no underrun while ramping",
+		      fmt("%s: %u -> %u", fa_name(kind), before,
+		      fa_underruns()));
+		check(fa_same_sequence(reference, g_fa_seq, FA_TICKS),
+		      "fill-ahead raise: the played sequence is unchanged",
+		      fa_name(kind));
+	}
+}
+
+/*
+ * ISR lateness. After an ISR the frontier is `periods` ahead of the DMA, so
+ * an ISR that finds the DMA `periods` ahead has reached an unfilled period:
+ * the tolerated delay is periods - 2 extra periods, one more rebases and
+ * counts one played underrun.
+ */
+static void scenario_fill_ahead_lateness(void)
+{
+	static const uint32_t table[] = { 2U, 3U, 4U, 6U };
+	uint32_t t;
+
+	for (t = 0U; t < sizeof(table) / sizeof(table[0]); t++) {
+		uint32_t periods = table[t];
+		uint32_t before;
+
+		fa_start(FA_PUMP48, periods == 6U ? 0U : periods);
+		fa_run(30U);
+		before = fa_underruns();
+		if (periods > 2U)
+			dma_tick(periods - 2U);
+		fa_step();
+		check(fa_underruns() == before,
+		      "fill-ahead lateness: the tolerated delay costs nothing",
+		      fmt("%u periods: %u extra periods, %u -> %u", periods,
+		      periods - 2U, before, fa_underruns()));
+
+		fa_start(FA_PUMP48, periods == 6U ? 0U : periods);
+		fa_run(30U);
+		before = fa_underruns();
+		dma_tick(periods - 1U);
+		fa_step();
+		check(fa_underruns() == before + 1U,
+		      "fill-ahead lateness: one period more rebases and counts one",
+		      fmt("%u periods: %u extra periods, %u -> %u", periods,
+		      periods - 1U, before, fa_underruns()));
+		fa_run(20U);
+		check(fa_underruns() == before + 1U,
+		      "fill-ahead lateness: playback recovers",
+		      fmt("%u periods: %u", periods, fa_underruns()));
+	}
+}
+
+/* A fabric reset restores the default whatever was requested. */
+static void scenario_fill_ahead_reset(void)
+{
+	fa_start(FA_PUMP48, 2U);
+	fa_run(20U);
+	check(audio_fabric_fill_ahead_get() == 2U &&
+	      fa_lead_frames() == 2U * 960U,
+	      "fill-ahead reset: the request holds before the reset",
+	      fmt("get=%u lead=%u", audio_fabric_fill_ahead_get(),
+	      fa_lead_frames()));
+	fabric_reset_state();
+	check(audio_fabric_fill_ahead_get() ==
+	      AUDIO_FABRIC_FILL_AHEAD_DEFAULT_PERIODS,
+	      "fill-ahead reset: a warm reset restores the default",
+	      fmt("get=%u", audio_fabric_fill_ahead_get()));
+	audio_fabric_fill_ahead_set(1U);
+	check(audio_fabric_fill_ahead_get() ==
+	      AUDIO_FABRIC_FILL_AHEAD_MIN_PERIODS,
+	      "fill-ahead reset: requests clamp to two periods", "");
+	audio_fabric_fill_ahead_set(9U);
+	check(audio_fabric_fill_ahead_get() ==
+	      AUDIO_FABRIC_FILL_AHEAD_DEFAULT_PERIODS,
+	      "fill-ahead reset: and to six", "");
+	audio_fabric_fill_ahead_set(0U);
+	check(audio_fabric_fill_ahead_get() ==
+	      AUDIO_FABRIC_FILL_AHEAD_DEFAULT_PERIODS,
+	      "fill-ahead reset: zero is the default", "");
+
+	/* An idle fabric restarts at the default: the effective value does
+	 * not ramp up from a lowered one on the next start. */
+	fa_start(FA_PUMP48, 2U);
+	fa_run(10U);
+	audio_fabric_fill_ahead_set(0U);
+	audio_fabric_producer_detach(AUDIO_FABRIC_SLOT_PUMP);
+	fa_start(FA_PUMP48, 0U);
+	fa_run(1U);
+	check(fa_lead_frames() >= 5U * 960U,
+	      "fill-ahead reset: an idle fabric restarts at the default",
+	      fmt("lead=%u", fa_lead_frames()));
+}
+
+/*
+ * Two producers at fill-ahead 2: a constant pump and a constant lease.
+ * Every period the DMA reaches is the saturating sum, and after the lease
+ * is released the queued period is rebuilt pump-only.
+ */
+static void scenario_fill_ahead_mix(void)
+{
+	struct audio_fabric_ring_grant grant;
+	uint32_t tick;
+	int mixed_ok = 1;
+	int pump_only_ok = 1;
+	uint32_t first_bad = 0U;
+	uint32_t pos;
+
+	fabric_reset_state();
+	audio_fabric_fill_ahead_set(2U);
+	g_dma_count = 0;
+	(void)pump_standby_start();
+	check(acquire_lease(AUDIO_FABRIC_SLOT_MAILBOX, 128U, &grant) ==
+	      AUDIO_FABRIC_LEASE_OK, "fill-ahead mix: acquire", "");
+	g_producer[AUDIO_FABRIC_SLOT_MAILBOX].generation = grant.generation;
+	producer_fill(AUDIO_FABRIC_SLOT_MAILBOX, LEASE_PCM);
+	for (tick = 0U; tick < 8U; tick++) {
+		producer_publish(AUDIO_FABRIC_SLOT_MAILBOX,
+			RING_TEST_CAPACITY, 0U);
+		audio_fabric_lease_poll();
+		dma_tick(1);
+		if (tick >= 4U &&
+		    !period_is_constant((g_dma_count / TICK_BYTES) %
+		    AUDIO_NUM_PERIODS, MIXED_PCM))
+			mixed_ok = 0;
+		audio_fabric_isr();
+	}
+	check(mixed_ok, "fill-ahead mix: played periods are the saturating sum",
+	      "");
+	check(fa_lead_frames() == 2U * 960U,
+	      "fill-ahead mix: the frontier holds two periods",
+	      fmt("lead=%u", fa_lead_frames()));
+
+	check(audio_fabric_ring_release(AUDIO_FABRIC_SLOT_MAILBOX,
+		grant.generation) == AUDIO_FABRIC_LEASE_OK,
+	      "fill-ahead mix: release", "");
+	dma_tick(1);
+	audio_fabric_isr();
+	pos = (g_dma_count / TICK_BYTES) % AUDIO_NUM_PERIODS;
+	/* Only the period being entered may still carry the lease; the one
+	 * queued behind it was rebuilt from the pump alone. */
+	if (!period_is_constant((pos + 1U) % AUDIO_NUM_PERIODS, PUMP_PCM)) {
+		pump_only_ok = 0;
+		first_bad = 100U;
+	}
+	/* The constant pump source runs 17 periods; stay inside it. */
+	for (tick = 0U; tick < 3U; tick++) {
+		dma_tick(1);
+		audio_fabric_isr();
+		pos = (g_dma_count / TICK_BYTES) % AUDIO_NUM_PERIODS;
+		if (!period_is_constant(pos, PUMP_PCM) && pump_only_ok) {
+			pump_only_ok = 0;
+			first_bad = tick;
+		}
+	}
+	check(pump_only_ok,
+	      "fill-ahead mix: after the release only the pump plays",
+	      fmt("first bad=%u pos=%u sample=%d", first_bad, pos,
+	      ((const int16_t *)(g_fabric_tx + pos * TICK_BYTES))[0]));
+}
+
 int main(void)
 {
 	scenario_admission();
@@ -1600,6 +2075,12 @@ int main(void)
 	scenario_rebuild();
 	scenario_voice_detach_keeps_lease();
 	scenario_voice_slot_hidden();
+	scenario_fill_ahead_order();
+	scenario_fill_ahead_lower();
+	scenario_fill_ahead_raise();
+	scenario_fill_ahead_lateness();
+	scenario_fill_ahead_reset();
+	scenario_fill_ahead_mix();
 	scenario_warm_reset();
 	scenario_cache_fidelity();
 	if (failures != 0)

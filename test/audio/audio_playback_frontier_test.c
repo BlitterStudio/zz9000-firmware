@@ -91,6 +91,31 @@ static int check_lifecycle_clear_and_64bit_offset(void)
 	       (uint32_t)(cursor % 32768U);
 }
 
+/* 192 bytes per millisecond: the bucket edges sit at 96, 192, 480, 960 and
+ * 1920 bytes, and the phase wraps at the period. */
+static int check_phase_buckets(void)
+{
+	static const struct {
+		uint32_t bytes;
+		uint32_t bucket;
+	} cases[] = {
+		{0U, 0U}, {95U, 0U}, {96U, 1U}, {191U, 1U}, {192U, 2U},
+		{479U, 2U}, {480U, 3U}, {959U, 3U}, {960U, 4U},
+		{1919U, 4U}, {1920U, 5U}, {3839U, 5U},
+		/* Whole periods and ring turns fold back to the phase. */
+		{PERIOD_BYTES, 0U}, {PERIOD_BYTES + 96U, 1U},
+		{RING_BYTES + 3839U, 5U},
+	};
+	uint32_t i;
+
+	for (i = 0U; i < sizeof(cases) / sizeof(cases[0]); i++) {
+		if (audio_playback_phase_bucket(cases[i].bytes, PERIOD_BYTES) !=
+		    cases[i].bucket)
+			return 0;
+	}
+	return 1;
+}
+
 int main(void)
 {
 	if (!check_temporary_shortage_is_retryable())
@@ -103,5 +128,7 @@ int main(void)
 		return 4;
 	if (!check_lifecycle_clear_and_64bit_offset())
 		return 5;
+	if (!check_phase_buckets())
+		return 6;
 	return 0;
 }

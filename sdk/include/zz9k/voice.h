@@ -54,8 +54,15 @@ extern "C" {
 
 #define ZZ9K_VOICE_OPEN_FLAG_NTSC   (1U << 0) /* NTSC clock, else PAL */
 #define ZZ9K_VOICE_OPEN_FLAG_LINEAR (1U << 1) /* linear interpolation */
+/* Low-latency session (low-latency work): the firmware shortens its audio
+ * fill-ahead while the session is open, and the lead floor drops from 8
+ * periods (7680 frames) to 3 (2880 frames). Firmware without the mode
+ * answers ZZ9K_STATUS_BAD_REQUEST; zz9k.library before revision 43 refuses
+ * the flag locally with the same status. */
+#define ZZ9K_VOICE_OPEN_FLAG_LOW_LATENCY (1U << 2)
 #define ZZ9K_VOICE_OPEN_FLAG_KNOWN \
-  (ZZ9K_VOICE_OPEN_FLAG_NTSC | ZZ9K_VOICE_OPEN_FLAG_LINEAR)
+  (ZZ9K_VOICE_OPEN_FLAG_NTSC | ZZ9K_VOICE_OPEN_FLAG_LINEAR | \
+   ZZ9K_VOICE_OPEN_FLAG_LOW_LATENCY)
 
 /* ---- UPLOAD flags and sample formats ---- */
 
@@ -223,6 +230,15 @@ typedef struct ZZ9KVoiceRecord {
 #define ZZ9K_VOICE_STATUS_DROPPED_OFFSET       24U /* u32 */
 #define ZZ9K_VOICE_STATUS_SESSION_OFFSET       28U /* u32 */
 
+/* Jitter telemetry (low-latency work), since open. The margin is the
+ * smallest time a rendered period waited for the audio interrupt to take
+ * it, in microseconds, and ZZ9K_VOICE_JITTER_NONE until the first period is
+ * taken. The poll gap is the largest gap between two firmware voice polls,
+ * in microseconds. Firmware without them leaves both words zero. */
+#define ZZ9K_VOICE_STATUS_MARGIN_OFFSET        32U /* u32 */
+#define ZZ9K_VOICE_STATUS_POLL_GAP_OFFSET      36U /* u32 */
+#define ZZ9K_VOICE_JITTER_NONE                 0xFFFFFFFFU
+
 #define ZZ9K_VOICE_STATE_CLOSED 0U
 #define ZZ9K_VOICE_STATE_OPEN   1U /* open, no record yet */
 #define ZZ9K_VOICE_STATE_LIVE   2U
@@ -237,7 +253,9 @@ typedef struct ZZ9KVoiceStatusWire {
   uint8_t underruns[4];
   uint8_t dropped[4];
   uint8_t session[4];
-  uint8_t reserved[32];
+  uint8_t margin_min_us[4];
+  uint8_t poll_gap_max_us[4];
+  uint8_t reserved[24];
 } ZZ9KVoiceStatusWire;
 
 typedef char ZZ9KVoiceStatusWire_is_64_bytes[
@@ -245,7 +263,7 @@ typedef char ZZ9KVoiceStatusWire_is_64_bytes[
 
 /* Host-order status snapshot. */
 typedef struct ZZ9KVoiceStatus {
-  uint32_t playing_frame; /* engine frame now leaving the DAC */
+  uint32_t playing_frame; /* first frame of the period the DMA is fetching */
   uint32_t horizon;       /* next engine frame the engine will render */
   uint16_t read_cursor;   /* records the firmware has taken */
   uint16_t state;         /* ZZ9K_VOICE_STATE_* */
@@ -255,6 +273,14 @@ typedef struct ZZ9KVoiceStatus {
   uint32_t dropped;
   uint32_t session;
 } ZZ9KVoiceStatus;
+
+/* Host-order jitter telemetry, read by zz9k_voice_jitter_read(). It is not
+ * part of ZZ9KVoiceStatus so that a program built against the older, smaller
+ * struct keeps working with a library that fills it in. */
+typedef struct ZZ9KVoiceJitter {
+  uint32_t margin_min_us;   /* ZZ9K_VOICE_JITTER_NONE until the first period */
+  uint32_t poll_gap_max_us; /* 0 on firmware without the telemetry */
+} ZZ9KVoiceJitter;
 
 /* ---- Host-facing descriptors ---- */
 
@@ -427,6 +453,17 @@ static inline void zz9k_voice_status_read(const volatile uint8_t *block,
       zz9k_voice_read32(block, ZZ9K_VOICE_STATUS_UNDERRUNS_OFFSET);
   status->dropped = zz9k_voice_read32(block, ZZ9K_VOICE_STATUS_DROPPED_OFFSET);
   status->session = zz9k_voice_read32(block, ZZ9K_VOICE_STATUS_SESSION_OFFSET);
+}
+
+/* Reads the two jitter words of the status block, with the same tear
+ * protection and cache rule as zz9k_voice_status_read. */
+static inline void zz9k_voice_jitter_read(const volatile uint8_t *block,
+                                          ZZ9KVoiceJitter *jitter)
+{
+  jitter->margin_min_us =
+      zz9k_voice_read32(block, ZZ9K_VOICE_STATUS_MARGIN_OFFSET);
+  jitter->poll_gap_max_us =
+      zz9k_voice_read32(block, ZZ9K_VOICE_STATUS_POLL_GAP_OFFSET);
 }
 
 /* Encode and decode one record (big-endian wire form). */

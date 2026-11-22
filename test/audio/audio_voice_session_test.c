@@ -390,8 +390,10 @@ static void refuse(const char *name, struct audio_voice_session_open o)
 	check(audio_voice_session_open(&o, &grant) == SDK_STATUS_BAD_REQUEST,
 	      name, "");
 	check(!audio_voice_session_active() && g_release_calls == 0 &&
-	      audio_fabric_output_busy() == 0,
-	      fmt("%s: nothing attached", name), "");
+	      audio_fabric_output_busy() == 0 &&
+	      audio_fabric_fill_ahead_get() ==
+	      AUDIO_FABRIC_FILL_AHEAD_DEFAULT_PERIODS,
+	      fmt("%s: nothing attached, fill-ahead untouched", name), "");
 }
 
 static void scenario_open_refused(void)
@@ -402,8 +404,11 @@ static void scenario_open_refused(void)
 	o.status_len = 63U;
 	refuse("open refused: status block under 64 bytes", o);
 	o = open_params(7680U, 4U, 0U);
-	o.flags = 4U;
+	o.flags = 8U;
 	refuse("open refused: unknown flag", o);
+	o = open_params(7680U, 4U, 0U);
+	o.flags = AUDIO_VOICE_OPEN_LOW_LATENCY | 8U;
+	refuse("open refused: unknown flag beside low latency", o);
 	o = open_params(7680U, 0U, 0U);
 	refuse("open refused: zero voices", o);
 	o = open_params(7680U, 33U, 0U);
@@ -425,7 +430,7 @@ static void scenario_open_refused(void)
 	o.status = g_status_spare + 4U;
 	refuse("open refused: status block at a word boundary", o);
 	check(audio_voice_session_check(RING_LEN, (uintptr_t)g_status, 64U, 1U,
-	      1U, 3U) == SDK_STATUS_OK &&
+	      1U, 7U) == SDK_STATUS_OK &&
 	      audio_voice_session_check(RING_LEN, (uintptr_t)g_status, 64U, 1U,
 	      1U, 8U) == SDK_STATUS_BAD_REQUEST &&
 	      audio_voice_session_check(RING_LEN, (uintptr_t)g_status + 16U,
@@ -464,7 +469,7 @@ static void scenario_ring_geometry(void)
 
 /* Look for the TX period holding the stamp frame and verify the exact
  * sample where the voice begins. */
-static int find_exact_start(uint32_t stamp)
+static int find_start_period(uint32_t stamp)
 {
 	uint32_t index = stamp % AUDIO_VOICE_PERIOD_FRAMES;
 	uint32_t i;
@@ -479,11 +484,16 @@ static int find_exact_start(uint32_t stamp)
 			int16_t want = f < index ? 0 : ramp_out(f - index);
 
 			if (p[2U * f] != want || p[2U * f + 1U] != want)
-				return 0;
+				return -1;
 		}
-		return 1;
+		return (int)i;
 	}
-	return 0;
+	return -1;
+}
+
+static int find_exact_start(uint32_t stamp)
+{
+	return find_start_period(stamp) >= 0;
 }
 
 /* ---- B2. ring wrap, cursor wrap, overrun ---- */
@@ -861,6 +871,100 @@ static void scenario_stall(void)
 	      fmt("horizon=%u playing=%u", st_horizon(), st_playing()));
 }
 
+/* ---- B2. jitter telemetry ---- */
+
+static uint32_t st_margin(void)
+{
+	return st32(AUDIO_VOICE_STATUS_OFF_MARGIN);
+}
+
+static uint32_t st_gap(void)
+{
+	return st32(AUDIO_VOICE_STATUS_OFF_POLL_GAP);
+}
+
+/* A period whose ISR lands skew_ms after the poll (the clock is 1 ms per
+ * XTime tick in the host shim, so one tick is 1000 microseconds). */
+static void period_skew(uint32_t skew_ms)
+{
+	bench_clock += 20U - skew_ms;
+	beat();
+	audio_voice_session_poll();
+	bench_clock += skew_ms;
+	dma_tick(1);
+	audio_fabric_isr();
+}
+
+static void scenario_jitter(void)
+{
+	uint32_t i;
+	uint32_t before;
+
+	fresh();
+	check(open_session(7680U, 4U) == SDK_STATUS_OK, "jitter: open", "");
+	check(st_margin() == AUDIO_VOICE_STATUS_MARGIN_NONE && st_gap() == 0U,
+	      "jitter: margin reads none and the gap zero before any period",
+	      fmt("margin=%x gap=%u", st_margin(), st_gap()));
+	(void)upload_ramp(g_grant.session);
+	rec_start_ramp(960U * 400U, 0U);
+	publish();
+	for (i = 0U; i < 40U; i++)
+		period_skew(3U);
+	/* Lead 8 against fill-ahead 6: the period an ISR takes was rendered
+	 * one poll earlier, so it waited one period plus the skew. */
+	check(st_margin() == 23000U,
+	      "jitter: margin is the age of the period when the ISR takes it",
+	      fmt("margin=%u", st_margin()));
+	check(st_gap() == 20000U,
+	      "jitter: a poll in every period reports a gap of one period",
+	      fmt("gap=%u", st_gap()));
+	check(st_underruns() == 0U && st_state() == AUDIO_VOICE_STATE_LIVE,
+	      "jitter: telemetry leaves the counters alone",
+	      fmt("underruns=%u state=%u", st_underruns(), st_state()));
+	{
+		uint32_t w;
+		int clear = 1;
+
+		for (w = 40U; w < AUDIO_VOICE_STATUS_BYTES; w++)
+			if (g_status[w] != 0U)
+				clear = 0;
+		check(clear, "jitter: the bytes after the two words stay zero",
+		      "");
+	}
+
+	/* The poll stops for 3 periods: the gap shows it, the period the
+	 * stall made late is taken right after the poll that rendered it
+	 * (margin 0 with no skew), and the underruns are counted. */
+	before = st_underruns();
+	for (i = 0U; i < 3U; i++) {
+		bench_clock += 20U;
+		dma_tick(1);
+		audio_fabric_isr();
+	}
+	period(1);
+	/* The status is written by the poll, so the margin the ISR just
+	 * recorded shows one poll later. */
+	period(1);
+	check(st_gap() >= 60000U,
+	      "jitter: a stalled poll shows in the gap",
+	      fmt("gap=%u", st_gap()));
+	check(st_margin() == 0U,
+	      "jitter: the late period waited no time for the ISR",
+	      fmt("margin=%u", st_margin()));
+	check(st_underruns() > before,
+	      "jitter: the stall is counted as an underrun as before",
+	      fmt("underruns %u -> %u", before, st_underruns()));
+
+	/* A new session starts the telemetry again. */
+	check(audio_voice_session_close(g_grant.session) == SDK_STATUS_OK,
+	      "jitter: close", "");
+	fresh();
+	check(open_session(7680U, 4U) == SDK_STATUS_OK, "jitter: reopen", "");
+	check(st_margin() == AUDIO_VOICE_STATUS_MARGIN_NONE && st_gap() == 0U,
+	      "jitter: a new session starts from none and zero",
+	      fmt("margin=%x gap=%u", st_margin(), st_gap()));
+}
+
 /* ---- C. status counters ---- */
 
 static void scenario_status(void)
@@ -934,6 +1038,301 @@ static uint32_t voice_periods_ahead(void)
 			count++;
 	}
 	return count;
+}
+
+/* ---- D2. low-latency session ---- */
+
+static uint16_t open_ll(uint32_t lead, uint32_t voices)
+{
+	struct audio_voice_session_open o = open_params(lead, voices,
+		AUDIO_VOICE_OPEN_LOW_LATENCY);
+
+	return audio_voice_session_open(&o, &g_grant);
+}
+
+/* Periods the compositor is ahead of the DMA, in frames. */
+static uint32_t fabric_lead_frames(void)
+{
+	uint64_t lead = 0U;
+
+	audio_fabric_output_clock(NULL, &lead, NULL);
+	return (uint32_t)lead;
+}
+
+static void scenario_ll_open(void)
+{
+	fresh();
+	check(open_ll(0U, 4U) == SDK_STATUS_OK, "low latency: open", "");
+	check(g_grant.lead_frames == 2880U && g_grant.lead_floor_frames == 2880U,
+	      "low latency: lead 0 grants the short floor and reports it",
+	      fmt("lead=%u floor=%u", g_grant.lead_frames,
+	      g_grant.lead_floor_frames));
+	check(audio_fabric_fill_ahead_get() == AUDIO_VOICE_LL_FILL_AHEAD_PERIODS,
+	      "low latency: the open lowers the fabric fill-ahead",
+	      fmt("fill-ahead=%u", audio_fabric_fill_ahead_get()));
+
+	fresh();
+	check(open_ll(1000U, 4U) == SDK_STATUS_OK &&
+	      g_grant.lead_frames == 2880U && g_grant.lead_floor_frames == 2880U,
+	      "low latency: a request below the floor is raised to it",
+	      fmt("lead=%u", g_grant.lead_frames));
+	fresh();
+	check(open_ll(5000U, 4U) == SDK_STATUS_OK &&
+	      g_grant.lead_frames == 5760U && g_grant.lead_floor_frames == 2880U,
+	      "low latency: a larger lead rounds up to whole periods",
+	      fmt("lead=%u", g_grant.lead_frames));
+	fresh();
+	check(open_ll(24000U, 4U) == SDK_STATUS_OK &&
+	      g_grant.lead_frames == 24000U,
+	      "low latency: the maximum lead still applies",
+	      fmt("lead=%u", g_grant.lead_frames));
+
+	fresh();
+	check(open_session(1000U, 4U) == SDK_STATUS_OK &&
+	      g_grant.lead_frames == 7680U && g_grant.lead_floor_frames == 7680U,
+	      "low latency: a session without the flag keeps the 7680 floor",
+	      fmt("lead=%u floor=%u", g_grant.lead_frames,
+	      g_grant.lead_floor_frames));
+	check(audio_fabric_fill_ahead_get() ==
+	      AUDIO_FABRIC_FILL_AHEAD_DEFAULT_PERIODS,
+	      "low latency: and leaves the fill-ahead at the default",
+	      fmt("fill-ahead=%u", audio_fabric_fill_ahead_get()));
+}
+
+/* A record written at the earliest rendered frame (plus 100 frames, so the
+ * ramp starts after silence in its period) is counted from the write until
+ * the DMA enters the TX period that holds it. */
+static uint32_t ll_write_to_dma(int low_latency, uint32_t *copy_ahead)
+{
+	uint32_t stamp;
+	uint32_t ticks;
+
+	fresh();
+	check((low_latency ? open_ll(0U, 4U) : open_session(0U, 4U)) ==
+	      SDK_STATUS_OK, "low latency: latency open", "");
+	(void)upload_ramp(g_grant.session);
+	rec(0U, 0U, AUDIO_VOICE_OP_MASTER, 0U, 256U, 0U);
+	publish();
+	run(40U);
+	stamp = st_horizon() + 100U;
+	rec_start_ramp(stamp, 0U);
+	publish();
+	for (ticks = 1U; ticks <= 20U; ticks++) {
+		int index;
+
+		period(1);
+		index = find_start_period(stamp);
+		if (index >= 0) {
+			*copy_ahead = ((uint32_t)index + AUDIO_NUM_PERIODS -
+				dma_period()) % AUDIO_NUM_PERIODS;
+			return ticks + *copy_ahead;
+		}
+	}
+	return 0xFFFFU;
+}
+
+static void scenario_ll_latency(void)
+{
+	uint32_t copy_ahead = 0U;
+	uint32_t periods;
+
+	periods = ll_write_to_dma(1, &copy_ahead);
+	check(periods <= 3U && copy_ahead <= 2U,
+	      "low latency: the DMA reaches a record within 3 periods of its write",
+	      fmt("periods=%u copied %u ahead", periods, copy_ahead));
+	periods = ll_write_to_dma(0, &copy_ahead);
+	check(periods <= 8U && periods > 3U,
+	      "low latency: a default session takes up to 8 periods",
+	      fmt("periods=%u copied %u ahead", periods, copy_ahead));
+}
+
+/* Steady state at the floor: a poll before every ISR costs nothing. One
+ * skipped poll underruns at the 3-period floor and not at 4 (the poll gap
+ * tolerated is (lead - fill-ahead) periods). */
+static void ll_skipped_poll(uint32_t lead, int expect_underrun)
+{
+	uint32_t before;
+
+	fresh();
+	check(open_ll(lead, 4U) == SDK_STATUS_OK, "low latency: steady open", "");
+	(void)upload_ramp(g_grant.session);
+	rec_start_ramp(960U * 400U, 0U);
+	publish();
+	run(40U);
+	check(st_underruns() == 0U && st32(AUDIO_VOICE_STATUS_OFF_LATE) == 0U,
+	      "low latency: a poll before every ISR counts no underrun and no late",
+	      fmt("lead=%u underruns=%u late=%u", lead, st_underruns(),
+	      st32(AUDIO_VOICE_STATUS_OFF_LATE)));
+	check(st_horizon() - st_playing() == lead,
+	      "low latency: the engine keeps the lead it was granted",
+	      fmt("lead=%u horizon=%u playing=%u", lead, st_horizon(),
+	      st_playing()));
+	before = st_underruns();
+	bench_clock += 20U;
+	dma_tick(1);
+	audio_fabric_isr();
+	run(6U);
+	check(expect_underrun ? st_underruns() > before :
+	      st_underruns() == before,
+	      "low latency: one skipped poll against the lead",
+	      fmt("lead=%u underruns %u -> %u", lead, before, st_underruns()));
+}
+
+static void scenario_ll_steady(void)
+{
+	ll_skipped_poll(2880U, 1);
+	ll_skipped_poll(3840U, 0);
+}
+
+/* Refused opens leave the fabric at the default fill-ahead. */
+static void scenario_ll_refused(void)
+{
+	struct audio_voice_session_open o;
+	struct audio_voice_session_grant second;
+
+	fresh();
+	check(open_session(0U, 4U) == SDK_STATUS_OK, "low latency: first open", "");
+	o = open_params(0U, 4U, AUDIO_VOICE_OPEN_LOW_LATENCY);
+	check(audio_voice_session_open(&o, &second) == SDK_STATUS_BUSY,
+	      "low latency: a second open is busy", "");
+	check(audio_fabric_fill_ahead_get() ==
+	      AUDIO_FABRIC_FILL_AHEAD_DEFAULT_PERIODS,
+	      "low latency: a busy open leaves the fill-ahead alone",
+	      fmt("fill-ahead=%u", audio_fabric_fill_ahead_get()));
+	check(audio_voice_session_close(g_grant.session) == SDK_STATUS_OK,
+	      "low latency: close", "");
+
+	/* A register-driven client owns the output. */
+	fresh();
+	g_legacy_active = 1;
+	check(open_ll(0U, 4U) == SDK_STATUS_BUSY,
+	      "low latency: busy while a register client owns the output", "");
+	check(audio_fabric_fill_ahead_get() ==
+	      AUDIO_FABRIC_FILL_AHEAD_DEFAULT_PERIODS &&
+	      !audio_voice_session_active(),
+	      "low latency: and leaves the fill-ahead alone",
+	      fmt("fill-ahead=%u", audio_fabric_fill_ahead_get()));
+	g_legacy_active = 0;
+}
+
+/*
+ * Every end path restores the default fill-ahead with a peer lease playing:
+ * the lease keeps hearing its constant (no gap, no repeat), only peer audio
+ * is queued once the voice is gone, and the frontier ramps back one period
+ * per tick.
+ */
+enum ll_end { LL_END_CLOSE, LL_END_HEARTBEAT, LL_END_SHUTDOWN, LL_END_RESET };
+
+/* Periods strictly ahead of the DMA position inside the filled frontier
+ * that differ from peer-only (the periods beyond it are not queued). */
+static uint32_t queued_not_peer(void)
+{
+	uint32_t queued = fabric_lead_frames() / AUDIO_VOICE_PERIOD_FRAMES;
+	uint32_t pos = dma_period();
+	uint32_t count = 0U;
+	uint32_t k;
+
+	for (k = 1U; k < queued; k++) {
+		if (!period_all(tx_period(pos + k), PEER_PCM))
+			count++;
+	}
+	return count;
+}
+
+static void ll_end_case(enum ll_end path, const char *name)
+{
+	static const uint32_t ramp_expect[] = { 3U, 4U, 5U, 6U, 6U, 6U };
+	uint32_t skip;
+	uint32_t i;
+	uint32_t lease_before;
+	int steady = 1;
+	int ramp_ok = 1;
+	int peer_only = 1;
+
+	fresh();
+	lease_start();
+	check(open_ll(0U, 4U) == SDK_STATUS_OK,
+	      fmt("low latency end (%s): open", name), "");
+	(void)upload_ramp(g_grant.session);
+	rec_start_ramp(960U * 2U, 0U);
+	publish();
+	peer_run(30U);
+	check(audio_fabric_fill_ahead_get() == AUDIO_VOICE_LL_FILL_AHEAD_PERIODS &&
+	      fabric_lead_frames() == AUDIO_VOICE_LL_FILL_AHEAD_PERIODS * 960U,
+	      fmt("low latency end (%s): the fabric runs the short fill-ahead",
+	      name), fmt("get=%u lead=%u", audio_fabric_fill_ahead_get(),
+	      fabric_lead_frames()));
+	check(voice_periods_ahead() >= 1U,
+	      fmt("low latency end (%s): the voice is in the queued period",
+	      name), "");
+	lease_before = audio_fabric_slot_underruns(AUDIO_FABRIC_SLOT_MAILBOX);
+
+	switch (path) {
+	case LL_END_CLOSE:
+		check(audio_voice_session_close(g_grant.session) == SDK_STATUS_OK,
+		      fmt("low latency end (%s): close", name), "");
+		break;
+	case LL_END_HEARTBEAT:
+		/* The client stops beating; the card ends the session. */
+		for (i = 0U; i < 110U && audio_voice_session_active(); i++)
+			peer_period(0);
+		break;
+	case LL_END_SHUTDOWN:
+		audio_voice_session_shutdown();
+		break;
+	case LL_END_RESET:
+		audio_voice_session_shutdown();
+		fabric_reset_state();
+		break;
+	}
+	check(!audio_voice_session_active(),
+	      fmt("low latency end (%s): the session is gone", name), "");
+	check(audio_fabric_fill_ahead_get() ==
+	      AUDIO_FABRIC_FILL_AHEAD_DEFAULT_PERIODS,
+	      fmt("low latency end (%s): the request is the default again",
+	      name), fmt("get=%u", audio_fabric_fill_ahead_get()));
+	if (path == LL_END_RESET)
+		return;
+
+	/* The tick after the end rebuilds the queue; then only peer audio is
+	 * played, and the frontier grows one period per tick. The heartbeat
+	 * path ends inside the poll of its last loop pass, which already ran
+	 * that first tick. */
+	skip = path == LL_END_HEARTBEAT ? 1U : 0U;
+	for (i = 0U; i < 5U; i++) {
+		peer_period(1);
+		if (fabric_lead_frames() != ramp_expect[i + skip] * 960U)
+			ramp_ok = 0;
+		if (i + skip >= 1U &&
+		    !period_all(tx_period(dma_period()), PEER_PCM))
+			steady = 0;
+		if (i + skip >= 1U && queued_not_peer() != 0U)
+			peer_only = 0;
+	}
+	peer_run(20U);
+	if (!period_all(tx_period(dma_period()), PEER_PCM))
+		steady = 0;
+	check(ramp_ok,
+	      fmt("low latency end (%s): the frontier ramps one period per tick",
+	      name), fmt("lead=%u", fabric_lead_frames()));
+	check(steady,
+	      fmt("low latency end (%s): the lease hears its constant, no gap",
+	      name), "");
+	check(peer_only,
+	      fmt("low latency end (%s): only peer audio is queued", name), "");
+	check(audio_fabric_slot_underruns(AUDIO_FABRIC_SLOT_MAILBOX) ==
+	      lease_before,
+	      fmt("low latency end (%s): the lease counts no underrun", name),
+	      fmt("%u -> %u", lease_before,
+	      audio_fabric_slot_underruns(AUDIO_FABRIC_SLOT_MAILBOX)));
+}
+
+static void scenario_ll_end(void)
+{
+	ll_end_case(LL_END_CLOSE, "close");
+	ll_end_case(LL_END_HEARTBEAT, "heartbeat");
+	ll_end_case(LL_END_SHUTDOWN, "shutdown");
+	ll_end_case(LL_END_RESET, "warm reset");
 }
 
 static void scenario_reset(void)
@@ -1446,6 +1845,12 @@ int main(void)
 	scenario_lead(7680U);
 	scenario_lead(24000U);
 	scenario_stall();
+	scenario_jitter();
+	scenario_ll_open();
+	scenario_ll_latency();
+	scenario_ll_steady();
+	scenario_ll_refused();
+	scenario_ll_end();
 	scenario_status();
 	scenario_reset();
 	scenario_peer_detach(7680U);

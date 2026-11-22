@@ -39,6 +39,32 @@ static inline int audio_playback_frontier_needs_rebase(
 	return ahead == 0U || ahead > target_ahead;
 }
 
+/*
+ * Instrument builds: how far into its period the DMA already was when the
+ * compositor ISR ran. A period is 20 ms, so period_bytes / 20 is one
+ * millisecond of bytes. Buckets: under 0.5 ms, 1, 2.5, 5, 10 ms, and over.
+ */
+#define AUDIO_PLAYBACK_PHASE_BUCKETS 6U
+
+static inline uint32_t audio_playback_phase_bucket(
+	uint32_t dma_bytes, uint32_t period_bytes)
+{
+	uint32_t phase = dma_bytes % period_bytes;
+	uint32_t ms = period_bytes / 20U;
+
+	if (phase * 2U < ms)
+		return 0U;
+	if (phase < ms)
+		return 1U;
+	if (phase * 2U < ms * 5U)
+		return 2U;
+	if (phase < ms * 5U)
+		return 3U;
+	if (phase < ms * 10U)
+		return 4U;
+	return 5U;
+}
+
 static inline uint32_t audio_playback_source_offset(
 	uint64_t staged_bytes, uint32_t capacity)
 {
