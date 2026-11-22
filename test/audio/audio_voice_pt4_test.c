@@ -263,6 +263,33 @@ out:
 	free(data);
 }
 
+/* EFx (funk repeat) rewrites sample bytes during play, so a module using it
+ * must be refused on any channel, including the wide channels libpt4's own
+ * load-time scan does not look at. */
+static void funk_module_refused(int channel)
+{
+	uint8_t *data;
+	size_t len = 0, cell;
+	pt4_song *s;
+	ZZ9KPt4Events ev;
+
+	data = load_file("fixtures/pt4/32ch.mod", &len);
+	CHECK(data != NULL, "cannot read 32ch.mod");
+	if (data == NULL)
+		return;
+	/* Pattern 0, row 1: 1084-byte header, 32 cells of 4 bytes per row. */
+	cell = 1084U + (1U * 32U + (size_t)channel) * 4U;
+	data[cell + 2] = (uint8_t)((data[cell + 2] & 0xf0) | 0x0e);
+	data[cell + 3] = 0xf1;
+	s = open_song(data, len);
+	if (s != NULL) {
+		CHECK(zz9k_pt4_events_init(&ev, s, 0) == PT4_ERR_FORMAT,
+		      "EF1 on channel %d must be refused", channel + 1);
+		pt4_close(s);
+	}
+	free(data);
+}
+
 static void dyn_module_refused(void)
 {
 	uint8_t *data;
@@ -298,6 +325,10 @@ int main(void)
 	compare_module("mkk_70pat");
 	/* DYN envelopes play chunk lists, which voice events cannot carry. */
 	dyn_module_refused();
+	/* Funk repeat cannot be followed by an uploaded bank, on any channel. */
+	funk_module_refused(0);
+	funk_module_refused(4);
+	funk_module_refused(31);
 
 	if (failures) {
 		printf("audio_voice_pt4_test: %d failure(s)\n", failures);
