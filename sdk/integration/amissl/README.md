@@ -64,6 +64,16 @@ repository to the container filesystem, and runs `build.sh` with
 compiler and utilities used by the build. Workflow artifacts place the
 libraries under `68020-40/` and `68060/`.
 
+The provider, `host/src/zz9k_host.c`, and every SDK header they include are
+compiled by the adtools GCC 2.95.3, not by the GCC 16 the rest of the SDK
+uses. Code there must stay valid for 2.95.3: no named asm operands
+(`%[name]`, GCC 3.1), no GCC 3+ extensions. The full build above runs only on
+pushes to `master` and takes about 15 minutes per target, so the pull-request
+job `sdk-amissl-sources` (`sdk/scripts/check-amissl-sources.sh`) compiles
+`zz9k_host.c` and `zz9k-crypto-soft.c` with the same compiler and flags.
+The provider sources need OpenSSL headers from an AmiSSL checkout and are
+covered only by the full build.
+
 ### Local build
 
 Run the script from this directory with the adtools tools on `PATH`:

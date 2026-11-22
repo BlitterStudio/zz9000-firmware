@@ -106,6 +106,21 @@ jobs:
           path: sdk/build/package/amigaos3/
           if-no-files-found: error
 
+  # The AmiSSL provider build (build-amissl-provider.yml) compiles SDK headers
+  # with the adtools GCC 2.95.3, which rejects what GCC 16 and the host
+  # compilers accept (named asm operands, GCC 3+ extensions). That workflow
+  # runs 15+ minutes per target and only on master pushes, so a header it
+  # rejects used to surface after the merge. This compiles just the SDK
+  # sources it links, with the same compiler and flags, on every pull request.
+  sdk-amissl-sources:
+    name: SDK sources with the AmiSSL compiler (GCC 2.95.3)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+      - name: Compile host + crypto-soft sources (Docker)
+        run: sh sdk/scripts/check-amissl-sources.sh
+
   host-tests:
     name: Host regression tests
     runs-on: ubuntu-latest
@@ -477,7 +492,7 @@ jobs:
 
   release:
     name: Publish release
-    needs: [build, host-tests, abi-mirror, sdk-host-tests, sdk-m68k-build, image-webp-host-tests]
+    needs: [build, host-tests, abi-mirror, sdk-host-tests, sdk-m68k-build, sdk-amissl-sources, image-webp-host-tests]
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     permissions:
