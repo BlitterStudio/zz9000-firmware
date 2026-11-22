@@ -1074,6 +1074,64 @@ int ZZ9KAudioStreamBeginEx(ZZ9KLibrary *library,
   return zz9k_audio_stream_begin_ex(library->ctx, desc, result);
 }
 
+int ZZ9KVoiceOpen(ZZ9KLibrary *library, const ZZ9KVoiceOpenDesc *desc,
+                  ZZ9KVoiceSession *session)
+{
+  if (!zz9k_library_has_context(library)) {
+    return ZZ9K_STATUS_BAD_REQUEST;
+  }
+
+  return zz9k_voice_open(library->ctx, desc, session);
+}
+
+int ZZ9KVoiceClose(ZZ9KLibrary *library, ZZ9KVoiceSession *session)
+{
+  if (!zz9k_library_has_context(library)) {
+    return ZZ9K_STATUS_BAD_REQUEST;
+  }
+
+  return zz9k_voice_close(library->ctx, session);
+}
+
+int ZZ9KVoiceReset(ZZ9KLibrary *library, ZZ9KVoiceSession *session)
+{
+  if (!zz9k_library_has_context(library)) {
+    return ZZ9K_STATUS_BAD_REQUEST;
+  }
+
+  return zz9k_voice_reset(library->ctx, session);
+}
+
+int ZZ9KVoiceUpload(ZZ9KLibrary *library, ZZ9KVoiceSession *session,
+                    const ZZ9KVoiceUploadDesc *desc)
+{
+  if (!zz9k_library_has_context(library)) {
+    return ZZ9K_STATUS_BAD_REQUEST;
+  }
+
+  return zz9k_voice_upload(library->ctx, session, desc);
+}
+
+uint32_t ZZ9KVoiceWrite(ZZ9KLibrary *library, ZZ9KVoiceSession *session,
+                        const ZZ9KVoiceRecord *records, uint32_t count)
+{
+  if (!zz9k_library_has_context(library)) {
+    return 0U;
+  }
+
+  return zz9k_voice_write(session, records, count);
+}
+
+int ZZ9KVoiceGetStatus(ZZ9KLibrary *library, ZZ9KVoiceSession *session,
+                       ZZ9KVoiceStatus *status)
+{
+  if (!zz9k_library_has_context(library)) {
+    return ZZ9K_STATUS_BAD_REQUEST;
+  }
+
+  return zz9k_voice_status(session, status);
+}
+
 int ZZ9KAudioStreamFeed(ZZ9KLibrary *library,
                         const ZZ9KAudioStreamFeedDesc *desc,
                         ZZ9KAudioStreamResult *result)

@@ -9,6 +9,7 @@
 #define ZZ9K_REPLY_H
 
 #include "zz9k/audio.h"
+#include "zz9k/voice.h"
 #include "zz9k/host.h"
 #include "zz9k/compression.h"
 #include <string.h>
@@ -1138,6 +1139,56 @@ static inline int zz9k_reply_app_query(const ZZ9KMailboxEntry *reply,
   *abi_minor = zz9k_get_be32(&reply->payload.inline_data[4]);
   *state = zz9k_get_be32(&reply->payload.inline_data[8]);
   *caps = zz9k_get_be32(&reply->payload.inline_data[12]);
+  return ZZ9K_STATUS_OK;
+}
+
+/* Voice engine OPEN result. A grant that breaks the contract (no session,
+ * voices or samples out of range, a ring capacity that is not a power of two
+ * in 16..4096, a lead outside the floor and maximum it reports) is a
+ * firmware fault: the result is zeroed and INTERNAL_ERROR returned, and the
+ * caller must still close the session its raw reply named. */
+static inline int zz9k_reply_audio_voice_open_result(
+    const ZZ9KMailboxEntry *reply,
+    ZZ9KVoiceGrant *grant)
+{
+  const uint8_t *payload;
+  int status;
+
+  if (!grant) {
+    return ZZ9K_STATUS_BAD_REQUEST;
+  }
+  memset(grant, 0, sizeof(*grant));
+  status = zz9k_reply_require(reply, ZZ9K_OP_AUDIO_VOICE_OPEN,
+                              sizeof(ZZ9KAudioVoiceOpenResultPayload));
+  if (status != ZZ9K_STATUS_OK) {
+    return status;
+  }
+  payload = reply->payload.inline_data;
+  grant->session = zz9k_get_be32(&payload[0]);
+  grant->voices = zz9k_get_be32(&payload[4]);
+  grant->bank_bytes = zz9k_get_be32(&payload[8]);
+  grant->lead_frames = zz9k_get_be32(&payload[12]);
+  grant->lead_floor_frames = zz9k_get_be32(&payload[16]);
+  grant->lead_max_frames = zz9k_get_be32(&payload[20]);
+  grant->ring_records = zz9k_get_be32(&payload[24]);
+  grant->output_rate = zz9k_get_be32(&payload[28]);
+  grant->max_samples = zz9k_get_be32(&payload[32]);
+
+  if (grant->session == 0U ||
+      grant->voices == 0U || grant->voices > ZZ9K_VOICE_MAX_VOICES ||
+      grant->bank_bytes < ZZ9K_VOICE_BANK_MIN_BYTES ||
+      grant->bank_bytes > ZZ9K_VOICE_BANK_MAX_BYTES ||
+      grant->lead_frames < grant->lead_floor_frames ||
+      grant->lead_frames > grant->lead_max_frames ||
+      grant->ring_records < ZZ9K_VOICE_RING_MIN_RECORDS ||
+      grant->ring_records > ZZ9K_VOICE_RING_MAX_RECORDS ||
+      (grant->ring_records & (grant->ring_records - 1U)) != 0U ||
+      grant->output_rate == 0U ||
+      grant->max_samples == 0U ||
+      grant->max_samples > ZZ9K_VOICE_MAX_SAMPLES) {
+    memset(grant, 0, sizeof(*grant));
+    return ZZ9K_STATUS_INTERNAL_ERROR;
+  }
   return ZZ9K_STATUS_OK;
 }
 

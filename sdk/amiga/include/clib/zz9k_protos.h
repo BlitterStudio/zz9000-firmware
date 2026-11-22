@@ -62,6 +62,12 @@ int ZZ9KImageAnimationFramePresent(uint32_t session, uint32_t frame_token, uint3
 int ZZ9KImageAnimationFrameRetire(uint32_t session, uint32_t frame_token, uint32_t flags, ZZ9KImageAnimationFrameResult *result);
 int ZZ9KImageAnimationRestart(uint32_t session, uint32_t flags, ZZ9KImageAnimationFrameResult *result);
 int ZZ9KAudioStreamBeginEx(const ZZ9KAudioStreamBeginExDesc *desc, ZZ9KAudioStreamResult *result);
+int ZZ9KVoiceOpen(const ZZ9KVoiceOpenDesc *desc, ZZ9KVoiceSession *session);
+int ZZ9KVoiceClose(ZZ9KVoiceSession *session);
+int ZZ9KVoiceReset(ZZ9KVoiceSession *session);
+int ZZ9KVoiceUpload(ZZ9KVoiceSession *session, const ZZ9KVoiceUploadDesc *desc);
+uint32_t ZZ9KVoiceWrite(ZZ9KVoiceSession *session, const ZZ9KVoiceRecord *records, uint32_t count);
+int ZZ9KVoiceGetStatus(ZZ9KVoiceSession *session, ZZ9KVoiceStatus *status);
 int ZZ9KCryptoHash(const ZZ9KCryptoHashDesc *desc, ZZ9KCryptoResult *result);
 int ZZ9KCryptoHashBatch(const ZZ9KCryptoHashDesc *descs, ZZ9KCryptoResult *results, uint32_t count, uint32_t max_in_flight, uint32_t timeout_ticks);
 int ZZ9KCryptoStream(const ZZ9KCryptoStreamDesc *desc, ZZ9KCryptoResult *result);

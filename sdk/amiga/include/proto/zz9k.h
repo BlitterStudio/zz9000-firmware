@@ -1049,6 +1049,101 @@ static __inline int __ZZ9KAudioStreamBeginExInline(
 #define ZZ9KAudioStreamBeginEx(desc, result) \
   __ZZ9KAudioStreamBeginExInline((desc), (result))
 
+static __inline int __ZZ9KVoiceOpenInline(
+    const ZZ9KVoiceOpenDesc *desc,
+    ZZ9KVoiceSession *session)
+{
+  register int zz9k_d0 __asm("d0");
+  register struct Library *zz9k_a6 __asm("a6") = ZZ9KBase;
+  register const ZZ9KVoiceOpenDesc *zz9k_a0 __asm("a0") = desc;
+  register ZZ9KVoiceSession *zz9k_a1 __asm("a1") = session;
+  __asm volatile("jsr -354(a6)"
+                 : "=r"(zz9k_d0), "+r"(zz9k_a0), "+r"(zz9k_a1)
+                 : "r"(zz9k_a6)
+                 : ZZ9K_INLINE_CLOBBERS_A0_A1);
+  return zz9k_d0;
+}
+#define ZZ9KVoiceOpen(desc, session) \
+  __ZZ9KVoiceOpenInline((desc), (session))
+
+static __inline int __ZZ9KVoiceCloseInline(ZZ9KVoiceSession *session)
+{
+  register int zz9k_d0 __asm("d0");
+  register struct Library *zz9k_a6 __asm("a6") = ZZ9KBase;
+  register ZZ9KVoiceSession *zz9k_a0 __asm("a0") = session;
+  __asm volatile("jsr -360(a6)"
+                 : "=r"(zz9k_d0), "+r"(zz9k_a0)
+                 : "r"(zz9k_a6)
+                 : ZZ9K_INLINE_CLOBBERS_A0);
+  return zz9k_d0;
+}
+#define ZZ9KVoiceClose(session) __ZZ9KVoiceCloseInline((session))
+
+static __inline int __ZZ9KVoiceResetInline(ZZ9KVoiceSession *session)
+{
+  register int zz9k_d0 __asm("d0");
+  register struct Library *zz9k_a6 __asm("a6") = ZZ9KBase;
+  register ZZ9KVoiceSession *zz9k_a0 __asm("a0") = session;
+  __asm volatile("jsr -366(a6)"
+                 : "=r"(zz9k_d0), "+r"(zz9k_a0)
+                 : "r"(zz9k_a6)
+                 : ZZ9K_INLINE_CLOBBERS_A0);
+  return zz9k_d0;
+}
+#define ZZ9KVoiceReset(session) __ZZ9KVoiceResetInline((session))
+
+static __inline int __ZZ9KVoiceUploadInline(
+    ZZ9KVoiceSession *session,
+    const ZZ9KVoiceUploadDesc *desc)
+{
+  register int zz9k_d0 __asm("d0");
+  register struct Library *zz9k_a6 __asm("a6") = ZZ9KBase;
+  register ZZ9KVoiceSession *zz9k_a0 __asm("a0") = session;
+  register const ZZ9KVoiceUploadDesc *zz9k_a1 __asm("a1") = desc;
+  __asm volatile("jsr -372(a6)"
+                 : "=r"(zz9k_d0), "+r"(zz9k_a0), "+r"(zz9k_a1)
+                 : "r"(zz9k_a6)
+                 : ZZ9K_INLINE_CLOBBERS_A0_A1);
+  return zz9k_d0;
+}
+#define ZZ9KVoiceUpload(session, desc) \
+  __ZZ9KVoiceUploadInline((session), (desc))
+
+static __inline uint32_t __ZZ9KVoiceWriteInline(
+    ZZ9KVoiceSession *session,
+    const ZZ9KVoiceRecord *records,
+    uint32_t count)
+{
+  register uint32_t zz9k_d0 __asm("d0") = count;
+  register struct Library *zz9k_a6 __asm("a6") = ZZ9KBase;
+  register ZZ9KVoiceSession *zz9k_a0 __asm("a0") = session;
+  register const ZZ9KVoiceRecord *zz9k_a1 __asm("a1") = records;
+  __asm volatile("jsr -378(a6)"
+                 : "+r"(zz9k_d0), "+r"(zz9k_a0), "+r"(zz9k_a1)
+                 : "r"(zz9k_a6)
+                 : ZZ9K_INLINE_CLOBBERS_A0_A1);
+  return zz9k_d0;
+}
+#define ZZ9KVoiceWrite(session, records, count) \
+  __ZZ9KVoiceWriteInline((session), (records), (count))
+
+static __inline int __ZZ9KVoiceGetStatusInline(
+    ZZ9KVoiceSession *session,
+    ZZ9KVoiceStatus *status)
+{
+  register int zz9k_d0 __asm("d0");
+  register struct Library *zz9k_a6 __asm("a6") = ZZ9KBase;
+  register ZZ9KVoiceSession *zz9k_a0 __asm("a0") = session;
+  register ZZ9KVoiceStatus *zz9k_a1 __asm("a1") = status;
+  __asm volatile("jsr -384(a6)"
+                 : "=r"(zz9k_d0), "+r"(zz9k_a0), "+r"(zz9k_a1)
+                 : "r"(zz9k_a6)
+                 : ZZ9K_INLINE_CLOBBERS_A0_A1);
+  return zz9k_d0;
+}
+#define ZZ9KVoiceGetStatus(session, status) \
+  __ZZ9KVoiceGetStatusInline((session), (status))
+
 
 
 #endif

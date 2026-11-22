@@ -496,6 +496,23 @@ static int zz9k_lib_audio_stream_set_gain(
     REG(a0, ZZ9KAudioStreamResult *result));
 static int zz9k_lib_query_palette(REG(a6, struct ZZ9KBase *base),
                                   REG(a0, const ZZ9KPaletteQueryDesc *desc));
+static int zz9k_lib_voice_open(REG(a6, struct ZZ9KBase *base),
+                               REG(a0, const ZZ9KVoiceOpenDesc *desc),
+                               REG(a1, ZZ9KVoiceSession *session));
+static int zz9k_lib_voice_close(REG(a6, struct ZZ9KBase *base),
+                                REG(a0, ZZ9KVoiceSession *session));
+static int zz9k_lib_voice_reset(REG(a6, struct ZZ9KBase *base),
+                                REG(a0, ZZ9KVoiceSession *session));
+static int zz9k_lib_voice_upload(REG(a6, struct ZZ9KBase *base),
+                                 REG(a0, ZZ9KVoiceSession *session),
+                                 REG(a1, const ZZ9KVoiceUploadDesc *desc));
+static uint32_t zz9k_lib_voice_write(REG(a6, struct ZZ9KBase *base),
+                                     REG(a0, ZZ9KVoiceSession *session),
+                                     REG(a1, const ZZ9KVoiceRecord *records),
+                                     REG(d0, uint32_t count));
+static int zz9k_lib_voice_get_status(REG(a6, struct ZZ9KBase *base),
+                                     REG(a0, ZZ9KVoiceSession *session),
+                                     REG(a1, ZZ9KVoiceStatus *status));
 
 static const APTR zz9k_lib_vectors[] = {
   (APTR)zz9k_lib_open,
@@ -556,6 +573,12 @@ static const APTR zz9k_lib_vectors[] = {
   (APTR)zz9k_lib_image_animation_frame_retire,
   (APTR)zz9k_lib_image_animation_restart,
   (APTR)zz9k_lib_audio_stream_begin_ex,
+  (APTR)zz9k_lib_voice_open,
+  (APTR)zz9k_lib_voice_close,
+  (APTR)zz9k_lib_voice_reset,
+  (APTR)zz9k_lib_voice_upload,
+  (APTR)zz9k_lib_voice_write,
+  (APTR)zz9k_lib_voice_get_status,
   (APTR)-1
 };
 
@@ -2232,6 +2255,74 @@ static int zz9k_lib_audio_stream_begin_ex(
   status = ZZ9KAudioStreamBeginEx(&base->core, desc, result);
   zz9k_lib_leave(base);
   return status;
+}
+
+static int zz9k_lib_voice_open(REG(a6, struct ZZ9KBase *base),
+                               REG(a0, const ZZ9KVoiceOpenDesc *desc),
+                               REG(a1, ZZ9KVoiceSession *session))
+{
+  int status = zz9k_lib_enter(base);
+  if (status != ZZ9K_STATUS_OK) {
+    return status;
+  }
+  status = ZZ9KVoiceOpen(&base->core, desc, session);
+  zz9k_lib_leave(base);
+  return status;
+}
+
+static int zz9k_lib_voice_close(REG(a6, struct ZZ9KBase *base),
+                                REG(a0, ZZ9KVoiceSession *session))
+{
+  int status = zz9k_lib_enter(base);
+  if (status != ZZ9K_STATUS_OK) {
+    return status;
+  }
+  status = ZZ9KVoiceClose(&base->core, session);
+  zz9k_lib_leave(base);
+  return status;
+}
+
+static int zz9k_lib_voice_reset(REG(a6, struct ZZ9KBase *base),
+                                REG(a0, ZZ9KVoiceSession *session))
+{
+  int status = zz9k_lib_enter(base);
+  if (status != ZZ9K_STATUS_OK) {
+    return status;
+  }
+  status = ZZ9KVoiceReset(&base->core, session);
+  zz9k_lib_leave(base);
+  return status;
+}
+
+static int zz9k_lib_voice_upload(REG(a6, struct ZZ9KBase *base),
+                                 REG(a0, ZZ9KVoiceSession *session),
+                                 REG(a1, const ZZ9KVoiceUploadDesc *desc))
+{
+  int status = zz9k_lib_enter(base);
+  if (status != ZZ9K_STATUS_OK) {
+    return status;
+  }
+  status = ZZ9KVoiceUpload(&base->core, session, desc);
+  zz9k_lib_leave(base);
+  return status;
+}
+
+/* Write and GetStatus touch only the session's shared buffers and never the
+ * mailbox, so they skip the resident transport lock: a task blocked in a
+ * synchronous call must not stall a player that is feeding the ring. */
+static uint32_t zz9k_lib_voice_write(REG(a6, struct ZZ9KBase *base),
+                                     REG(a0, ZZ9KVoiceSession *session),
+                                     REG(a1, const ZZ9KVoiceRecord *records),
+                                     REG(d0, uint32_t count))
+{
+  return ZZ9KVoiceWrite(&base->core, session, records, count);
+}
+
+static int zz9k_lib_voice_get_status(REG(a6, struct ZZ9KBase *base),
+                                     REG(a0, ZZ9KVoiceSession *session),
+                                     REG(a1, ZZ9KVoiceStatus *status))
+{
+  return ZZ9KVoiceGetStatus(&base->core, session, status);
 }
 
 

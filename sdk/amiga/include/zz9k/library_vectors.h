@@ -10,12 +10,12 @@
 
 #define ZZ9K_LIBRARY_NAME "zz9k.library"
 #define ZZ9K_LIBRARY_VERSION 2
-#define ZZ9K_LIBRARY_REVISION 41
-#define ZZ9K_LIBRARY_ID_STRING "zz9k.library 2.41 (18.11.2026)"
+#define ZZ9K_LIBRARY_REVISION 42
+#define ZZ9K_LIBRARY_ID_STRING "zz9k.library 2.42 (22.11.2026)"
 /* Revision 41 removes the ZZ9KApp* calls (LVOs -354 to -414). The ARM app
  * runtime is reached through aar.library instead, which carries its mailbox
- * calls through this library; the vector table ends at ZZ9KAudioStreamBeginEx
- * (-348). */
+ * calls through this library. Revision 42 reuses -354 and up for the voice
+ * engine calls; the vector table ends at ZZ9KVoiceGetStatus (-384). */
 /* Static clients proxy async completions through the resident library.
  * Revision 36 routes a foreign completion seen during a synchronous call
  * into the pending-request registry. Revisions 34 and 35 drop it, so a
@@ -59,6 +59,10 @@
 #define ZZ9K_LIBRARY_MIN_REVISION_AUDIO_STREAM_GAIN 31
 #define ZZ9K_LIBRARY_MIN_REVISION_IMAGE_ANIMATION 32
 #define ZZ9K_LIBRARY_MIN_REVISION_AUDIO_STREAM_EX 33
+/* Revision 42 adds the wavetable voice engine calls ZZ9KVoiceOpen through
+ * ZZ9KVoiceGetStatus. They take the vectors from -354 up that the removed
+ * ZZ9KApp* calls held in revisions 35 to 40. */
+#define ZZ9K_LIBRARY_MIN_REVISION_AUDIO_VOICE 42
 
 #define ZZ9K_LVO_OPEN (-6)
 #define ZZ9K_LVO_CLOSE (-12)
@@ -122,6 +126,12 @@
 #define ZZ9K_LVO_IMAGE_ANIMATION_FRAME_RETIRE (-336)
 #define ZZ9K_LVO_IMAGE_ANIMATION_RESTART (-342)
 #define ZZ9K_LVO_AUDIO_STREAM_BEGIN_EX (-348)
-#define ZZ9K_LVO_FUNCTION_COUNT 54
+#define ZZ9K_LVO_VOICE_OPEN (-354)
+#define ZZ9K_LVO_VOICE_CLOSE (-360)
+#define ZZ9K_LVO_VOICE_RESET (-366)
+#define ZZ9K_LVO_VOICE_UPLOAD (-372)
+#define ZZ9K_LVO_VOICE_WRITE (-378)
+#define ZZ9K_LVO_VOICE_GET_STATUS (-384)
+#define ZZ9K_LVO_FUNCTION_COUNT 60
 
 #endif /* ZZ9K_LIBRARY_VECTORS_H */

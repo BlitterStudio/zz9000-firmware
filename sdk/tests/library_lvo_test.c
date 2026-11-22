@@ -32,9 +32,9 @@ static void test_library_identity(void)
 {
   expect_str("name", ZZ9K_LIBRARY_NAME, "zz9k.library");
   expect_u32("version", ZZ9K_LIBRARY_VERSION, 2);
-  expect_u32("revision", ZZ9K_LIBRARY_REVISION, 41);
+  expect_u32("revision", ZZ9K_LIBRARY_REVISION, 42);
   expect_str("id string", ZZ9K_LIBRARY_ID_STRING,
-             "zz9k.library 2.41 (18.11.2026)");
+             "zz9k.library 2.42 (22.11.2026)");
   expect_u32("client reclaim", ZZ9K_LIBRARY_MIN_REVISION_CLIENT_RECLAIM, 38);
 }
 
@@ -103,11 +103,17 @@ static void test_public_lvos(void)
   expect_u32("image_animation_frame_retire", ZZ9K_LVO_IMAGE_ANIMATION_FRAME_RETIRE, -336);
   expect_u32("image_animation_restart", ZZ9K_LVO_IMAGE_ANIMATION_RESTART, -342);
   expect_u32("audio_stream_begin_ex", ZZ9K_LVO_AUDIO_STREAM_BEGIN_EX, -348);
-  /* The ZZ9KApp* vectors (-354 to -414) are gone: the table ends here, 54
-   * public functions from -30 to -348. */
-  expect_u32("function_count", ZZ9K_LVO_FUNCTION_COUNT, 54);
-  expect_u32("last vector", ZZ9K_LVO_AUDIO_STREAM_BEGIN_EX,
+  expect_u32("voice_open", ZZ9K_LVO_VOICE_OPEN, -354);
+  expect_u32("voice_close", ZZ9K_LVO_VOICE_CLOSE, -360);
+  expect_u32("voice_reset", ZZ9K_LVO_VOICE_RESET, -366);
+  expect_u32("voice_upload", ZZ9K_LVO_VOICE_UPLOAD, -372);
+  expect_u32("voice_write", ZZ9K_LVO_VOICE_WRITE, -378);
+  expect_u32("voice_get_status", ZZ9K_LVO_VOICE_GET_STATUS, -384);
+  /* The table ends here: 60 public functions from -30 to -384. */
+  expect_u32("function_count", ZZ9K_LVO_FUNCTION_COUNT, 60);
+  expect_u32("last vector", ZZ9K_LVO_VOICE_GET_STATUS,
              -(30 + 6 * (ZZ9K_LVO_FUNCTION_COUNT - 1)));
+  expect_u32("voice min revision", ZZ9K_LIBRARY_MIN_REVISION_AUDIO_VOICE, 42);
 }
 
 int main(void)

@@ -11,6 +11,7 @@
 #include "zz9k/host.h"
 #include "zz9k/image.h"
 #include "zz9k/audio.h"
+#include "zz9k/voice.h"
 #include "zz9k/compression.h"
 #include "zz9k/crypto.h"
 #include <string.h>
@@ -925,6 +926,109 @@ static inline int zz9k_request_audio_output_clock(ZZ9KRequest *request)
   request->entry.payload_len = sizeof(ZZ9KAudioOutputClockPayload);
   memset(request->entry.payload.inline_data, 0,
          sizeof(request->entry.payload.inline_data));
+  return ZZ9K_STATUS_OK;
+}
+
+/* Voice engine OPEN. The handles must be live host-window buffers owned by
+ * the caller and distinct from one another; the builder refuses an empty or
+ * repeated handle, voices outside 1..32, a bank outside 1..32 MiB and
+ * unknown flags before anything reaches the card. */
+static inline int zz9k_request_audio_voice_open(
+    ZZ9KRequest *request,
+    uint32_t ring_handle,
+    uint32_t status_handle,
+    uint32_t staging_handle,
+    const ZZ9KVoiceOpenDesc *desc)
+{
+  ZZ9KAudioVoiceOpenPayload *payload;
+
+  if (!request || !desc ||
+      ring_handle == ZZ9K_INVALID_HANDLE ||
+      status_handle == ZZ9K_INVALID_HANDLE ||
+      staging_handle == ZZ9K_INVALID_HANDLE ||
+      ring_handle == status_handle || ring_handle == staging_handle ||
+      status_handle == staging_handle ||
+      desc->voices == 0U || desc->voices > ZZ9K_VOICE_MAX_VOICES ||
+      desc->bank_bytes < ZZ9K_VOICE_BANK_MIN_BYTES ||
+      desc->bank_bytes > ZZ9K_VOICE_BANK_MAX_BYTES ||
+      (desc->flags & ~ZZ9K_VOICE_OPEN_FLAG_KNOWN) != 0U) {
+    return ZZ9K_STATUS_BAD_REQUEST;
+  }
+
+  zz9k_request_init(request, ZZ9K_OP_AUDIO_VOICE_OPEN);
+  request->entry.payload_len = sizeof(ZZ9KAudioVoiceOpenPayload);
+  payload =
+      (ZZ9KAudioVoiceOpenPayload *)request->entry.payload.inline_data;
+  zz9k_put_be32(payload->ring_handle, ring_handle);
+  zz9k_put_be32(payload->status_handle, status_handle);
+  zz9k_put_be32(payload->staging_handle, staging_handle);
+  zz9k_put_be32(payload->bank_bytes, desc->bank_bytes);
+  zz9k_put_be32(payload->lead_frames, desc->lead_frames);
+  zz9k_put_be32(payload->flags, desc->flags);
+  zz9k_put_be32(payload->voices, desc->voices);
+  return ZZ9K_STATUS_OK;
+}
+
+/* Voice engine CLOSE or RESET: opcode is ZZ9K_OP_AUDIO_VOICE_CLOSE or
+ * ZZ9K_OP_AUDIO_VOICE_RESET. */
+static inline int zz9k_request_audio_voice_session(ZZ9KRequest *request,
+                                                   uint16_t opcode,
+                                                   uint32_t session)
+{
+  ZZ9KAudioVoiceSessionPayload *payload;
+
+  if (!request || session == 0U ||
+      (opcode != ZZ9K_OP_AUDIO_VOICE_CLOSE &&
+       opcode != ZZ9K_OP_AUDIO_VOICE_RESET)) {
+    return ZZ9K_STATUS_BAD_REQUEST;
+  }
+
+  zz9k_request_init(request, opcode);
+  request->entry.payload_len = sizeof(ZZ9KAudioVoiceSessionPayload);
+  payload =
+      (ZZ9KAudioVoiceSessionPayload *)request->entry.payload.inline_data;
+  zz9k_put_be32(payload->session, session);
+  return ZZ9K_STATUS_OK;
+}
+
+/* Voice engine UPLOAD. flags selects COPY, DEFINE or both; the fields of the
+ * half not selected are sent as given and ignored by the firmware. */
+static inline int zz9k_request_audio_voice_upload(
+    ZZ9KRequest *request,
+    uint32_t session,
+    uint32_t flags,
+    uint32_t staging_offset,
+    uint32_t bank_offset,
+    uint32_t length,
+    uint32_t sample_id,
+    uint32_t sample_offset,
+    uint32_t sample_length,
+    uint32_t format)
+{
+  ZZ9KAudioVoiceUploadPayload *payload;
+
+  if (!request || session == 0U || flags == 0U ||
+      (flags & ~ZZ9K_VOICE_UPLOAD_FLAG_KNOWN) != 0U ||
+      ((flags & ZZ9K_VOICE_UPLOAD_FLAG_COPY) != 0U && length == 0U) ||
+      ((flags & ZZ9K_VOICE_UPLOAD_FLAG_DEFINE) != 0U &&
+       (sample_id >= ZZ9K_VOICE_MAX_SAMPLES || sample_length == 0U ||
+        format > ZZ9K_VOICE_FORMAT_S16))) {
+    return ZZ9K_STATUS_BAD_REQUEST;
+  }
+
+  zz9k_request_init(request, ZZ9K_OP_AUDIO_VOICE_UPLOAD);
+  request->entry.payload_len = sizeof(ZZ9KAudioVoiceUploadPayload);
+  payload =
+      (ZZ9KAudioVoiceUploadPayload *)request->entry.payload.inline_data;
+  zz9k_put_be32(payload->session, session);
+  zz9k_put_be32(payload->flags, flags);
+  zz9k_put_be32(payload->staging_offset, staging_offset);
+  zz9k_put_be32(payload->bank_offset, bank_offset);
+  zz9k_put_be32(payload->length, length);
+  zz9k_put_be32(payload->sample_id, sample_id);
+  zz9k_put_be32(payload->sample_offset, sample_offset);
+  zz9k_put_be32(payload->sample_length, sample_length);
+  zz9k_put_be32(payload->format, format);
   return ZZ9K_STATUS_OK;
 }
 
