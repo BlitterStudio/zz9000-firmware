@@ -236,15 +236,21 @@ File and directory operations, console read and backpressure, display open and
 flip, non-host audio open and close, `aar_msg_wait`, and sleep park
 the caller at the SVC handoff. `aar_gl_swap` parks through its flip.
 Completion wakes the record READY; file and directory waits wake TIMEOUT after
-30 seconds and return `AAR_E_TIMEDOUT`. Stop wakes a parked waiter (an EVENT
-waiter wakes READY and then sees the stop); waiting service calls return
-`AAR_E_IO`. `aar_sleep_us(us)` lasts at least `us` microseconds of the
-`aar_time_us` clock. The scheduler counts whole milliseconds of that clock,
-so the deadline is the first millisecond boundary at or after the start plus
-`us` (the start's millisecond plus `us` rounded up would end the sleep early
-by the fraction of the millisecond already elapsed); the tick that finds it
-due wakes the sleeper. `aar_event_poll` and `aar_display_vsync` do not park;
-the latter only yields once.
+30 seconds and return `AAR_E_TIMEDOUT`. Stop wakes a parked waiter: the
+core-1 service pass wakes every parked wait but core 0's bounded audio
+handoff on a latched stop (the client's `STOP`, or its stop word), a waiter
+takes a completion that landed with the stop first, and waiting service calls
+return `AAR_E_IO`. A sleeping thread is not a registered wait, so the system
+pass wakes it itself when its record has a stop latched, and a sleep begun
+with a stop already latched returns at once: the app returns from the call,
+reads `aar_should_stop()` true and has the stop grace to finish. A sleep ends
+early only on a stop. `aar_sleep_us(us)` lasts at least `us` microseconds of
+the `aar_time_us` clock. The scheduler counts whole milliseconds of that
+clock, so the deadline is the first millisecond boundary at or after the
+start plus `us` (start's millisecond plus `us` rounded up would end the sleep
+early by the fraction of the millisecond already elapsed); the tick that
+finds it due wakes the sleeper. `aar_event_poll` and `aar_display_vsync` do
+not park; the latter only yields once.
 
 A service the app asks of its client is a request on the SQ. A record has
 four request table entries: a blocking one (file, list, console read,

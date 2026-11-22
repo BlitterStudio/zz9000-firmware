@@ -4218,17 +4218,24 @@ static int service_one_locked(zzapp_rec_t *rec)
 		ready |= state->display_flip_ack == state->wait_value;
 		break;
 	case ZZAPP_WAIT_AUDIO:
+		/* Core 0's bounded handoff, not cancellable: the waiter does
+		 * not look at a stop, so one must not wake it. */
 		ready |= state->audio_request == AUDIO_REQUEST_NONE;
 		break;
 	case ZZAPP_WAIT_EVENT:
-		/* An arrived message or a stop beats the deadline: the waiter
-		 * reports a message that landed while it was timing out. */
-		event_ready = zzapp_xport_msg_pending(rec) != 0U ||
-			      stop_requested_rec(rec);
+		/* An arrived message beats the deadline: the waiter reports a
+		 * message that landed while it was timing out. */
+		event_ready = zzapp_xport_msg_pending(rec) != 0U;
 		break;
 	default:
 		break;
 	}
+	/* A stop ends every parked wait the spec lists as returning on stop
+	 * (files, console, display, audio requests, messages; spec 3.7): the
+	 * waiter looks at the stop after its completion, so a result that
+	 * landed with it is still reported. */
+	if (state->wait_kind != ZZAPP_WAIT_AUDIO && stop_requested_rec(rec))
+		event_ready = 1;
 	if (event_ready)
 		return ZZAPP_WAKE_READY;
 	if (state->wait_deadline != 0U && now_us() >= state->wait_deadline)
