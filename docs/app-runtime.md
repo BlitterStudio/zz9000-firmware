@@ -543,16 +543,17 @@ The firmware implements the AAR 0.5 app table (`aar_api`, `aar/app.h`), the GL
 table (`aar_gl`, `aar/gl.h`) and the ZZ9000 extension table
 (`aar_ext_zz9000`, `aar/ext_zz9000.h`) on the process records and the
 transport described below. Calls are `aar_*`, constants `AAR_*`, status
-codes `AAR_E_*`. The `zz_*`, `ZZ_*` and `zzapp_*` names of the 0.4 header are
-gone with no compatibility layer; `docs/zzapp-to-aar.md` in the aar repository
-maps them. The firmware's hardware names (`ZZ_*` audio, Ethernet, RasterIX and
-MiniGL registers) are unchanged. `QUERY` reports 0.5 in its ABI major and
-minor words (`ZZAPP_ABI_MAJOR`, `ZZAPP_ABI_MINOR`).
+codes `AAR_E_*`. The firmware's hardware names (`ZZ_*` audio, Ethernet,
+RasterIX and MiniGL registers) are unchanged. `QUERY` reports 0.5 in its ABI
+major and minor words (`ZZAPP_ABI_MAJOR`, `ZZAPP_ABI_MINOR`).
 
 **Groups.** `aar_api.groups` and `aar_info.groups` report the same mask:
 `AAR_GROUP_INPUT` and `AAR_GROUP_SERVICES` always, and `AAR_GROUP_DISPLAY`,
 `AAR_GROUP_AUDIO`, `AAR_GROUP_GL` when the client capability word has the
-matching bit. `audio_stats` is `NULL`. On the card route the runtime counts
+matching bit. The mask is authoritative in both directions (spec 3.3 rule 2):
+every slot of a group whose bit is clear is `NULL` in the table the app gets,
+and `zzapp_api_table()` builds that table from the runtime mask. `INPUT` has
+no slots. `audio_stats` is `NULL`. On the card route the runtime counts
 played underruns in the ring header (`AAR_AUDIO_RING_UNDERRUNS`, a
 little-endian word beside `read_frame`), where the app and the client read
 them; on the AHI route the client consumes the ring and the word stays 0.

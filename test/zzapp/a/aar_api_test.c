@@ -8,6 +8,7 @@
  */
 #include <assert.h>
 #include <stdint.h>
+#include <stdio.h>
 #include <string.h>
 
 #include "aar/app.h"
@@ -560,9 +561,85 @@ static void test_ext_table(void)
     assert(api->ext(0u, 0u) == NULL);
 }
 
+/* Counts failures so one run reports how many slots are wrong. */
+static unsigned group_failures;
+#define GCHECK(cond) \
+    do { \
+        if (!(cond)) { \
+            group_failures++; \
+            fprintf(stderr, "slot check failed: %s\n", #cond); \
+        } \
+    } while (0)
+
+/* Spec 3.3 rule 2: `groups` is authoritative in both directions. A call of a
+ * group whose bit is set is present (audio_stats is optional), and every
+ * slot of a group whose bit is clear is NULL. */
+static void expect_group_slots(const aar_api *t, uint32_t groups)
+{
+    int display = (groups & AAR_GROUP_DISPLAY) != 0u;
+    int audio = (groups & AAR_GROUP_AUDIO) != 0u;
+    int gl = (groups & AAR_GROUP_GL) != 0u;
+    int services = (groups & AAR_GROUP_SERVICES) != 0u;
+
+    GCHECK(t->groups == groups);
+    GCHECK((t->display_open != NULL) == display);
+    GCHECK((t->display_flip != NULL) == display);
+    GCHECK((t->display_flip_async != NULL) == display);
+    GCHECK((t->display_flip_idle != NULL) == display);
+    GCHECK((t->display_refresh != NULL) == display);
+    GCHECK((t->display_vsync != NULL) == display);
+    GCHECK((t->display_set_palette != NULL) == display);
+    GCHECK((t->display_close != NULL) == display);
+    GCHECK((t->display_latest_dropped != NULL) == display);
+    GCHECK((t->audio_open != NULL) == audio);
+    GCHECK((t->audio_close != NULL) == audio);
+    GCHECK(t->audio_stats == NULL);
+    GCHECK((t->gl_bind != NULL) == gl);
+    GCHECK((t->gl_swap != NULL) == gl);
+    GCHECK((t->gl_unbind != NULL) == gl);
+    GCHECK((t->sha256 != NULL) == services);
+    GCHECK((t->decompress != NULL) == services);
+    GCHECK((t->image_open != NULL) == services);
+    GCHECK((t->image_decode != NULL) == services);
+    GCHECK((t->image_close != NULL) == services);
+    GCHECK((t->audio_decode_open != NULL) == services);
+    GCHECK((t->audio_decode != NULL) == services);
+    GCHECK((t->audio_decode_close != NULL) == services);
+    /* The core slots never depend on a group. */
+    GCHECK(t->exit && t->yield && t->should_stop && t->time_us &&
+           t->sleep_us && t->info && t->heap_range && t->shared_alloc &&
+           t->log && t->file_open && t->console_write && t->event_poll &&
+           t->msg_send && t->ext && t->map_file && t->unmap_file);
+}
+
+static void test_undeclared_group_slots(void)
+{
+    uint32_t mask;
+
+    reset();
+    for (mask = 0u; mask <= AAR_GROUPS_DEFINED; mask++) {
+        zzapp_test_set_groups(mask, 1);
+        api = zzapp_api_table();
+        expect_group_slots(api, mask);
+    }
+    /* The slots come back when the mask grows again. */
+    zzapp_test_set_groups(AAR_GROUP_SERVICES, 1);
+    api = zzapp_api_table();
+    expect_group_slots(api, AAR_GROUP_SERVICES);
+    zzapp_test_set_groups(AAR_GROUPS_DEFINED, 1);
+    api = zzapp_api_table();
+    expect_group_slots(api, AAR_GROUPS_DEFINED);
+    zzapp_test_set_groups(0u, 0);
+    api = zzapp_api_table();
+    expect_group_slots(api, zzapp_runtime_groups());
+    fprintf(stderr, "undeclared group slots: %u failures\n", group_failures);
+    assert(group_failures == 0u);
+}
+
 int main(void)
 {
     test_header();
+    test_undeclared_group_slots();
     test_info_values();
     test_info_fill_rule();
     test_heap_info();

@@ -69,7 +69,8 @@ void zzapp_api_enter(void) {}
 void zzapp_api_leave(void) {}
 void zzapp_api_touch(void) {}
 uint32_t zzapp_current_generation(void) { return 1U; }
-uint32_t zzapp_runtime_groups(void) { return 0U; }
+/* The test calls the services group: its slots exist only when declared. */
+uint32_t zzapp_runtime_groups(void) { return AAR_GROUP_SERVICES; }
 void zzapp_host_yield(void) {}
 void zzapp_host_yield_wait(void) {}
 void zzapp_host_sleep(uint32_t us) { (void)us; }
