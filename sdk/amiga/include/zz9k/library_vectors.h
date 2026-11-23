@@ -12,10 +12,6 @@
 #define ZZ9K_LIBRARY_VERSION 2
 #define ZZ9K_LIBRARY_REVISION 43
 #define ZZ9K_LIBRARY_ID_STRING "zz9k.library 2.43 (22.11.2026)"
-/* Revision 41 removes the ZZ9KApp* calls (LVOs -354 to -414). The ARM app
- * runtime is reached through aar.library instead, which carries its mailbox
- * calls through this library. Revision 42 reuses -354 and up for the voice
- * engine calls; the vector table ends at ZZ9KVoiceGetStatus (-384). */
 /* Static clients proxy async completions through the resident library.
  * Revision 36 routes a foreign completion seen during a synchronous call
  * into the pending-request registry. Revisions 34 and 35 drop it, so a
@@ -60,8 +56,8 @@
 #define ZZ9K_LIBRARY_MIN_REVISION_IMAGE_ANIMATION 32
 #define ZZ9K_LIBRARY_MIN_REVISION_AUDIO_STREAM_EX 33
 /* Revision 42 adds the wavetable voice engine calls ZZ9KVoiceOpen through
- * ZZ9KVoiceGetStatus. They take the vectors from -354 up that the removed
- * ZZ9KApp* calls held in revisions 35 to 40. */
+ * ZZ9KVoiceGetStatus, at the vectors from -354 up; the table ends at
+ * ZZ9KVoiceGetStatus (-384). */
 #define ZZ9K_LIBRARY_MIN_REVISION_AUDIO_VOICE 42
 /* Revision 43 accepts ZZ9K_VOICE_OPEN_FLAG_LOW_LATENCY in ZZ9KVoiceOpen().
  * It adds no calls. Revision 42 refuses the flag as an unknown bit. */

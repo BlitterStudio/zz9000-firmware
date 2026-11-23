@@ -588,8 +588,7 @@ or `AAR_E_NOGROUP` from a missing call, so the refusal reply carries the code
 too (see `LOAD_END` below). A profile or group refusal prints its reason in
 the `[app] reject op` line. The groups a note names (required and optional)
 set the display, audio and GL bits of `AAR_CB_FLAGS`, which the client reads.
-An image without a v1 note, including one that carries a 0.4 note, does not
-load.
+An image without a v1 note does not load.
 
 **Events.** `aar_event_poll` always delivers `AAR_EV_STOP` and
 `AAR_EV_LOW_MEMORY`, and delivers the client's key, mouse, joystick and

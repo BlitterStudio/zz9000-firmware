@@ -92,16 +92,10 @@ sends `ZZ9K_OP_CLIENT_RELEASE` and resubmits it while the firmware answers
 sessions, streams and buffers still finishing on the ARM side -- before that
 opener's owned resources are reclaimed.
 
-Revision 41 removes the `ZZ9KApp*` calls (LVOs `-354` to `-414`: `ZZ9KAppOpen`,
-`LoadFile`, `LoadMemory`, `Start`, `Stop`, `Status`, `SendMessage`,
-`GetMessage`, `MessageSignal`, `Close` and `SetLimits`) together with the
-VBlank lease they used and the owner check of app handles. The vector table
-ended at `ZZ9KAudioStreamBeginEx` (`-348`), 54 public functions. Revision 42
-reuses `-354` to `-384` for the voice engine calls, 60 public functions.
-Nothing of
-the removed interface was released to users. The owner check of client ids
-stays: the service task still releases the opener record and the client id of
-a task that is gone without `CloseLibrary()`.
+The service task releases the opener record and the client id of a task that
+is gone without `CloseLibrary()`. Revision 42 added the voice engine calls at
+`-354` to `-384`; the vector table ends at `ZZ9KVoiceGetStatus`, 60 public
+functions.
 
 ## ARM app client
 
@@ -2086,13 +2080,10 @@ Use the named minimum-revision constant whenever an application requires an LVO 
 | 31 | `ZZ9K_LIBRARY_MIN_REVISION_AUDIO_STREAM_GAIN` | `ZZ9KAudioStreamSetGain()`; gain 0 is silence, 128 preserves scene level, and flags are zero |
 | 32 | `ZZ9K_LIBRARY_MIN_REVISION_IMAGE_ANIMATION` | `ZZ9KImageAnimationFrameNext()`, Present, Retire, and Restart |
 | 33 | `ZZ9K_LIBRARY_MIN_REVISION_AUDIO_STREAM_EX` | `ZZ9KAudioStreamBeginEx()` at `ZZ9K_LVO_AUDIO_STREAM_BEGIN_EX` (`-348`); older firmware returns `ZZ9K_STATUS_UNSUPPORTED`, with no implicit MP3-only fallback |
-| 35 | `ZZ9K_LIBRARY_MIN_REVISION_APP_CLIENT` | `ZZ9KAppOpen`, load/start/stop/status, 32-byte message rings, VBlank lease, and close (removed in revision 41) |
 | 36 | `ZZ9K_LIBRARY_MIN_REVISION_STATIC_PROXY` | Synchronous completion waits poll for up to 250 microseconds before their existing event or DOS-tick wait. A synchronous call also routes foreign completions to the resident pending-request registry; the static host client requires this revision. |
 | 37 | `ZZ9K_LIBRARY_MIN_REVISION_SYNC_CONCURRENT` | A synchronous caller holds the transport lock only to submit, drain, route, or cancel. Its pending record has an owner signal, so another drainer wakes it after routing its completion. |
 | 38 | `ZZ9K_LIBRARY_MIN_REVISION_CLIENT_RECLAIM` | Per-opener client ids and `ZZ9K_OP_CLIENT_RELEASE`; the final `CloseLibrary()` resubmits the release while the firmware answers `BUSY` and reclaims that opener's owned SDK resources after worker quiescence |
-| 39 | `ZZ9K_LIBRARY_MIN_REVISION_APP_LOAD_LEASE` | ARM-app `LOAD_END` waits used lifecycle progress (removed in revision 41). |
-| 40 | `ZZ9K_LIBRARY_MIN_REVISION_APP_OWNER_REAP`, `ZZ9K_LIBRARY_MIN_REVISION_APP_SET_LIMITS` | The service task released an app handle, its opener record, and its client id when the owner task was gone; since revision 41 only the opener record and the client id (the app calls were removed) |
-| 41 | None | The `ZZ9KApp*` calls (`-354` to `-414`) are removed; the ARM app runtime is reached through `aar.library`, which carries its mailbox calls through `zz9k.library`; the vector table ended at `ZZ9KAudioStreamBeginEx` (`-348`) |
+| 40 | None | The service task releases the opener record and the client id of a task that is gone without `CloseLibrary()` |
 | 42 | `ZZ9K_LIBRARY_MIN_REVISION_AUDIO_VOICE` | The voice engine calls `ZZ9KVoiceOpen()`, `ZZ9KVoiceClose()`, `ZZ9KVoiceReset()`, `ZZ9KVoiceUpload()`, `ZZ9KVoiceWrite()` and `ZZ9KVoiceGetStatus()` at `-354` to `-384`; the vector table ends at `ZZ9KVoiceGetStatus`. See [the voice engine guide](zz9k-voice.md) |
 | 43 | `ZZ9K_LIBRARY_MIN_REVISION_VOICE_LOW_LATENCY` | `ZZ9KVoiceOpen()` accepts `ZZ9K_VOICE_OPEN_FLAG_LOW_LATENCY`; no new calls. See [the voice engine guide](zz9k-voice.md) |
 
