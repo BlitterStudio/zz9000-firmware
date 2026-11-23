@@ -3,18 +3,18 @@ SPDX-FileCopyrightText: 2026 Dimitris Panokostas <midwan@gmail.com>
 SPDX-License-Identifier: GPL-3.0-or-later
 -->
 
-# ZZ9000 MiniGL Transport Specification (Wire Protocol v9 / minigl.library 29.1)
+# ZZ9000 MiniGL transport (wire protocol v9)
 
-## 1. Overview and Architectural Convergence
+## 1. Architecture
 
-### 1.1 Goal
-This specification defines the hardware transport contract connecting the converged AmigaOS 68k `minigl.library` (v29.1, dispatch ABI 5, 205 vectors) to the MNT ZZ9000 graphics and coprocessor card.
+### 1.1 Scope
 
-Under the MiniGL convergence decision:
-1. **One Guest Library**: The Amiga uses a single `minigl.library` binary across both software emulation (Amiberry) and real hardware (ZZ9000). The library speaks wire protocol version 9 (`MW_VERSION = 9`).
-2. **Dual Transport**: At runtime, `minigl.library` selects between the Amiberry hypervisor trap (Trap 120 via `uae.resource`) and the physical ZZ9000 card.
-3. **Independent GPL-3.0-or-later Firmware Implementation**: The ZZ9000 ARM firmware implements a cleanroom wire-v9 front end that dispatches commands to the existing ZZ9000 rendering pipeline (FPGA RasterIX hardware acceleration with software rasterizer fallback). The firmware declares its own structures and constants from this protocol specification; it does not copy or incorporate any PolyForm-Noncommercial source code (including `minigl_wire.h`).
-4. **Clean Cutover**: The legacy private MGL5 ABI (compact tokens, 64-byte vertex records, 124-byte state snapshots) is retired. Standard OpenGL 1.1 tokens and wire-v9 packed draws are used natively.
+The 68k `minigl.library` selects an Amiberry trap transport or the ZZ9000
+transport. The ZZ9000 service speaks wire protocol version 9
+(`MW_VERSION = 9`), using OpenGL tokens and packed draws. Its parser,
+renderers and transport run in `MINIGL.ZZM`; the firmware supplies the
+module host and resource services. See [minigl-module.md](minigl-module.md)
+for module admission, memory ownership and reset.
 
 ### 1.2 System Architecture
 
@@ -25,7 +25,7 @@ Under the MiniGL convergence decision:
                                     |
                                     v
 +-------------------------------------------------------------------------+
-| minigl.library 29.1 (Dispatch ABI 5, Standard GL Tokens)                |
+| minigl.library (Standard GL Tokens)                                   |
 | - Query mirror & state cache                                            |
 | - Packed vertex encoder (MW_DRAW_PACKED: 24-32 bytes/vertex)            |
 | - Transport Abstraction VTable                                          |
@@ -86,30 +86,28 @@ When `minigl.library` initializes (`MGLInit()` or library open), it must determi
 2. **ZZ9000 Physical Hardware Transport**:
    - Only if Trap 120 is absent, unconfigured (`native_code=false`), or returns version 0 / mismatch, the library proceeds to probe for a ZZ9000 card.
 
-### 2.2 ZZ9000 Board Probing
-The library probes for the ZZ9000 using `expansion.library`:
+### 2.2 ZZ9000 board probing
+
+The module transport probes only Zorro III with `expansion.library`:
 
 ```c
-struct ConfigDev *cd = NULL;
-/* Probe Zorro III first (Product 4), then Zorro II (Product 3) */
-cd = FindConfigDev(NULL, 0x6d6e, 4);
-if (!cd) {
-    cd = FindConfigDev(NULL, 0x6d6e, 3);
-}
+struct ConfigDev *cd = FindConfigDev(NULL, 0x6d6e, 4);
 ```
 
-- **Manufacturer ID**: `0x6d6e` (`ZZ9K_MNT_MANUFACTURER`, ASCII `'mn'`).
-- **Product ID**: `4` for Zorro III (`ZZ9K_PRODUCT_Z3`), `3` for Zorro II (`ZZ9K_PRODUCT_Z2`).
-- **Board Base Address**: `cd->cd_BoardAddr`.
-- **Board Size**: `cd->cd_BoardSize` (128 MiB on Z3; 2 MiB, 4 MiB, or 8 MiB on Z2).
+Manufacturer `0x6d6e` and product 4 identify the Z3 ZZ9000.
+`cd->cd_BoardAddr` is the board base and `cd->cd_BoardSize` is its aperture.
+Zorro II is not a fallback for this transport.
 
-### 2.3 Side-Effect-Free Capability & Version Inspection
-To confirm the board runs firmware capable of Wire Protocol v9 without triggering side effects or perturbing other services:
+### 2.3 Discovery sequence
+
+Probe the SDK registers before acquiring the module:
 
 1. **SDK Magic Register Probe**:
    Read 16-bit register at board offset `0x0100` (`ZZ9K_REG_SDK_MAGIC`).
    - Must return `0x5a39` (`ZZ9K_REG_SDK_MAGIC_VALUE`).
 2. **SDK ABI Version Probe**:
+   Read board offset `0x0102` (`ZZ9K_REG_SDK_VERSION`); the major version
+   (high byte) must be at least 2.
 3. **SDK Mailbox Location**:
    Read the 16-bit register pair at board offsets `0x0104`/`0x0106`
    (`REG_ZZ_SDK_MAILBOX_HI/LO`). The combined 32-bit value is the ARM
@@ -117,7 +115,10 @@ To confirm the board runs firmware capable of Wire Protocol v9 without triggerin
    `arm − 0x001F0000`. A zero or out-of-aperture value means the firmware
    has no mailbox (Zorro II, or an unacknowledised generation-2 aperture):
    the MiniGL service is unavailable and the transport fails its probe.
-4. **Transport Allocation Descriptor**:
+4. Send `MINIGL_MODULE_ACQUIRE` through the SDK mailbox and wait for its
+   completion before requiring a MiniGL descriptor. See the
+   [module acquire contract](minigl-module.md#transport-memory).
+5. **Transport Allocation Descriptor**:
    At mailbox board offset + `0x8000` the firmware publishes a versioned
    **big-endian** descriptor (magic `'MGTD'`, `descriptor_version` 1)
    holding the transport window address/size, `address_adjust`, the
@@ -128,7 +129,7 @@ To confirm the board runs firmware capable of Wire Protocol v9 without triggerin
    arithmetic on a fixed base. The live control block may
    narrow the descriptor geometry (a constrained session) but never
    widen it.
-5. **MiniGL Wire-v9 Capability Bits**:
+6. **MiniGL Wire-v9 Capability Bits**:
    Firmware advertises Wire-v9 support and optional transport extensions in
    `ZZ9KMiniGLStatus.capabilities`:
    - `#define ZZ9K_CAP_MINIGL_WIRE_V9 (1U << 18)`
@@ -141,21 +142,22 @@ To confirm the board runs firmware capable of Wire Protocol v9 without triggerin
      An old library ignores the bit and continues using Op 6, while a new
      library paired with old firmware sees no bit and does the same.
      Without bit 19, the library uses the compatible `MW_READ_PIXELS` path.
-6. **Transport Handshake (`BRIDGE_QUERY`)**:
+7. **Transport Handshake (`BRIDGE_QUERY`)**:
    The library inspects the MiniGL Control Block at the descriptor's
    address:
    - `magic` must equal `0x4D474C39UL` (ASCII `'MGL9'`).
    - `wire_version` must equal `9` (`MW_VERSION`).
    - If `wire_version != 9`, initialization aborts with `GL_FALSE`.
 
-### 2.4 Firmware residency (2.9.0)
+### 2.4 Module availability
 
-The wire-v9 service is **resident** firmware (core-1 worker owned), not a
-`ZZ9K/MINIGL.ZZM` module: module runtime v2 has no core-1/jobs execution
-contract (`docs/modules.md` reserves the jobs service), no surface-allocator
-memory class for a host-visible transport window, and no cross-core
-doorbell/unload ordering. The manifest slot stays reserved for a future
-module once those runtime features exist.
+MiniGL loads on demand from `ZZ9K/MINIGL.ZZM`. Installing the file alone does
+not publish a usable transport. A successful acquire loads the module,
+binds its host window and publishes `MGTD`. Missing, incompatible or failed
+modules leave the transport unavailable. The client releases its module
+lease after forgetting the window pointers, not at each context close; see
+[minigl-module.md](minigl-module.md#transport-memory).
+
 ## 3. Shared Memory Architecture (Zorro III and Zorro II)
 
 ### 3.1 Address Mapping
@@ -167,14 +169,13 @@ Card DDR is mapped to the Amiga Zorro bus through an address adjustment:
 - `ARM_Address = Board_Offset + 0x001F0000`
 
 
-### 3.2 Transport Window Layout (2.9.0)
-On Zorro III the transport is one dynamic allocation from the firmware
-host-visible heap (`surface_allocator_alloc_range`, 0x91000 bytes, 4 KiB
-aligned). It is constrained to `0x08110000..0x081C0000`, the free gap between
-the SDK mailbox and direct-ring reservations inside the 1 MiB MMU section
-the mailbox already maps Normal non-cacheable. The window's exact address
-is published in the transport descriptor (§2.3); nothing computes it from
-a fixed base. Offsets inside the window:
+### 3.2 Transport window layout
+
+The module obtains one dynamic, 4 KiB-aligned host-window allocation of
+0x91000 bytes. The [host-window service](minigl-module.md#transport-memory)
+owns its placement and lifetime. The transport descriptor publishes the
+window address; clients use its offsets and capacities rather than a fixed
+base. Offsets inside a full Z3 window:
 
 | Region | Window offset | Size | Ownership | Purpose |
 |---|---|---|---|---|
@@ -184,22 +185,17 @@ a fixed base. Offsets inside the window:
 | **Packet Slot 1** | `0x41000` | 256 KiB | Host producer, FW consumer | Wire-v9 command packet submission buffer 1 |
 | **Reply Buffer** | `0x81000` | 64 KiB | FW producer, Host consumer | Staging buffer for bounded REQUEST / READ_PIXELS |
 
-*Note*: Render targets, depth buffers, texture storage, and draw scratch
-are card-pool allocations (`CARD_POOL_CLASS_MINIGL`, 128 MiB class limit)
-created with the context and released on destroy/fault/reset. Texture tables,
-pixels, indexed data, and mip chains share one 24 MiB context arena, so they
-consume one card-pool allocation record rather than one record per level.
-They consume no host-visible heap at firmware boot.
+Render targets, depth buffers, textures and draw scratch use context-owned
+card-pool allocations, separate from the transport window. CPU texture
+backing starts at 16 MiB when needed, grows in 16 MiB steps and is capped at
+128 MiB. The RasterIX texture pool has the same initial size, growth step
+and maximum (`minigl_pool.h`). Closing a context releases its owned memory;
+failed hardware teardown can quarantine memory until recovery.
+
 ### 3.3 Zorro II: service unavailable
-Zorro II cannot host the transport: the shared host window is 64 KiB total
-(16 KiB for clients on generation-2 bitstreams once the audio direct-ring
-grant takes its 48 KiB), while even a single-slot layout needs 68 KiB
-(control page + 64 KiB slot + 16 KiB reply), and Z2 has no SDK mailbox
-reservation to publish the descriptor through. The firmware therefore
-binds no window, publishes no descriptor, and reports the service
-unavailable; the library's probe fails with
-`ZZ9K_MINIGL_PROBE_MAILBOX_REGISTERS`/`_TRANSPORT_DESCRIPTOR` and the
-backend falls back exactly as on firmware built without the service.
+
+The module host-window service refuses Zorro II. The 68k module transport
+probes Z3 only, so no Z2 window or descriptor is negotiated.
 
 ### 3.4 Ownership Blocks and Alignment
 
@@ -224,8 +220,8 @@ typedef struct ZZ9KMiniGLControlBlock {
     uint16_t wire_version;       /* Wire protocol version (9) */
     uint32_t consumer_seq;       /* Retired packet sequence */
     uint32_t completion_fence;   /* Completed frame/draw fence */
-    uint32_t slot_capacity;      /* Max packet size (256K on Z3, 64K on Z2) */
-    uint32_t slot_count;         /* Number of packet slots (1 or 2) */
+    uint32_t slot_capacity;      /* Maximum packet size from descriptor */
+    uint32_t slot_count;         /* Number of packet slots from descriptor */
     uint32_t firmware_heartbeat; /* Incremented by Core 1 service loop */
     uint32_t op_status;          /* Return status for synchronous ops */
     uint32_t op_reply_bytes;     /* Actual reply bytes written */
@@ -245,13 +241,17 @@ typedef struct ZZ9KMiniGLControlBlock {
     uint32_t op_seq;             /* Sequence counter incremented on each synchronous op */
     uint8_t  host_reserved[28];
 } __attribute__((packed, aligned(64))) ZZ9KMiniGLControlBlock;
+```
 
 #### Synchronous Operation Completion Handshake:
 1. The host sets `op_code`, `op_handle`, `op_arg1..3`, and increments `op_seq` in the Host Block (bytes 64..127).
 2. The host flushes bytes 64..127 (`CacheClearE`) and pulses the doorbell register.
 3. Firmware observes `op_seq != op_done_seq`, executes the requested operation, and publishes completion results (`op_status`, `op_reply_bytes`, `op_reply_handle`, and `op_done_seq = op_seq`) strictly in the Firmware Block (bytes 0..63).
 4. The host polls until `op_done_seq == op_seq`, invalidating ONLY the 64-byte Firmware Block on each retry.
-5. Firmware NEVER stores to bytes 64..127. This eliminates false sharing, dirty cache-line collisions, and race conditions between 68040/060 copyback caches and the ARM Cortex-A9.
+5. During operation, firmware writes only its ownership block. Initial binding
+   zeroes both halves before publishing the window.
+
+```c
 /* Status Block: Exactly 128 bytes, 64-byte ownership partition */
 typedef struct ZZ9KMiniGLStatus {
     /* Bytes 0..63: Firmware Ownership */
@@ -295,18 +295,18 @@ typedef struct ZZ9KMiniGLStatus {
   ```
 - Memory barriers: An explicit compiler barrier (`__asm__ volatile ("" ::: "memory")`) follows all cache sync operations.
 
-#### ARM Cortex-A9 Side:
-- The transport window lives inside the SDK mailbox MMU section, which the firmware maps **Normal Non-Cacheable** (`NORM_NONCACHE`) at mailbox placement time (`Xil_SetTlbAttributes`); the descriptor publishes this in `cache_rules`.
-- Packet slots and reply buffers in DDR are cacheable by ARM for fast command parsing and SIMD operations:
-  - **Before Parsing a Submitted Packet**: Core 1 invalidates the packet range in its data cache so it reads fresh DDR contents written by the 68k over Zorro:
-    ```c
-    Xil_DCacheInvalidateRange((INTPTR)packet_address, packet_bytes);
-    ```
-  - **After Writing In-Place Reply or VRAM Frame**: Core 1 cleans (flushes) dirty lines back to DDR so the 68k or FPGA video scanout observes them:
-    ```c
-    Xil_DCacheFlushRange((INTPTR)target_address, target_bytes);
-    ```
-  - Data memory barriers (`dmb()`, `dsb()`) are executed before updating consumer sequence numbers.
+#### ARM Cortex-A9 side
+
+The full transport window, including control/status, packet slots and reply
+buffer, is Normal non-cacheable. The descriptor reports
+`MW_TRANSPORT_CACHE_ARM_NONCACHEABLE`; the ARM publishes cursor changes with
+memory barriers. The host-window service invalidates old PL310 lines when
+allocating the window.
+
+Render targets and texture/command buffers outside that window can be
+cacheable. Module code requests cache work through `libzzm_rt` and the
+firmware cache service. Present paths clean written VRAM spans before
+publishing completion so video scanout sees them.
 
 ---
 
@@ -320,7 +320,7 @@ Command packets are submitted in the wire-v9 format:
   - `0x08`: Total packet length in bytes (including 16-byte header).
   - `0x0C`: Command count ($1 \le N \le 4096$).
 - **Commands**: Consecutive 8-byte command headers (`uint32_t opcode`, `uint32_t payload_bytes`) followed by 4-byte-aligned payload data.
-- **Maximum Limits**: 256 KiB per packet on Z3 (64 KiB on Z2), 4096 commands per packet, 8192 vertices per draw.
+- **Maximum Limits**: 256 KiB per packet on Z3, 4096 commands per packet, 8192 vertices per draw.
 
 ### 4.2 Packet Slot Ring and Flow Control
 To minimize bus turnaround latency, the transport uses **double-buffered packet slots** (Slot 0 and Slot 1) on Z3:
@@ -372,13 +372,14 @@ To minimize bus turnaround latency, the transport uses **double-buffered packet 
   - Zorro II Register: `cd_BoardAddr + 0x0108`.
 - In `mntzorro.v`, writes to `SDK_REG_DOORBELL` trigger **early DTACK**:
   - The FPGA asserts DTACK immediately upon latching the register write, without waiting for the ARM to poll or acknowledge.
-  - The 68k completes the write in 1 Zorro bus cycle (~150 ns on Z3).
-- The FPGA sets `MNTZORRO_STATUS_SDK_DOORBELL`.
-- Core 0 receives the event and sets `sh->minigl_doorbell = 1`.
-- Core 1 wakes immediately from its 10 µs idle pause and processes the pending packet.
+- The FPGA sets `MNTZORRO_STATUS_SDK_DOORBELL` after acknowledging the write.
+- Core 0 calls the module host doorbell and publishes work to core 1.
+- Core 1 runs the registered worker; packet parsing remains on core 1.
 
-### 4.4 Accepted vs Retired Semantics
-To match the performance of the Amiberry in-process submit, `BRIDGE_SUBMIT` does **not** stall the 68k waiting for the entire packet to be rasterized:
+### 4.4 Accepted vs retired semantics
+
+`BRIDGE_SUBMIT` returns after publishing a valid packet into a free slot;
+it does not wait for that packet's rendering fence.
 
 ```
 68k Library (amiberry_flush):
@@ -417,11 +418,10 @@ To match the performance of the Amiberry in-process submit, `BRIDGE_SUBMIT` does
      queuing another. `glFinish`, readback, `MGLLockBack`, context destruction,
      target/mode changes, and synchronous fallback presentation all retire
      outstanding fences before observing or reusing their result.
-     An Amiga reset does not free those buffers from core 0 while core 1
-     may still be streaming a PL330 packet or writing the present. Core 1
-     finishes the current packet and resets the service; if it does not
-     answer, core 0 stops the DMAC and RasterIX and only then releases the
-     buffers.
+     Reset and fault recovery must stop the worker and protect GPU-visible
+     buffers before reclamation. The
+     [module reset contract](minigl-module.md#worker-unload-and-reset)
+     describes that ordering.
 
 Wire framing is validated before execution. A valid command that encounters a
 GL-level condition (for example an incomplete texture, an allocation failure,
@@ -464,13 +464,16 @@ synchronous Op 6/readback fallbacks.
 
 ### 5.3 Synchronous Requests (`BRIDGE_REQUEST` / Op 5)
 
-`BRIDGE_REQUEST` executes synchronous queries that return data to the guest:
-- Parameter `desc` is a pointer to an 8-byte descriptor:
-  - Word 0: `reply_ptr` (guest memory address).
-  - Word 1: `reply_bytes` (maximum reply capacity).
-- **Staging**:
-  - If `reply_ptr` points to card memory inside the host-visible window, the ARM writes the reply directly into the destination and executes `Xil_DCacheFlushRange()`.
-  - If `reply_ptr` is in Amiga motherboard FastRAM, the ARM writes into the card-side Reply Buffer (`0x07081000` on Z3). The 68k transport waits for completion, then copies the reply from card DDR to `reply_ptr` using `CopyMem()`.
+`BRIDGE_REQUEST` executes synchronous queries through the Reply Buffer.
+The client stages the request there and supplies its length in `op_arg1`
+and reply capacity in `op_arg3`. The firmware calls `mw_host_request` with
+that same staging buffer for input and output, then publishes
+`op_reply_bytes` and `op_status`. Op 5 does not use `op_arg2` to select a
+direct card-memory destination.
+
+The descriptor names the staging buffer as `window + reply_offset`
+(`0x81000` within a full Z3 window). The client must obtain the result from
+that buffer after completion; there is no fixed reply address.
 
 ### 5.4 Latest-Frame Readback (`BRIDGE_READBACK` / Op 3)
 With capability bit 19, Op 3 reads `row_count` rows starting at `first_row`
@@ -508,11 +511,11 @@ When the target window resides on a Picasso96 screen displayed by the ZZ9000:
 5. **Return**: Op 6 returns `0` (`SUCCESS`).
 
 #### Fallback Path (Window Not in Card Memory):
-If the target window is not on a ZZ9000 RTG screen (e.g. AGA screen, native chipset, or third-party card), or if the screen format is CLUT/YUV:
-1. `BRIDGE_BLIT` returns `0xffffffff` (`UNAVAILABLE`).
-2. The 68k library falls back to its existing path:
-   - Calls `BRIDGE_READBACK` into a guest-allocated RGBA8 buffer.
-   - Calls `p96WritePixelArray()` to transfer the pixels through Picasso96 to the non-ZZ9000 surface.
+If the destination is outside the supported card VRAM range or its format
+cannot be presented directly, Op 6 returns `UNAVAILABLE`. The 68k library
+can read RGBA8 rows through `BRIDGE_READBACK` and use `p96WritePixelArray()`
+to transfer them to the destination. Indexed presentation uses the
+firmware palette service when supported by the present path.
 
 ### 5.6 Window Capture (`MW_CAPTURE`)
 The reverse of `MW_BLIT`: captures the current background of a window into the MiniGL draw buffer (used when a window context begins rendering without a full color clear).
@@ -525,27 +528,22 @@ The reverse of `MW_BLIT`: captures the current background of a window into the M
 
 ### 6.1 Context Creation (`BRIDGE_CREATE`)
 `bridge_call(BRIDGE_TRAP, BRIDGE_CREATE, width, height)`:
-1. Core 1 validates dimensions ($1 \le W, H \le 1024$).
-2. Allocates a unique context slot ($1 \le \text{handle} \le 8$).
-3. Generates a unique 32-bit handle combining generation and index:
-   $$\text{handle} = (\text{g\_session\_generation} \ll 16) \mid (\text{slot\_index} + 1)$$
-4. Allocates context working memory from the card pool using owner tag:
-   $$\text{owner} = \text{CARD\_POOL\_OWNER}(\text{CARD\_POOL\_CLASS\_FIRMWARE}, \text{handle})$$
-   - Texture cache storage (`ZZ9K_MINIGL_TEXTURE_CACHE_BYTES`, 40 MiB)
-   - RasterIX command buffers (`MINIGL_RIX_COMMAND_BUFFERS * MINIGL_RIX_COMMAND_BYTES`)
-   - RasterIX band replay buffers
+1. Core 1 validates dimensions ($1 \le W, H \le 4096$, `MW_MAX_DIMENSION`).
+2. Allocates one of eight wire-context entries.
+3. Generates a 32-bit handle combining generation and entry index:
+   $$\text{handle} = (\text{g\_generation} \ll 16) \mid (\text{entry\_index} + 1)$$
+4. Creates a typed `MINIGL_CONTEXT` owner through the reclaim service and
+   allocates the context's render targets, texture storage and command buffers
+   under that owner. Texture budgets are described in section 3.2.
 5. Configures rasterizer dimensions and initializes GL state defaults.
 6. Returns the 32-bit context handle.
 
 ### 6.2 Context Destruction (`BRIDGE_DESTROY`)
 `bridge_call(BRIDGE_TRAP, BRIDGE_DESTROY, handle)`:
-1. Core 1 finishes all pending RasterIX commands for the context.
-2. Unbinds textures and render targets.
-3. Releases all card-pool memory blocks matching the owner tag:
-   ```c
-   card_pool_release_owner(&card_pool, CARD_POOL_OWNER(CARD_POOL_CLASS_FIRMWARE, handle));
-   ```
-4. Frees the context slot.
+1. Core 1 destroys the renderer context and stops its outstanding work.
+2. Closes the context's typed owner through the reclaim service.
+3. Clears the wire-context entry. A failed hardware stop can quarantine
+   allocations rather than return memory still in use by the GPU.
 
 ### 6.3 Multi-Context Handling
 Firmware supports multiple concurrent contexts (e.g. multiple running 3D applications or test utilities):
@@ -557,38 +555,20 @@ Firmware supports multiple concurrent contexts (e.g. multiple running 3D applica
     - Binds the new context and proceeds.
 
 ### 6.4 Reset and LOST Semantics
-Hardware stability is protected against Amiga reboots and ARM faults:
+The [module reset contract](minigl-module.md#worker-unload-and-reset)
+defines app, transport, worker and hardware teardown ordering. The module's
+wire reset advances its generation and publishes `CONTEXT_LOST` for pending
+operations. Reset diagnostics report producer/consumer sequences, recent
+packets, fence state and the last synchronous operation before teardown.
 
-1. **Amiga Fast Reset (`AMIGA_RESET_FAST`)**:
-   - Core 0 detects the reset line asserted in `main.c`.
-   - Calls `mw_service_reset()`.
-   - Increments `g_session_generation`.
-   - Halts Core 1, resets RasterIX engine, revokes revocable card-pool ranges (`card_pool_take_back_lent()`), and releases all context owners.
-   - Restarts Core 1.
-   - Before that, `mw_service_report_amiga_reset()` prints what the host
-     was doing when it went away: `[MGL9] reset ... seq=<producer>/<consumer>
-     packets=<n> last=<ms since the last packet>`, the last eight ring
-     packets, the RasterIX fence state, and
-     `[MGL9] reset ops seq=<op_seq>/<op_done_seq> pending=<op code still
-     outstanding, 0 if none> processed=<n> last=<last completed op code>
-     <ms> ago`. A host that died inside a synchronous wait leaves
-     `pending` non-zero; one that died while building a frame leaves it 0
-     with a recent completion.
-2. **Core 1 Fault Watchdog**:
-   - `core2.c` monitors Core 1 execution. If Core 1 faults while `sh->minigl_in_flight` is asserted:
-   - Core 0 executes `mw_service_on_core1_fault()`:
-     - Increments generation.
-     - Publishes the v9 reset status block.
-     - Clears `sh->minigl_in_flight = 0`.
-3. **Guest Handling of LOST**:
-   - Any transport operation observing `generation != g_session_generation` immediately returns `0xfffffffc` (`MINIGL_BRIDGE_ERROR_CONTEXT_LOST`).
-   - The 68k library sets `GL_OUT_OF_MEMORY` or `GL_INVALID_OPERATION`, marks context dead, and safely aborts without crashing the AmigaOS system.
+A guest that observes a changed generation discards its cached context
+handles and returns `MINIGL_BRIDGE_ERROR_CONTEXT_LOST`. It must not reuse
+them after a reset.
 
 ### 6.5 Library Expunge
-When `minigl.library` is flushed from memory (`LibClose()` count reaches 0, or `LibExpunge()`):
-- `AmiberryLibraryRelease()` calls `BRIDGE_DESTROY` for any context abandoned by crashed or ill-behaved applications.
-- Closes `expansion.library` and `Picasso96API.library`.
-- Clears transport function pointers.
+The client destroys abandoned contexts and forgets the cached control,
+status, slot and reply pointers before `MINIGL_MODULE_RELEASE`. That release
+allows firmware to free the window and drop the module reference.
 
 ---
 
@@ -609,14 +589,12 @@ The ZZ9000 transport returns the exact status values specified by the Wire v9 Br
 
 ## 8. Performance Budget and Bus Utilization
 
-### 8.1 Zorro Round Trips
-- **Target**: Exactly **1 doorbell write per submission batch** (`amiberry_flush()`), with zero per-command handshakes.
-- **Doorbell Overhead**:
-  - `mntzorro.v` early DTACK acknowledges the register write in 1 Zorro clock (~150 ns).
-  - No bus wait states or CPU stalling.
-- **Batching**:
-  - Immediate mode draws (`glBegin`/`glEnd`), state changes, and client arrays accumulate into the active packet buffer.
-  - The Zorro bus is written purely sequentially (streaming stores) during packet assembly.
+### 8.1 Submission traffic
+
+The client rings one doorbell after publishing a packet, rather than
+handshaking each GL command. The FPGA acknowledges the doorbell without
+waiting for ARM service. Ring-space and rendering-fence waits are separate
+from that acknowledgement.
 
 ### 8.2 Bus Traffic Comparison: Wire v9 vs Legacy MGL5 (GLQuake)
 GLQuake frame profile (640x480, timedemo demo1, ~2,000 visible vertices per frame):
@@ -632,12 +610,10 @@ GLQuake frame profile (640x480, timedemo demo1, ~2,000 visible vertices per fram
 | **Presentation Bus Copy** | ~600 KiB (if CPU blit) | **0 bytes** (direct ARM VRAM blit) | **100% bus savings** |
 
 ### 8.3 Waiting Locations
-To keep the 68060 CPU feeding geometry at maximum speed:
-1. **No Waiting During Assembly**:
-   - `glBegin`, `glEnd`, `glVertex`, `glTexCoord`, `glDrawArrays`, `glDrawElements` never wait.
-2. **Pipelined Submission**:
-   - Double-buffered packet slots allow the 68k to assemble Slot 1 while the ARM renders Slot 0.
-3. **Where Waiting Occurs**:
+Draw calls append commands to the current packet. When that packet fills,
+submission can wait for a free slot. Two packet slots permit the host to
+prepare another packet while core 1 renders the preceding one.
+Waiting also occurs at:
    - `MGLSwitchDisplay`: without `MW_PRESENT_SPAN`, the 68k waits for
      `completion_fence` before unlocking the Picasso96 bitmap. With the
      capability negotiated, it returns after the packet is accepted and
@@ -707,65 +683,3 @@ synchronous ops were processed in the window:
 
 ---
 
-## 10. Required Implementation Changes
-
-### 10.1 Guest Library Changes (`amiberry-minigl-library`)
-1. **Transport VTable Abstraction**:
-   Refactor `src/amiberry_backend.c` to wrap `bridge_call` in an abstract operations vector:
-   ```c
-   struct MiniGLTransport {
-       ULONG (*query)(void);
-       ULONG (*create)(ULONG width, ULONG height);
-       ULONG (*submit)(ULONG handle, const UBYTE *packet, ULONG bytes);
-       ULONG (*readback)(ULONG handle, UBYTE *pixels, ULONG bytes);
-       void  (*destroy)(ULONG handle);
-       ULONG (*request)(ULONG handle, const UBYTE *req, ULONG req_bytes, ULONG *desc);
-       ULONG (*blit)(ULONG handle, const UBYTE *req, ULONG req_bytes, ULONG *desc);
-   };
-   ```
-2. **Transport Implementations**:
-   - `src/amiberry_transport_trap.c`: Existing Trap 120 implementation.
-   - `src/amiberry_transport_zz9000.c`: New ZZ9000 transport implementing:
-     - Board probing via `FindConfigDev(0x6d6e)`.
-     - Control block mapping & cache maintenance (`CacheClearE`).
-     - Slot management & doorbell writing to `ZZ9K_REG_SDK_DOORBELL`.
-     - Fast snapshot polling with fallback to `WaitTOF()`.
-3. **Reused Library Code**:
-   - `amiberry_gl_draw.c` (packed vertex encoders, client arrays)
-   - `amiberry_gl_state.c` (state tracking and delta encoders)
-   - `amiberry_gl_texture.c` (texture compression and raw upload banding)
-   - `amiberry_gl_light.c` (v9 lighting parameter packing)
-   - `amiberry_glu.c`, `amiberry_glut.c` (higher level utilities)
-
-### 10.2 Firmware Changes (`zz9000-firmware`)
-1. **Wire-v9 Front End (`mw_service.c`, `mw_parse.c`)**:
-   - Cleanroom GPL-3.0-or-later parser for Wire-v9 packets.
-   - Owns Core-1 polling, doorbells, reset, and fault recovery.
-   - Structurally validates packets before execution.
-2. **Command Dispatch Cutover**:
-   - Connects `MW_DRAW_PACKED` to the existing NEON transform and RasterIX backend (`minigl_rix_backend.c`).
-   - Connects `MW_CLEAR`, `MW_SET_STATE`, `MW_MODELVIEW`, `MW_LIGHTING` to `minigl_raster.c` and `minigl_lighting.c`.
-   - Connects `MW_BLIT` directly to `minigl_present_copy()` in `minigl_present.c` for direct VRAM blitting.
-3. **Reused Firmware Components**:
-   - `minigl_present.c` (RGB format conversion, clipping, VRAM blit)
-   - `minigl_rix_backend.c` (RasterIX FPGA driver, frame recording, band replay)
-   - `minigl_raster.c` (Software span rasterizer fallback)
-   - `minigl_lighting.c` (GL 1.1 vertex lighting pipeline)
-   - `card_pool.c` (dynamic memory allocation for textures and command buffers)
-
----
-
-## 11. Assumptions and Verification Matrix
-
-The following table explicitly marks assumptions that require hardware validation during the cutover:
-
-| ID | Item | Status | Impact / Mitigation |
-|---|---|---|---|
-| `[ASSUMPTION-01]` | **Zorro II Packet Buffer Sizing** | `[ASSUMPTION]` | Assumed that 64 KiB packet slots fit comfortably within the Zorro II RTG free space. If a heavily populated Z2 system has < 64 KiB free, the library will budget 32 KiB slots with finer draw flushing. |
-| `[ASSUMPTION-02]` | **Early DTACK on Zorro II Doorbell** | `[ASSUMPTION]` | Early DTACK on `SDK_REG_DOORBELL` is verified on Zorro III. Assumed that Zorro II bus cycles in `mntzorro.v` assert DTACK with identical timing under 68000/68030 bus timing. |
-| `[ASSUMPTION-03]` | **RasterIX Multi-Context Switching** | `[ASSUMPTION]` | Assumed that draining RasterIX via `minigl_rix_backend_drain()` is sufficient to swap TMU0 texture bindings between two different contexts without FPGA state corruption. |
-| `[FACT-01]` | **Trap 120 Discovery** | `VERIFIED` | Verified in `amiberry_backend.c`: `uae.resource` returns version 9 on Amiberry 8.3+. |
-| `[FACT-02]` | **Wire-v9 Vertex Efficiency** | `VERIFIED` | Verified in `amiberry_gl_draw.c`: `MW_DRAW_PACKED` encodes GLQuake arrays in 24-32 bytes per vertex. |
-| `[FACT-03]` | **Direct VRAM Blit** | `VERIFIED` | Verified in `minigl_present.c`: ARM Core 1 copies RGB565/RGBA8 directly to VRAM at `FRAMEBUFFER_ADDRESS`. |
-| `[FACT-04]` | **Core 1 Isolation** | `VERIFIED` | Verified in `scheduler_arm.c`: MiniGL runs on Core 1, protecting Core 0 DTACK from starvation. |
-| `[FACT-05]` | **Card Pool Dynamic Reclamation** | `VERIFIED` | Verified in `card_pool.c`: Context owner tags release 100% of context-allocated memory upon destruction. |

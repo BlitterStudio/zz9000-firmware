@@ -114,9 +114,8 @@ vendor service ID and opcode-range conventions, see
 
 ## Current status
 
-The manifest and registry are SDK header-only helpers with unit tests. The
-firmware mailbox dispatcher currently answers `QUERY_SERVICE` from the static
-catalogue in `ZZ9000_proto.sdk/ZZ9000OS/src/sdk_service_catalog.h`, rather
-than from `ZZ9KModuleManifest` records. The source tree contains no integration
-of the module registry with that dispatcher, and no implementation of module
-loading, dynamic relocation, or runtime unloading.
+The manifest and registry are SDK header-only helpers with unit tests.
+They do not load, relocate or unload module images. Firmware `.ZZM` loading
+uses a different header, manifest and registry, described in
+[the firmware module contract](../../docs/modules.md). MiniGL's v3 host is
+described in [minigl-module.md](../../docs/minigl-module.md).
