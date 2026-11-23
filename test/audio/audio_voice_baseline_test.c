@@ -743,6 +743,10 @@ int main(void)
 		S.verbose = 1;
 	}
 
+#ifdef HAVE_GUARD_PAGE
+	/* A mixer that stops advancing would loop forever: fail instead. */
+	alarm(60U + seqs / 100U);
+#endif
 	if (have_only) {
 		run_sequence(only, seed);
 	} else {
