@@ -1898,6 +1898,16 @@ static void test_audio_card(void)
 	CHECK(cl.nreq[AAR_OP_AUDIO_OPEN] == 0U);	/* the card route needs no client */
 	CHECK(zzapp_svc_audio_open(22050U, 2U, &a) == AAR_E_BUSY);
 	CHECK(set_core0.count == 1U);
+	/* The runtime counts the underruns of the card route in the ring header
+	 * (spec 8.4), little-endian next to read_frame; the app and the client
+	 * read the count from there. */
+	CHECK(hdr[AAR_AUDIO_RING_UNDERRUNS / 4U] == 0U);
+	zzapp_services_test_audio_underrun();
+	zzapp_services_test_audio_underrun();
+	zzapp_services_test_audio_underrun();
+	CHECK(hdr[AAR_AUDIO_RING_UNDERRUNS / 4U] == 3U);
+	CHECK(hdr[AAR_AUDIO_RING_READ_FRAME / 4U] == 0U &&
+	      hdr[AAR_AUDIO_RING_WRITE_FRAME / 4U] == 0U);
 	/* Close returns the ring. */
 	CHECK(zzapp_svc_audio_close() == AAR_OK);
 	CHECK(zzapp_services_test_audio_detach_count() == 1U);

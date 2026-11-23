@@ -194,6 +194,7 @@ void zzapp_services_test_set_slot_busy(uint32_t slot, int busy);
 void zzapp_services_test_set_audio_request(uint32_t request);
 uint32_t zzapp_services_test_audio_request(void);
 uint32_t zzapp_services_test_audio_detach_count(void);
+void zzapp_services_test_audio_underrun(void);
 #endif
 
 #endif /* ZZAPP_SERVICES_H */

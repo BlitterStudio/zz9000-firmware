@@ -542,7 +542,10 @@ minor words (`ZZAPP_ABI_MAJOR`, `ZZAPP_ABI_MINOR`).
 **Groups.** `aar_api.groups` and `aar_info.groups` report the same mask:
 `AAR_GROUP_INPUT` and `AAR_GROUP_SERVICES` always, and `AAR_GROUP_DISPLAY`,
 `AAR_GROUP_AUDIO`, `AAR_GROUP_GL` when the client capability word has the
-matching bit. `audio_stats` is `NULL`: the runtime keeps no underrun count.
+matching bit. `audio_stats` is `NULL`. On the card route the runtime counts
+played underruns in the ring header (`AAR_AUDIO_RING_UNDERRUNS`, a
+little-endian word beside `read_frame`), where the app and the client read
+them; on the AHI route the client consumes the ring and the word stays 0.
 
 **Note v1.** An image must carry exactly one AAR note (owner `AAR`, type 1, a
 40-byte descriptor of ten little-endian words), found in a `PT_NOTE` segment or,
