@@ -96,6 +96,8 @@ uint16_t sdk_media_session_begin_owned(
 	const struct SDKMediaSessionBegin *begin, uint16_t owner_id,
 	struct SDKMediaSessionMainResult *result);
 int sdk_media_session_release_client(uint16_t owner_id, uint32_t *close_session);
+/* Nonzero when session is the active media session and owner_id opened it. */
+int sdk_media_session_owned_by(uint32_t session, uint16_t owner_id);
 uint16_t sdk_media_session_write(
 	const struct SDKMediaSessionWrite *write,
 	struct SDKMediaSessionMainResult *result);

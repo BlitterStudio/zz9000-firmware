@@ -337,6 +337,43 @@ The same session passed these checks:
 Two-stream listening under RTG and network load also ran with no audible
 drops. No session has measured two converting producers at once.
 
+### ZZPlay beside a 32-voice low-latency voice session
+
+A second session on 2026-11-23 ran `ZZPlay --fps --audio=ax` on a PAL
+MPEG-2 file with 48 kHz MP2 audio (750 pictures, 1440000 audio frames, about
+30 s), and started `zz9k-voiceplay LOAD VOICES=32 SECONDS=15 STEREO
+RATE=96000 RAMP=256 GAIN=65535 CHURN GROUPS=32 LIMITER INTERP=linear LOWLAT`
+about 5 s into the movie. The pump, the media session and the voice slot
+shared the compositor, and the fill-ahead went from 6 periods to 2 and back.
+
+Before the owner check in `CLIENT_RELEASE`, the movie stopped at 19.44 s
+(933120 of 1440000 audio frames) when the voice tool exited and closed
+`zz9k.library`. The release stopped the media pump of a session the tool did
+not own. The movie then held its next picture until it was interrupted. With
+the check, the pump stays bound and the movie ran on after the voice tool
+exited.
+
+| Measure | Result with the check |
+| --- | --- |
+| ZZPlay wall time | 30306 ms, normal end of file |
+| Pictures | 750 decoded, 477 presented, 273 discarded |
+| Audio | 1440000 frames played, 0 underruns |
+| A/V sync | 273 late pictures, 637 holds, largest drift 260 ms |
+| SDK calls, per call | write 8390 us, decode 12825 us, retire 2842 us |
+| Voice session | late counter 240 voice records, 0 rejected, 0 underruns, 0 dropped |
+| Voice host pacing | largest wait 67876 us against 5000 us asked, first late at 3.224 s |
+
+The release fix removes the freeze. It does not qualify the combination:
+the same movie plays 750 pictures with no discards when it runs alone, and
+with the 32-voice low-latency load running, 273 pictures were discarded and
+the voice late counter read 240 records. That counts late voice records, not
+late periods: with `CHURN GROUPS=32` and `RAMP=256` one 20 ms producer period
+carries 240 records, and the first late record was one such window. The cause
+of the late pictures and records is not established. The voice host waits of
+up to 67876 us fit the mailbox and main-loop stalls that are already open.
+Qualifying ZZPlay beside this voice load stays an open item until a run
+presents all pictures with a late counter of 0.
+
 ## History
 
 | Earlier ABI state | Current rule | Reason retained in the ABI |

@@ -92,6 +92,14 @@ sends `ZZ9K_OP_CLIENT_RELEASE` and resubmits it while the firmware answers
 sessions, streams and buffers still finishing on the ARM side -- before that
 opener's owned resources are reclaimed.
 
+A release touches only what the releasing opener owns. It stops the AX
+playback pump only when the pump plays that opener's media session or audio
+stream, so a tool that opens `zz9k.library` beside a player and closes it
+again leaves the player's audio running. Earlier firmware stopped the pump of
+a media session on any opener's release, which left the owner's audio bound
+with nothing retiring it: the output clock stopped and the player held its
+next picture indefinitely.
+
 Revision 44 makes that tag cover every request the opener's task makes.
 Revisions 38 to 43 stamped it on `ZZ9KCall()` and `ZZ9KCallAsync()` only; the
 host helpers that wait for their reply, among them `ZZ9KVoiceOpen()`,
