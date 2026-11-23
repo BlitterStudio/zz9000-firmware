@@ -1069,15 +1069,21 @@ uint32_t zzapp_services_state(void)
 }
 
 /* The stop latched on the record (by the host: STOP, RELEASE, lease, cancel)
- * or asked for by the client in its control block word. */
+ * or asked for by the client in its control block word. A word seen by a
+ * wait that ends on it is latched on the record too, so aar_should_stop()
+ * reads true as soon as the wait returns, without waiting for the tick. */
 static int stop_requested_rec(zzapp_rec_t *rec)
 {
 	if (!rec)
 		return 0;
 	if (__atomic_load_n(&rec->host.stop_requested, __ATOMIC_ACQUIRE) != 0U)
 		return 1;
-	return zzapp_xport_live(rec) &&
-	       zzapp_xport_cb_read_client(rec, AAR_CB_STOP_REQUEST) != 0U;
+	if (zzapp_xport_live(rec) &&
+	    zzapp_xport_cb_read_client(rec, AAR_CB_STOP_REQUEST) != 0U) {
+		zzapp_host_latch_stop(rec->hdr.pid);
+		return 1;
+	}
+	return 0;
 }
 
 int zzapp_services_stop_requested(void)
@@ -2235,6 +2241,9 @@ int zzapp_svc_event_poll(aar_event *out, uint32_t max, uint32_t *out_n)
 	*out_n = 0U;
 	if (max != 0U && !out)
 		return AAR_E_INVAL;
+	/* The client's stop word is a request: latch it so its event is queued
+	 * now and not at the next tick. */
+	(void)stop_requested_rec(rec);
 	if (n < max && zzapp_host_take_stop_event &&
 	    zzapp_host_take_stop_event(slot)) {
 		memset(&out[n], 0, sizeof(out[n]));
@@ -2258,8 +2267,10 @@ int zzapp_svc_event_poll(aar_event *out, uint32_t max, uint32_t *out_n)
 	}
 	while (n < max && zzapp_xport_take_event(rec, &out[n]) == 1) {
 		/* The client's own stop event is the delivery of the request;
-		 * a second one for the same request is dropped. */
-		if (out[n].type == AAR_EV_STOP &&
+		 * a second one for the same request is dropped. A stop event
+		 * with no stop requested delivers nothing: the real request
+		 * still gets its event. */
+		if (out[n].type == AAR_EV_STOP && stop_requested_rec(rec) &&
 		    zzapp_host_note_stop_event_delivered &&
 		    zzapp_host_note_stop_event_delivered(slot))
 			continue;
@@ -5200,6 +5211,12 @@ static void stop_record(zzapp_rec_t *rec)
 			(void)zzapp_rec_retire(pid);
 			return;
 		}
+	}
+	/* RUNNING reads STOPPING from the stop request on (spec 5.1); the
+	 * teardown ends in IDLE. */
+	if (rec->claim.state == ZZAPP_ST_RUNNING) {
+		rec->claim.state = ZZAPP_ST_STOPPING;
+		cb_publish_state(rec, ZZAPP_ST_STOPPING);
 	}
 	zzapp_host_latch_stop(pid);
 	slot_state_lock_release();
