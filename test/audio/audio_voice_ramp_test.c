@@ -693,10 +693,10 @@ static int run_sequence(uint32_t seq, uint64_t seed)
 				c->arg0 = rnd(2) ? 256 : rnd(600);
 			} else if (pick < 95) {
 				c->op = AUDIO_VOICE_OP_CONFIG;
-				/* flags 0 or unknown bits: bit 1 is the limiter and bit 2 the
-				 * default interpolation, covered by audio_voice_limiter_test
-				 * and audio_voice_cubic_test */
-				c->flags = rnd(12) ? 1 : (uint16_t)(rnd(4) << 3);
+				/* flags 0 or unknown bits: bit 1 is the limiter, bit 2 the
+				 * default interpolation and bit 3 oversampling, covered by
+				 * the limiter, cubic and oversample tests */
+				c->flags = rnd(12) ? 1 : (uint16_t)(rnd(4) << 4);
 				c->arg0 = rnd(20) ? pick_ramp() : 513 + rnd(1000);
 			} else {
 				c->op = (uint8_t)(rnd(2) ? AUDIO_VOICE_OP_ENVELOPE : 10 + rnd(200));

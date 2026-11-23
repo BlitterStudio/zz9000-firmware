@@ -220,14 +220,21 @@ static double time_ref(const struct scenario *sc, uint32_t bytes,
 static struct audio_voice_cmd g_churn[CHURN_MAX_PERIODS][2U * 120U];
 
 static double time_churn(const struct scenario *sc, uint32_t bytes,
-                         uint32_t ramp)
+                         uint32_t ramp, int over)
 {
 	static struct audio_voice_engine e;
-	struct audio_voice_cmd setup[3U * AUDIO_VOICE_MAX_VOICES + 1U];
+	struct audio_voice_cmd setup[3U * AUDIO_VOICE_MAX_VOICES + 2U];
 	double best = 1e30;
 	uint32_t t, v, n = 0, p, s, periods = g_periods < CHURN_MAX_PERIODS ?
 	                                      g_periods : CHURN_MAX_PERIODS;
 
+	if (over) {
+		memset(&setup[n], 0, sizeof(setup[n]));
+		setup[n].op = AUDIO_VOICE_OP_CONFIG;
+		setup[n].flags = AUDIO_VOICE_CONFIG_OVERSAMPLE;
+		setup[n].arg0 = AUDIO_VOICE_OVERSAMPLE_2X;
+		n++;
+	}
 	if (ramp != 0U) {
 		memset(&setup[n], 0, sizeof(setup[n]));
 		setup[n].op = AUDIO_VOICE_OP_CONFIG;
@@ -344,18 +351,20 @@ int main(void)
 	}
 	printf("\nrestart churn (32 voices, a restart every 8 frames in turn, "
 	       "22050 Hz), ns per period, current engine only\n");
-	printf("%-34s %12s %12s\n", "scenario", "ramp off", "ramp 256");
+	printf("%-34s %12s %12s %12s\n", "scenario", "ramp off", "ramp 256",
+	       "ramp 256 2x");
 	for (st = 0; st < 2; st++)
 	for (lin = 0; lin < 2; lin++) {
 		uint32_t bytes = make_sample(st);
 		struct scenario sc = { 32, lin, st, 22050 };
 		char name[64];
-		double off = time_churn(&sc, bytes, 0);
-		double on = time_churn(&sc, bytes, 256);
+		double off = time_churn(&sc, bytes, 0, 0);
+		double on = time_churn(&sc, bytes, 256, 0);
+		double over = time_churn(&sc, bytes, 256, 1);
 
 		snprintf(name, sizeof(name), "32 voices %s %s",
 		         st ? "stereo" : "mono  ", lin ? "linear " : "nearest");
-		printf("%-34s %12.0f %12.0f\n", name, off, on);
+		printf("%-34s %12.0f %12.0f %12.0f\n", name, off, on, over);
 	}
 	return bad;
 }
