@@ -2052,6 +2052,96 @@ static void scenario_define_formats(void)
 	      fmt("rejected=%u", st32(AUDIO_VOICE_STATUS_OFF_REJECTED)));
 }
 
+/* A check name of its own: fmt() has one buffer and the detail uses it. */
+static const char *cname(const char *mode, const char *what)
+{
+	static char name[96];
+
+	snprintf(name, sizeof(name), "chord32 %s: %s", mode, what);
+	return name;
+}
+
+/*
+ * ZZAXVoiceTest S2 as the AHI driver sends it: 32 voices of one 64-frame
+ * looped cycle in a major chord over three octaves (7040 Hz up to about
+ * 42 kHz), master gain 8 (1/32), the 97 records of the model at the first
+ * stamp. The card hung in this scenario in the interpolated mode, so both
+ * interpolations must keep rendering to the lead, with no late, rejected,
+ * dropped or underrun counts.
+ */
+static void scenario_chord32(uint32_t flags)
+{
+	static const uint32_t semitone[12] = {
+		65536U, 69433U, 73561U, 77935U, 82570U, 87480U, 92682U,
+		98193U, 104032U, 110218U, 116772U, 123715U
+	};
+	static const uint32_t chord[3] = { 0U, 4U, 7U };
+	struct audio_voice_session_upload up;
+	struct audio_voice_session_open o;
+	const char *mode = (flags & AUDIO_VOICE_OPEN_LINEAR) != 0U ?
+		"linear" : "nearest";
+	uint32_t i;
+	int nonzero = 0;
+
+	fresh();
+	for (i = 0U; i < 64U; i++) {
+		int16_t v = (int16_t)((i < 32U ? i : 64U - i) * 600 - 9600);
+
+		g_staging[2U * i] = (uint8_t)((uint16_t)v >> 8);
+		g_staging[2U * i + 1U] = (uint8_t)v;
+	}
+	o = open_params(7680U, 32U, flags);
+	check(audio_voice_session_open(&o, &g_grant) == SDK_STATUS_OK,
+	      cname(mode, "open"), "");
+	memset(&up, 0, sizeof(up));
+	up.flags = AUDIO_VOICE_UPLOAD_COPY | AUDIO_VOICE_UPLOAD_DEFINE;
+	up.length = 128U;
+	up.sample_id = SAMPLE_ID;
+	up.sample_length = 128U;
+	up.format = AUDIO_VOICE_FMT_S16;
+	check(audio_voice_session_upload(g_grant.session, &up) ==
+	      SDK_STATUS_OK, cname(mode, "upload"), "");
+	rec(7680U, 0U, AUDIO_VOICE_OP_MASTER, 0U, 8U, 0U);
+	for (i = 0U; i < 32U; i++) {
+		uint32_t semis = chord[i % 3U] + 12U * ((i / 3U) % 3U);
+		uint32_t hz = (7040U * (semitone[semis % 12U] <<
+			(semis / 12U))) >> 16;
+		uint32_t pan = (i & 1U) != 0U ? 0xC000U : 0x4000U;
+		uint32_t left = (0x8000U * ((0x10000U - pan) >> 1)) >> 14;
+		uint32_t right = (0x8000U * (pan >> 1)) >> 14;
+
+		rec(7680U, (uint8_t)i, AUDIO_VOICE_OP_SET,
+		    AUDIO_VOICE_SET_RATE | AUDIO_VOICE_SET_VOLUME |
+		    AUDIO_VOICE_RATE_HZ, hz, (left << 16) | right);
+		rec(7680U, (uint8_t)i, AUDIO_VOICE_OP_START, SAMPLE_ID, 0U,
+		    128U);
+		rec(7680U, (uint8_t)i, AUDIO_VOICE_OP_LOOP, 0U, 0U, 128U);
+	}
+	publish();
+	run(250);
+	for (i = 0U; i < AUDIO_NUM_PERIODS; i++) {
+		const int16_t *p = tx_period(i);
+		uint32_t k;
+
+		for (k = 0U; k < TICK_BYTES / 2U; k++) {
+			if (p[k] != 0)
+				nonzero = 1;
+		}
+	}
+	check(st_state() == AUDIO_VOICE_STATE_LIVE &&
+	      st_horizon() - st_playing() <= g_grant.lead_frames &&
+	      st_horizon() >= 250U * 960U,
+	      cname(mode, "the poll renders to the lead and returns"),
+	      fmt("state=%u horizon=%u playing=%u", st_state(), st_horizon(),
+	      st_playing()));
+	check(st_late() == 0U && st_rejected() == 0U && st_dropped() == 0U &&
+	      st_underruns() == 0U,
+	      cname(mode, "no late, rejected, dropped or underrun"),
+	      fmt("late=%u rejected=%u dropped=%u underruns=%u", st_late(),
+	      st_rejected(), st_dropped(), st_underruns()));
+	check(nonzero, cname(mode, "the chord is audible"), "");
+}
+
 int main(void)
 {
 	scenario_open();
@@ -2083,6 +2173,8 @@ int main(void)
 	scenario_redefine();
 	scenario_stereo_play();
 	scenario_define_formats();
+	scenario_chord32(0U);
+	scenario_chord32(AUDIO_VOICE_OPEN_LINEAR);
 	if (failures != 0)
 		printf("audio_voice_session_test: %d FAILED\n", failures);
 	else
