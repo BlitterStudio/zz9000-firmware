@@ -445,7 +445,7 @@ All multi-byte mailbox fields use the byte order defined by `zz9k/abi.h`. The se
 | Module | `0x0a00` MODULE_STATUS |
 | Video | `0x0b00`–`0x0b03` video-session begin/write/decode/close; `0x0b04`–`0x0b0d` media-session begin/write/decode/audio-read/present/discard/status/audio-bind/audio-unbind/close |
 
-The voice engine opcodes `0x0518` through `0x051b` dispatch in firmware on both buses. The audio service descriptor covers them (28 opcodes through `0x051b`) and sets `ZZ9K_SERVICE_FLAG_AUDIO_VOICE` on Zorro III. The flag is not set on Zorro II yet, because the engine has not been tested on a Zorro II machine. See [zz9k-voice.md](zz9k-voice.md).
+The voice engine opcodes `0x0518` through `0x051b` dispatch in firmware on both buses. The audio service descriptor covers them (28 opcodes through `0x051b`) and sets `ZZ9K_SERVICE_FLAG_AUDIO_VOICE` and `ZZ9K_SERVICE_FLAG_AUDIO_VOICE_STEREO` on Zorro III. The flags are not set on Zorro II yet, because the engine has not been tested on a Zorro II machine. See [zz9k-voice.md](zz9k-voice.md).
 
 `ZZ9K_OP_MODULE_STATUS` takes a 48-byte `ZZ9KModuleStatusRequestPayload`:
 the only nonzero field is the big-endian zero-based `index`. It returns a
@@ -1467,8 +1467,8 @@ The mailbox opcodes are `ZZ9K_OP_AUDIO_VOICE_OPEN` (`0x0518`), `_CLOSE`
 yet, so a client on a card without the flag tries Open and handles the
 refusal; see the discovery section of the voice guide. The stereo sample
 formats have their own flag, `ZZ9K_SERVICE_FLAG_AUDIO_VOICE_STEREO` (bit 29),
-which no firmware sets yet; the voice guide describes the formats and the
-timing helpers in `zz9k/voice.h`.
+which the firmware sets on Zorro III with the voice flag; the voice guide
+describes the formats and the timing helpers in `zz9k/voice.h`.
 
 ## Decompression Jobs
 

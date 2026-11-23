@@ -389,8 +389,8 @@ and 4 bytes in S16S.
   partial frame, because the length is rounded down.
 
 Firmware advertises the formats with `ZZ9K_SERVICE_FLAG_AUDIO_VOICE_STEREO`
-(see [Discovery](#discovery)). The engine plays them already, and the flag is
-not set yet.
+(see [Discovery](#discovery)). It sets the flag on Zorro III, together with
+`ZZ9K_SERVICE_FLAG_AUDIO_VOICE`, and not on Zorro II.
 
 ## Timing helpers
 
@@ -554,9 +554,10 @@ The stereo sample formats have their own flag,
 `ZZ9K_SERVICE_FLAG_AUDIO_VOICE_STEREO` (bit 29, printed as
 `audio-voice-stereo`), reported together with `audio-voice`. A client that
 wants S8S or S16S samples checks it and defines only the mono formats when it
-is clear. The firmware engine plays both formats, but no firmware sets the
-flag yet, so a client cannot use them until one does. A firmware without
-the stereo support refuses a DEFINE in format 2 or 3 with
+is clear. Firmware with stereo support sets the flag on Zorro III together
+with `audio-voice`. Earlier firmware with the voice engine plays both formats
+but never sets the flag, so a client does not use them there. A firmware
+without the stereo support refuses a DEFINE in format 2 or 3 with
 `ZZ9K_STATUS_BAD_REQUEST`. See [Stereo samples](#stereo-samples).
 
 ## zz9k-voiceplay

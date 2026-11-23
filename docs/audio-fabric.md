@@ -229,7 +229,7 @@ at 48 kHz and never needs conversion.
 | `SDK_SERVICE_FLAG_AUDIO_FABRIC` | bit 22 | Direct-ring audio fabric is available in the audio service |
 | `SDK_SERVICE_FLAG_AUDIO_FABRIC_RATE` | bit 23 | Source-rate leases are available |
 | `SDK_SERVICE_FLAG_AUDIO_VOICE` | bit 28 | Voice engine opcodes are advertised. The firmware sets it on Zorro III; it is not set on Zorro II yet |
-| `SDK_SERVICE_FLAG_AUDIO_VOICE_STEREO` | bit 29 | The voice engine's stereo sample formats are advertised. The flag is defined in the firmware headers, and no firmware sets it yet |
+| `SDK_SERVICE_FLAG_AUDIO_VOICE_STEREO` | bit 29 | The voice engine's stereo sample formats are advertised. The firmware sets it on Zorro III with the voice flag; it is not set on Zorro II yet |
 
 Clients should check the capability and service flags before using the
 opcodes. Firmware that does not recognize the source-rate flag returns
