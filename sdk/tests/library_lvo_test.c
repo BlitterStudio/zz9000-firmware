@@ -32,9 +32,9 @@ static void test_library_identity(void)
 {
   expect_str("name", ZZ9K_LIBRARY_NAME, "zz9k.library");
   expect_u32("version", ZZ9K_LIBRARY_VERSION, 2);
-  expect_u32("revision", ZZ9K_LIBRARY_REVISION, 43);
+  expect_u32("revision", ZZ9K_LIBRARY_REVISION, 44);
   expect_str("id string", ZZ9K_LIBRARY_ID_STRING,
-             "zz9k.library 2.43 (22.11.2026)");
+             "zz9k.library 2.44 (23.11.2026)");
   expect_u32("client reclaim", ZZ9K_LIBRARY_MIN_REVISION_CLIENT_RECLAIM, 38);
 }
 
@@ -116,6 +116,8 @@ static void test_public_lvos(void)
   expect_u32("voice min revision", ZZ9K_LIBRARY_MIN_REVISION_AUDIO_VOICE, 42);
   expect_u32("voice low latency min revision",
              ZZ9K_LIBRARY_MIN_REVISION_VOICE_LOW_LATENCY, 43);
+  expect_u32("voice client id min revision",
+             ZZ9K_LIBRARY_MIN_REVISION_VOICE_CLIENT_ID, 44);
 }
 
 int main(void)

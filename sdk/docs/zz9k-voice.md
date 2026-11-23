@@ -42,8 +42,9 @@ fourth slot of the audio fabric and mixes with the other fabric producers.
 
 The six calls need `zz9k.library` revision 42
 (`ZZ9K_LIBRARY_MIN_REVISION_AUDIO_VOICE`); the low-latency open flag needs
-revision 43 (`ZZ9K_LIBRARY_MIN_REVISION_VOICE_LOW_LATENCY`). Open fills a
-`ZZ9KVoiceSession`, and every later call takes it.
+revision 43 (`ZZ9K_LIBRARY_MIN_REVISION_VOICE_LOW_LATENCY`); the session
+ownership below needs revision 44 (`ZZ9K_LIBRARY_MIN_REVISION_VOICE_CLIENT_ID`).
+Open fills a `ZZ9KVoiceSession`, and every later call takes it.
 
 | Call | LVO | Registers | Purpose |
 | --- | ---: | --- | --- |
@@ -501,7 +502,7 @@ paces on `playing_frame` already reads the status often enough.
 | `ZZ9KVoiceReset()` | Drops every record the client had written, every queued command and the periods the slot has already queued; silences all voices. Samples, master gain and the timeline stay, and the frame counter keeps counting, so stamps after a reset are relative to a fresh status read. Audio of at most the period now playing remains. A reset while the session is still staging its first lead also takes back the staged periods and restarts the timeline at frame 0; nothing of the earlier voices plays. |
 | `ZZ9KVoiceClose()` | Silences the voices, drops the queued periods, detaches the slot, frees the bank and unpins and frees the buffers. |
 | Missed heartbeat | The firmware ends the session as Close does. The status block reads state 0. A later `ZZ9KVoiceClose()` returns `ZZ9K_STATUS_BAD_HANDLE` and still frees the buffers. |
-| Client exit | The final `CloseLibrary()` releases the opener's client id, which ends its session and frees its buffers. Without that the heartbeat limit applies. |
+| Client exit | The final `CloseLibrary()` releases the opener's client id, which ends its session and frees its buffers, because the session is owned by the id that opened it (revision 44 or later; before it a session was always owned by client 0 and only the heartbeat limit ended it). A task that never opened the library owns its session as client 0, which no release reaches, so the heartbeat limit applies. |
 | Amiga reset | A warm reset ends the session and frees its buffers. |
 
 A low-latency session gives the fabric its 6-period fill-ahead back by every
@@ -510,6 +511,14 @@ route in that table, one period per audio interrupt.
 A second OPEN, from any client, fails with `ZZ9K_STATUS_BUSY` while a session
 is open. A session id from another client is refused with
 `ZZ9K_STATUS_BAD_HANDLE`.
+
+A session belongs to the client id its Open carried. From revision 44 that is
+the id of the calling task's library opener, on Open, Close, Reset and the
+buffer allocations as on `ZZ9KCall()`, so an opener can send its own UPLOAD
+requests with `ZZ9KCall()` on a session `ZZ9KVoiceOpen()` made. Before
+revision 44 the Voice API sent client 0 whoever called, and `ZZ9KCall()` sent
+the opener's id, so only a task without an opener, which sends 0 on both,
+could mix them. Such a task still can.
 
 ## Zorro II
 

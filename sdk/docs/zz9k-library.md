@@ -2,7 +2,7 @@
 
 `zz9k.library` is the AmigaOS 3.x API for SDK v2. It serializes mailbox requests for Amiga-side programs and provides synchronous, asynchronous, and message-port calls for the firmware services described below. New programs should use the library instead of programming mailbox registers directly.
 
-The current interface is `zz9k.library` version 2, revision 43 (`ZZ9K_LIBRARY_NAME`, `ZZ9K_LIBRARY_VERSION`, and `ZZ9K_LIBRARY_REVISION` in `sdk/amiga/include/zz9k/library_vectors.h`). SDK v2 requires firmware with service discovery. Query capabilities and the service descriptor before using an optional operation.
+The current interface is `zz9k.library` version 2, revision 44 (`ZZ9K_LIBRARY_NAME`, `ZZ9K_LIBRARY_VERSION`, and `ZZ9K_LIBRARY_REVISION` in `sdk/amiga/include/zz9k/library_vectors.h`). SDK v2 requires firmware with service discovery. Query capabilities and the service descriptor before using an optional operation.
 
 ## Contents
 
@@ -91,6 +91,20 @@ sends `ZZ9K_OP_CLIENT_RELEASE` and resubmits it while the firmware answers
 `ZZ9K_STATUS_BUSY`, so the release tracks the client's worker activity --
 sessions, streams and buffers still finishing on the ARM side -- before that
 opener's owned resources are reclaimed.
+
+Revision 44 makes that tag cover every request the opener's task makes.
+Revisions 38 to 43 stamped it on `ZZ9KCall()` and `ZZ9KCallAsync()` only; the
+host helpers that wait for their reply, among them `ZZ9KVoiceOpen()`,
+`ZZ9KVoiceClose()` and `ZZ9KVoiceReset()` and the shared buffers an open
+allocates, sent client 0. A voice session was therefore owned by client 0
+whichever task opened it, the final `CloseLibrary()` never ended it, and the
+task could not send `ZZ9KCall()` uploads on its own session. From revision 44
+the Voice API calls and `ZZ9KCall()` carry the same id, so an opener can mix
+them on one session, and its release closes the session and frees its
+buffers. A task that never opened the library still sends client 0 on every
+path, so a worker without an opener keeps one id for both. Require
+`ZZ9K_LIBRARY_MIN_REVISION_VOICE_CLIENT_ID` (44) before an opener relies on
+either.
 
 Revision 41 removes the `ZZ9KApp*` calls (LVOs `-354` to `-414`: `ZZ9KAppOpen`,
 `LoadFile`, `LoadMemory`, `Start`, `Stop`, `Status`, `SendMessage`,
@@ -1461,6 +1475,13 @@ client falls back by opening again without the flag. `ZZ9KVoiceGetStatus()`
 fills the unchanged `ZZ9KVoiceStatus`; the jitter words come from
 `zz9k_voice_jitter_read()` on `session.status`.
 
+Every Voice API call and the buffers Open allocates carry the calling task's
+client id from revision 44, the id `ZZ9KCall()` sends. The firmware ties the
+session to the id of the Open and refuses a Close, Reset or Upload under any
+other id with `ZZ9K_STATUS_BAD_HANDLE`. Before revision 44 the Voice API sent
+client 0, so only a task without an opener could mix it with `ZZ9KCall()`
+uploads on one session.
+
 The mailbox opcodes are `ZZ9K_OP_AUDIO_VOICE_OPEN` (`0x0518`), `_CLOSE`
 (`0x0519`), `_RESET` (`0x051a`) and `_UPLOAD` (`0x051b`). The firmware sets
 `ZZ9K_SERVICE_FLAG_AUDIO_VOICE` on Zorro III and does not set it on Zorro II
@@ -2089,6 +2110,7 @@ Use the named minimum-revision constant whenever an application requires an LVO 
 | 41 | None | The `ZZ9KApp*` calls (`-354` to `-414`) are removed; the ARM app runtime is reached through `aar.library`, which carries its mailbox calls through `zz9k.library`; the vector table ended at `ZZ9KAudioStreamBeginEx` (`-348`) |
 | 42 | `ZZ9K_LIBRARY_MIN_REVISION_AUDIO_VOICE` | The voice engine calls `ZZ9KVoiceOpen()`, `ZZ9KVoiceClose()`, `ZZ9KVoiceReset()`, `ZZ9KVoiceUpload()`, `ZZ9KVoiceWrite()` and `ZZ9KVoiceGetStatus()` at `-354` to `-384`; the vector table ends at `ZZ9KVoiceGetStatus`. See [the voice engine guide](zz9k-voice.md) |
 | 43 | `ZZ9K_LIBRARY_MIN_REVISION_VOICE_LOW_LATENCY` | `ZZ9KVoiceOpen()` accepts `ZZ9K_VOICE_OPEN_FLAG_LOW_LATENCY`; no new calls. See [the voice engine guide](zz9k-voice.md) |
+| 44 | `ZZ9K_LIBRARY_MIN_REVISION_VOICE_CLIENT_ID` | Every request an opener's task makes carries its client id, the Voice API calls and their buffer allocations included; before, only `ZZ9KCall()` and `ZZ9KCallAsync()` did. A voice session is owned by its opener, and the opener's release closes it. No new calls. See [the voice engine guide](zz9k-voice.md) |
 
 ### Async submission and wait helpers
 

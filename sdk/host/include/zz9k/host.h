@@ -533,8 +533,9 @@ void zz9k_set_completion_dispatcher(ZZ9KContext *ctx,
                                     void *user_data);
 
 /*
- * Tags subsequent submissions from this context. A zero id leaves requests
- * unowned, preserving direct-mailbox client behavior.
+ * Tags every later request this context puts on the mailbox ring, from
+ * zz9k_submit(), zz9k_call() and the Voice API alike. A zero id leaves
+ * requests unowned, preserving direct-mailbox client behavior.
  */
 int zz9k_set_client_id(ZZ9KContext *ctx, uint16_t client_id);
 
