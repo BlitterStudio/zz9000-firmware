@@ -209,7 +209,7 @@ static void make_image(uint8_t image[IMAGE_BYTES])
     put32(image + 24, LOAD_OFF);
     put32(image + 28, PHOFF);
     put32(image + 32, SHOFF);
-    put32(image + 36, 0x400);             /* hard-float */
+    put32(image + 36, 0x05000400);       /* EABI 5, hard-float */
     put16(image + 40, 52);
     put16(image + 42, 32);
     put16(image + 44, 2);
@@ -967,7 +967,8 @@ static void test_note_v1_load_rules(void)
     memcpy(image + PHOFF + 64U, image + PHOFF + 32U, 32U);
     put16(image + 44U, 3U);
     assert(load_end(image) == AAR_E_INVAL);
-    /* A note in a section is found when no segment carries one. */
+    /* A note in a section header is not a note: spec 2.2.7 wants a PT_NOTE
+     * segment. */
     zzapp_boot_init();
     make_image(image);
     put32(image + PHOFF + 32U, 0U);
@@ -976,8 +977,84 @@ static void test_note_v1_load_rules(void)
     put32(image + SHOFF + 16U, NOTE_OFF);
     put32(image + SHOFF + 20U, TEST_NOTE_BYTES);
     put32(image + SHOFF + 36U, 0U);
-    assert(load_end(image) == AAR_OK);
-    zzapp_loader_release();
+    assert(load_end(image) == AAR_E_INVAL);
+}
+
+static unsigned refusal_failures;
+
+/* The image loads with `expected`; a refusal leaves the loader idle. */
+static void expect_load(const char *what, uint8_t image[IMAGE_BYTES],
+                        int expected)
+{
+    int rc;
+
+    zzapp_boot_init();
+    rc = load_end(image);
+    if (rc != expected) {
+        fprintf(stderr, "refusal case %s: got %d, wanted %d\n", what, rc, expected);
+        refusal_failures++;
+    }
+    if (rc == AAR_OK)
+        zzapp_loader_release();
+    else if (zzapp_loader_state() != ZZAPP_ST_IDLE)
+        refusal_failures++;
+}
+
+/* Spec 2.2 items 2, 5 and 6: e_flags, DT_RELR and the entry point. */
+static void test_elf_header_dynamic_and_entry_rules(void)
+{
+    static const struct {
+        const char *what;
+        uint32_t flags;
+        int expected;
+    } flags_cases[] = {
+        { "eabi5 hard", 0x05000400u, AAR_OK },
+        { "eabi4 hard", 0x04000400u, AAR_E_INVAL },
+        { "eabi0 hard", 0x00000400u, AAR_E_INVAL },
+        { "eabi6 hard", 0x06000400u, AAR_E_INVAL },
+        { "eabi5 soft", 0x05000200u, AAR_E_INVAL },
+        { "eabi5 no float flag", 0x05000000u, AAR_E_INVAL },
+        { "eabi5 soft and hard", 0x05000600u, AAR_E_INVAL },
+    };
+    static const uint32_t relr_tags[] = { 35u, 36u, 37u };
+    uint8_t image[IMAGE_BYTES];
+    unsigned i;
+
+    refusal_failures = 0U;
+    for (i = 0U; i < sizeof(flags_cases) / sizeof(flags_cases[0]); i++) {
+        make_image(image);
+        put32(image + 36, flags_cases[i].flags);
+        expect_load(flags_cases[i].what, image, flags_cases[i].expected);
+    }
+
+    /* DT_RELR, DT_RELRSZ and DT_RELRENT each refuse, beside a valid REL. */
+    for (i = 0U; i < sizeof(relr_tags) / sizeof(relr_tags[0]); i++) {
+        make_reloc_image(image, 0);
+        put32(image + DYN_OFF + 24, relr_tags[i]);
+        put32(image + DYN_OFF + 28, 0U);
+        expect_load("DT_RELR family", image, AAR_E_INVAL);
+    }
+
+    /* The entry must be in a PF_X segment, and A32 entries are even. */
+    make_image(image);
+    expect_load("entry at segment start", image, AAR_OK);
+    make_image(image);
+    put32(image + 24, LOAD_OFF + 0x40u);
+    expect_load("entry past the segment", image, AAR_E_INVAL);
+    make_image(image);
+    put32(image + 24, LOAD_OFF - 4u);
+    expect_load("entry before the segment", image, AAR_E_INVAL);
+    make_image(image);
+    put32(image + PHOFF + 24, 4u);                   /* PF_R only */
+    expect_load("entry in a non-executable segment", image, AAR_E_INVAL);
+    make_image(image);
+    put32(image + 24, LOAD_OFF + 1u);
+    expect_load("entry with bit 0 set", image, AAR_E_INVAL);
+    make_image(image);
+    put32(image + 24, LOAD_OFF + 2u);
+    expect_load("entry at an even offset", image, AAR_OK);
+    fprintf(stderr, "elf refusal rules: %u failures\n", refusal_failures);
+    assert(refusal_failures == 0U);
 }
 
 
@@ -1009,6 +1086,7 @@ int main(void)
     test_relocation_validation_is_sliced();
     test_relocation_allocation_and_zero_use_separate_passes();
     test_relocation_passes_are_bounded_and_flushed();
+    test_elf_header_dynamic_and_entry_rules();
     test_note_v1_load_rules();
     zzapp_boot_init();
     make_image(image);
@@ -1069,10 +1147,8 @@ int main(void)
     assert(load_end(image) == AAR_E_INVAL);
 
     zzapp_boot_init(); make_image(image);
-    put32(image + 24, 0u);
-    assert(load_end(image) == AAR_OK);
-    assert(zzapp_loader_have_image());
-    zzapp_loader_release();
+    put32(image + 24, 0u);                 /* outside every PF_X segment */
+    assert(load_end(image) == AAR_E_INVAL);
 
     zzapp_boot_init(); make_reloc_image(image, 1);
     put32(image + RELA_OFF + 4, 2);

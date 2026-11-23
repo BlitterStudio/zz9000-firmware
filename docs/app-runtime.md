@@ -540,9 +540,16 @@ minor words (`ZZAPP_ABI_MAJOR`, `ZZAPP_ABI_MINOR`).
 `AAR_GROUP_AUDIO`, `AAR_GROUP_GL` when the client capability word has the
 matching bit. `audio_stats` is `NULL`: the runtime keeps no underrun count.
 
+**Image rules.** The loader reads an ELF32 ARM `ET_DYN` image. `e_flags` must
+say EABI version 5 and hard float, and must not say soft float; any other
+value is `AAR_E_INVAL`. A dynamic section that names `DT_RELR`, `DT_RELRSZ`
+or `DT_RELRENT` is `AAR_E_INVAL`: only `R_ARM_RELATIVE` entries from `DT_REL`
+and `DT_RELA` are applied. `e_entry` must be even and inside a `PF_X` segment
+(`AAR_E_INVAL`).
+
 **Note v1.** An image must carry exactly one AAR note (owner `AAR`, type 1, a
-40-byte descriptor of ten little-endian words), found in a `PT_NOTE` segment or,
-when no segment holds one, in a note section. The loader checks, in the
+40-byte descriptor of ten little-endian words), found in a `PT_NOTE` segment.
+A note that only a section header names is not found. The loader checks, in the
 descriptor's order: magic `0x4E524141` and version 1 (`AAR_E_INVAL`); profile
 A32 (`AAR_E_PROFILE`); `api_major` 0 and `api_minor` at most 5
 (`AAR_E_INVAL`); `stack_bytes` 0 for the default 1 MiB, else 64 KiB to 1 MiB
