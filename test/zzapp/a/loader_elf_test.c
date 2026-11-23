@@ -213,6 +213,38 @@ static uint8_t *app_memory(uint32_t slot, uint32_t offset)
 }
 
 
+/* The dynamic section sits at DYN_OFF, 32 bytes. make_image gives it a bare
+ * DT_NULL; make_reloc_image names a relocation table in it. */
+#define DYN_OFF 0x0e0u
+#define DT_BYTES 32u
+
+static void put_dynamic_header(uint8_t *image, uint32_t dyn_off)
+{
+    uint8_t *ph = image + PHOFF + 64U;
+
+    put32(ph + 0, 2);                     /* PT_DYNAMIC */
+    put32(ph + 4, dyn_off);
+    put32(ph + 8, dyn_off);
+    put32(ph + 16, DT_BYTES);
+    put32(ph + 20, DT_BYTES);
+    put32(ph + 24, 4);                    /* PF_R */
+}
+
+/* Moves the program header table to `table_off`, which must have 128 bytes
+ * free, and adds a zeroed fourth header, returned. The first three are the
+ * ones make_image wrote (PT_LOAD, PT_NOTE, PT_DYNAMIC). The three slots
+ * below LOAD_OFF hold no more headers, and a test with two PT_LOAD segments
+ * needs the fourth. */
+static uint8_t *grow_phdrs(uint8_t *image, uint32_t table_off)
+{
+    memcpy(image + table_off, image + PHOFF, 3U * 32U);
+    memset(image + table_off + 3U * 32U, 0, 32U);
+    put32(image + 28, table_off);
+    put16(image + 44, 4);
+    put16(image + 48, 0);                 /* no section headers */
+    return image + table_off;
+}
+
 static void make_image(uint8_t image[IMAGE_BYTES])
 {
     uint8_t *ph;
@@ -230,7 +262,7 @@ static void make_image(uint8_t image[IMAGE_BYTES])
     put32(image + 36, 0x05000400);       /* EABI 5, hard-float */
     put16(image + 40, 52);
     put16(image + 42, 32);
-    put16(image + 44, 2);
+    put16(image + 44, 3);
     put16(image + 46, 40);
     put16(image + 48, 1);
 
@@ -249,6 +281,7 @@ static void make_image(uint8_t image[IMAGE_BYTES])
     note = image + NOTE_OFF;
     test_note_init(note);
 
+    put_dynamic_header(image, DYN_OFF);   /* an empty dynamic section */
     put32(image + 48, 0);                 /* no section headers */
 }
 
@@ -258,8 +291,6 @@ static void make_image(uint8_t image[IMAGE_BYTES])
  * dynamic section sits at `dyn_off` and names a REL or RELA table at
  * `table_va`, the third program header.
  */
-#define DYN_OFF 0x0e0u
-#define DT_BYTES 32u
 
 static void load0_from_file_start(uint8_t *image, uint32_t filesz,
                                   uint32_t memsz)
@@ -276,7 +307,6 @@ static void add_dynamic(uint8_t *image, uint32_t dyn_off, uint32_t table_va,
                         uint32_t table_bytes, int use_rela)
 {
     uint8_t *dyn = image + dyn_off;
-    uint8_t *ph = image + PHOFF + 64U;
 
     memset(dyn, 0, DT_BYTES);
     put32(dyn + 0, use_rela ? 7u : 17u);      /* DT_RELA / DT_REL */
@@ -285,13 +315,7 @@ static void add_dynamic(uint8_t *image, uint32_t dyn_off, uint32_t table_va,
     put32(dyn + 12, table_bytes);
     put32(dyn + 16, use_rela ? 9u : 19u);     /* DT_RELAENT / DT_RELENT */
     put32(dyn + 20, use_rela ? 12u : 8u);
-    put16(image + 44, 3);
-    put32(ph + 0, 2);                     /* PT_DYNAMIC */
-    put32(ph + 4, dyn_off);
-    put32(ph + 8, dyn_off);
-    put32(ph + 16, DT_BYTES);
-    put32(ph + 20, DT_BYTES);
-    put32(ph + 24, 4);                    /* PF_R */
+    put_dynamic_header(image, dyn_off);
 }
 
 /* One relocation of the word at LOAD_OFF, by RELA (addend in the entry) or
@@ -466,7 +490,8 @@ static void test_large_load_is_bounded_and_exact(void)
 static void test_uniform_megabyte_segments_map_as_sections(void)
 {
     const uint32_t text_bytes = 1U << 20;
-    const uint32_t image_bytes = LOAD_OFF + text_bytes;
+    const uint32_t table_off = LOAD_OFF + text_bytes;
+    const uint32_t image_bytes = table_off + 4U * 32U;
     const uint32_t section_memory = (7U << 12) | (1U << 16) |
                                     (1U << 3) | (1U << 2);
     uint8_t *image = calloc(1U, image_bytes);
@@ -479,22 +504,19 @@ static void test_uniform_megabyte_segments_map_as_sections(void)
 
     assert(image != NULL);
     make_image(image);
-    memcpy(image + PHOFF + 64U, image + PHOFF + 32U, 32U);
-    put16(image + 44U, 3U);
     put32(image + 24U, 0U);
-    load = image + PHOFF;
+    load = grow_phdrs(image, table_off);
     put32(load + 8U, 0U);
     put32(load + 16U, text_bytes);
     put32(load + 20U, text_bytes);
     put32(load + 24U, 5U);
-    load += 32U;
+    load += 3U * 32U;
     put32(load + 0U, 1U);
     put32(load + 4U, 0U);
     put32(load + 8U, 1U << 20);
     put32(load + 16U, 0U);
     put32(load + 20U, 1U << 20);
     put32(load + 24U, 6U);
-    put32(image + SHOFF + 4U, 0U);
     note = image + NOTE_OFF;
     test_note_set(note, TEST_NOTE_W_MIN_HEAP_MIB, 1U);
 
@@ -539,7 +561,8 @@ static void test_uniform_megabyte_segments_map_as_sections(void)
 static void test_page_mapped_flush_work_is_bounded(void)
 {
     const uint32_t segment_bytes = 512U * 1024U;
-    const uint32_t image_bytes = LOAD_OFF + segment_bytes;
+    const uint32_t table_off = LOAD_OFF + segment_bytes;
+    const uint32_t image_bytes = table_off + 4U * 32U;
     uint8_t *image = malloc(image_bytes);
     const uint32_t *l1;
     uint32_t offset;
@@ -547,20 +570,21 @@ static void test_page_mapped_flush_work_is_bounded(void)
     int rc;
 
     assert(image != NULL);
+    uint8_t *load;
+
     make_image(image);
-    memcpy(image + PHOFF + 64U, image + PHOFF + 32U, 32U);
-    put16(image + 44U, 3U);
-    put16(image + 48U, 0U);
-    put32(image + PHOFF + 8U, 0U);
-    put32(image + PHOFF + 16U, segment_bytes);
-    put32(image + PHOFF + 20U, segment_bytes);
-    put32(image + PHOFF + 24U, 5U);
-    put32(image + PHOFF + 32U, 1U);
-    put32(image + PHOFF + 36U, 0U);
-    put32(image + PHOFF + 40U, segment_bytes);
-    put32(image + PHOFF + 48U, 0U);
-    put32(image + PHOFF + 52U, segment_bytes);
-    put32(image + PHOFF + 56U, 6U);
+    load = grow_phdrs(image, table_off);
+    put32(load + 8U, 0U);
+    put32(load + 16U, segment_bytes);
+    put32(load + 20U, segment_bytes);
+    put32(load + 24U, 5U);
+    load += 3U * 32U;
+    put32(load + 0U, 1U);
+    put32(load + 4U, 0U);
+    put32(load + 8U, segment_bytes);
+    put32(load + 16U, 0U);
+    put32(load + 20U, segment_bytes);
+    put32(load + 24U, 6U);
     for (offset = 0U; offset < segment_bytes; offset++)
         image[LOAD_OFF + offset] = (uint8_t)(offset * 29U + 17U);
 
@@ -1007,8 +1031,7 @@ static void test_note_v1_load_rules(void)
     /* Two AAR notes (the same note named by two PT_NOTE segments). */
     zzapp_boot_init();
     make_image(image);
-    memcpy(image + PHOFF + 64U, image + PHOFF + 32U, 32U);
-    put16(image + 44U, 3U);
+    memcpy(grow_phdrs(image, 0x120U) + 3U * 32U, image + PHOFF + 32U, 32U);
     assert(load_end(image) == AAR_E_INVAL);
     /* A note in a section header is not a note: spec 2.2.7 wants a PT_NOTE
      * segment. */
@@ -1100,6 +1123,99 @@ static void test_elf_header_dynamic_and_entry_rules(void)
     assert(refusal_failures == 0U);
 }
 
+/* A RELA relocation of the word at `target`; the segment is the one
+ * make_reloc_image builds, with its memory size set to `memsz`. */
+static void rela_target_image(uint8_t image[IMAGE_BYTES], uint32_t target,
+                              uint32_t memsz)
+{
+    make_reloc_image(image, 1);
+    put32(image + PHOFF + 20, memsz);
+    put32(image + RELA_OFF + 0, target);
+}
+
+/* Spec 2.2 rules 4 and 5: exactly one PT_DYNAMIC even when the image has
+ * no relocations, and every relocation target lies inside the memory of a
+ * PT_LOAD segment, with room for the whole word. */
+static void test_dynamic_presence_and_relocation_targets(void)
+{
+    static const struct {
+        const char *what;
+        uint32_t target;
+        uint32_t memsz;
+        int expected;
+    } cases[] = {
+        { "first word of the segment", 0u, LOAD_OFF + 8u, AAR_OK },
+        { "last word of the file bytes", LOAD_OFF, LOAD_OFF + 8u, AAR_OK },
+        { "word in the bss tail", LOAD_OFF + 4u, LOAD_OFF + 8u, AAR_OK },
+        { "word just past the segment", LOAD_OFF + 8u, LOAD_OFF + 8u,
+          AAR_E_INVAL },
+        { "word far past the segment", LOAD_OFF + 0x40u, LOAD_OFF + 8u,
+          AAR_E_INVAL },
+        { "word straddling the segment end", LOAD_OFF + 4u, LOAD_OFF + 6u,
+          AAR_E_INVAL },
+        { "word outside the image frames", 0x300000u, LOAD_OFF + 8u,
+          AAR_E_INVAL },
+    };
+    uint8_t image[IMAGE_BYTES];
+    uint8_t *ph;
+    unsigned i;
+
+    refusal_failures = 0U;
+
+    make_image(image);
+    expect_load("empty PT_DYNAMIC", image, AAR_OK);
+    make_image(image);
+    put16(image + 44, 2);                     /* drop the PT_DYNAMIC header */
+    expect_load("no PT_DYNAMIC", image, AAR_E_INVAL);
+    make_image(image);
+    put32(image + PHOFF + 64U, 0U);           /* PT_DYNAMIC -> PT_NULL */
+    expect_load("PT_DYNAMIC turned into PT_NULL", image, AAR_E_INVAL);
+
+    for (i = 0U; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        rela_target_image(image, cases[i].target, cases[i].memsz);
+        expect_load(cases[i].what, image, cases[i].expected);
+    }
+    /* A REL entry: the target word is read from the image, so it must lie
+     * in the segment too. */
+    make_reloc_image(image, 0);
+    put32(image + RELA_OFF + 0, LOAD_OFF + 8u);
+    expect_load("REL word past the segment", image, AAR_E_INVAL);
+
+    /* A gap between two PT_LOAD segments is inside the span of the image's
+     * frames but in no segment. The first segment holds the relocation
+     * table (file offsets 0 to 0xe0), the second the code. */
+    for (i = 0U; i < 5U; i++) {
+        static const struct {
+            const char *what;
+            uint32_t target;
+            int expected;
+        } gap[5] = {
+            { "last word of the first segment", 0xdcu, AAR_OK },
+            { "word in the code segment", LOAD_OFF, AAR_OK },
+            { "first word of the gap", 0xe0u, AAR_E_INVAL },
+            { "word in the middle of the gap", 0xf0u, AAR_E_INVAL },
+            { "last word of the gap", 0xfcu, AAR_E_INVAL },
+        };
+
+        make_reloc_image(image, 1);
+        ph = grow_phdrs(image, 0x120U);
+        put32(ph + 16, 0xe0u);                /* first segment: R, to 0xe0 */
+        put32(ph + 20, 0xe0u);
+        put32(ph + 24, 4u);
+        ph += 3U * 32U;
+        put32(ph + 0, 1u);                    /* second segment: X at 0x100 */
+        put32(ph + 4, LOAD_OFF);
+        put32(ph + 8, LOAD_OFF);
+        put32(ph + 16, 4u);
+        put32(ph + 20, 8u);
+        put32(ph + 24, 1u);
+        put32(image + RELA_OFF + 0, gap[i].target);
+        expect_load(gap[i].what, image, gap[i].expected);
+    }
+    fprintf(stderr, "pt_dynamic and relocation target rules: %u failures\n",
+            refusal_failures);
+    assert(refusal_failures == 0U);
+}
 
 int main(void)
 {
@@ -1130,6 +1246,7 @@ int main(void)
     test_relocation_allocation_and_zero_use_separate_passes();
     test_relocation_passes_are_bounded_and_flushed();
     test_elf_header_dynamic_and_entry_rules();
+    test_dynamic_presence_and_relocation_targets();
     test_note_v1_load_rules();
     zzapp_boot_init();
     make_image(image);

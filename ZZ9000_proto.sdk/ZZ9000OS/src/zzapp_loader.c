@@ -1232,6 +1232,25 @@ static int vaddr_to_file(const struct load_image *img, uint32_t vaddr,
     return 0;
 }
 
+/* Spec 2.2 rule 5: a relocation target is a whole word inside the memory
+ * (p_vaddr up to p_vaddr + p_memsz) of one PT_LOAD segment. The image's
+ * frames also cover the gaps between segments and the page tail past the last
+ * one, which are not the image's own memory. */
+static int in_load_memory(const struct load_image *img, uint32_t vaddr,
+                          uint32_t bytes)
+{
+    uint32_t i;
+
+    for (i = 0; i < img->nseg; i++) {
+        const struct load_seg *seg = &img->seg[i];
+
+        if (vaddr >= seg->vaddr &&
+            range_ok(vaddr - seg->vaddr, bytes, seg->memsz))
+            return 1;
+    }
+    return 0;
+}
+
 /* PT_DYNAMIC: refuses DT_NEEDED and a PLT relocation table, and finds the
  * REL and RELA tables, whose DT values are virtual addresses inside a PT_LOAD
  * (needs the segments, so after they were read). A table that is named
@@ -1438,11 +1457,12 @@ static int parse_elf(struct load_image *img)
                 return AAR_E_INVAL;
         }
     }
-    if (have_dyn) {
-        rc = parse_dynamic(img, dyn_off, dyn_size);
-        if (rc != AAR_OK)
-            return rc;
-    }
+    /* Spec 2.2 rule 4: one PT_DYNAMIC even when there are no relocations. */
+    if (!have_dyn)
+        return AAR_E_INVAL;
+    rc = parse_dynamic(img, dyn_off, dyn_size);
+    if (rc != AAR_OK)
+        return rc;
     img->entry = rd32(eh + 24u);
     if (img->entry >= ZZAPP_MEM_PRIVATE_WINDOW_BYTES - img->stack_bytes)
         return AAR_E_INVAL;
@@ -1571,7 +1591,7 @@ static int prepare_loaded_image(void)
 
             if ((info & 0xffu) != R_ARM_RELATIVE || (info >> 8) != 0u ||
                 (roff & 3u) != 0u ||
-                !range_ok(roff, 4u, ZZAPP_MEM_PRIVATE_WINDOW_BYTES))
+                !in_load_memory(&g_image, roff, 4u))
                 return AAR_E_INVAL;
             memcpy(g_relocs + g_reloc_written, rel, 8u);
             memcpy(g_relocs + g_reloc_written + 8u, &kind, 4u);

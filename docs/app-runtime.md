@@ -560,10 +560,16 @@ them; on the AHI route the client consumes the ring and the word stays 0.
 
 **Image rules.** The loader reads an ELF32 ARM `ET_DYN` image. `e_flags` must
 say EABI version 5 and hard float, and must not say soft float; any other
-value is `AAR_E_INVAL`. A dynamic section that names `DT_RELR`, `DT_RELRSZ`
-or `DT_RELRENT` is `AAR_E_INVAL`: only `R_ARM_RELATIVE` entries from `DT_REL`
-and `DT_RELA` are applied. `e_entry` must be even and inside a `PF_X` segment
-(`AAR_E_INVAL`).
+value is `AAR_E_INVAL`. The image has exactly one `PT_DYNAMIC`, even when it
+has no relocations; without one, or with two, the load is `AAR_E_INVAL`. A
+dynamic section that names `DT_RELR`, `DT_RELRSZ` or `DT_RELRENT` is
+`AAR_E_INVAL`: only `R_ARM_RELATIVE` entries from `DT_REL` and `DT_RELA` are
+applied. The target of each entry (`r_offset`) must be a whole, 4-byte aligned
+word inside the memory of one `PT_LOAD` segment (`p_vaddr` up to `p_vaddr +
+p_memsz`); a target in a gap between segments, past the last segment's end, or
+straddling it is `AAR_E_INVAL`, and the check runs while the tables are
+extracted, before any byte is copied. `e_entry` must be even and inside a
+`PF_X` segment (`AAR_E_INVAL`).
 
 **Note v1.** An image must carry exactly one AAR note (owner `AAR`, type 1, a
 40-byte descriptor of ten little-endian words), found in a `PT_NOTE` segment.
