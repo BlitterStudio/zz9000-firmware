@@ -766,6 +766,88 @@ static void test_core0_image_begin_never_waits_for_loader_guard(void)
     CHECK(munmap(slot, 2U << 20) == 0);
 }
 
+const zzm_services_t *zzm_runtime_services_v3(void)
+{
+    static zzm_services_t services;
+
+    return &services;
+}
+
+static void acquire_minigl(void)
+{
+    unsigned passes = 0U;
+    int result;
+
+    do {
+        result = zzm_loader_acquire(ZZM_MODULE_MINIGL);
+        passes++;
+    } while (result == ZZM_LOAD_IN_PROGRESS && passes < 64U);
+    CHECK(result == ZZM_LOAD_READY);
+}
+
+/* A release core 0 deferred belongs to the module lifetime it was made in.
+ * When core 1 restarts before a poll applies it, the new lifetime must keep
+ * every reference its clients took. */
+static void test_core0_deferred_release_dies_with_its_module_lifetime(void)
+{
+    const uint32_t image_size = 16U;
+    uint8_t file[ZZM_V3_HEADER_SIZE + 16U] = { 0 };
+    zzm_v3_header_t header = valid_v3_header(image_size);
+    zzm_v3_capabilities_t caps = valid_v3_capabilities();
+    void *slot;
+
+    memcpy(file, &header, sizeof(header));
+    file[ZZM_V3_HEADER_SIZE] = 0x31U; /* xor %eax, %eax */
+    file[ZZM_V3_HEADER_SIZE + 1U] = 0xc0U;
+    file[ZZM_V3_HEADER_SIZE + 2U] = 0xc3U; /* ret */
+    slot = mmap((void *)(uintptr_t)header.slot_load_address, 2U << 20,
+                PROT_READ | PROT_WRITE | PROT_EXEC,
+                MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0);
+    CHECK(slot != MAP_FAILED);
+    if (slot == MAP_FAILED)
+        return;
+    loader_open_result = FR_OK;
+    set_loader_file(file, sizeof(file), 1);
+    zzm_loader_set_v3_capabilities(&caps);
+    zzm_loader_boot_load();
+    acquire_minigl();
+    CHECK(module_ref_count(ZZM_MODULE_MINIGL) == 1U);
+
+    /* Core 0 releases while core 1 holds the guard; core 1 then faults, and
+     * the restart discards the module before any poll applies the release. */
+    hold_guard_on_core1();
+    zzm_loader_release(ZZM_MODULE_MINIGL);
+    CHECK(module_ref_count(ZZM_MODULE_MINIGL) == 1U);
+    release_guard_on_core1();
+    zzm_loader_forget_core1_modules();
+    CHECK(module_ref_count(ZZM_MODULE_MINIGL) == 0U);
+    acquire_minigl();
+    CHECK(module_ref_count(ZZM_MODULE_MINIGL) == 1U);
+    zzm_loader_poll(1U);
+    CHECK(module_ref_count(ZZM_MODULE_MINIGL) == 1U);
+
+    /* A release that finds the module no longer loaded has no reference
+     * left to drop and must not wait for the next lifetime either. */
+    zzm_loader_forget_core1_modules();
+    hold_guard_on_core1();
+    zzm_loader_release(ZZM_MODULE_MINIGL);
+    release_guard_on_core1();
+    acquire_minigl();
+    zzm_loader_poll(2U);
+    CHECK(module_ref_count(ZZM_MODULE_MINIGL) == 1U);
+
+    /* A release deferred in the live lifetime still lands. */
+    hold_guard_on_core1();
+    zzm_loader_release(ZZM_MODULE_MINIGL);
+    release_guard_on_core1();
+    zzm_loader_poll(3U);
+    CHECK(module_ref_count(ZZM_MODULE_MINIGL) == 0U);
+
+    zzm_loader_boot_load();
+    zzm_loader_set_v3_capabilities(NULL);
+    CHECK(munmap(slot, 2U << 20) == 0);
+}
+
 int main(int argc, char **argv)
 {
     uint8_t image[16] = { 1, 2, 3, 4 };
@@ -860,6 +942,7 @@ int main(int argc, char **argv)
     test_v1_codec_begin_requeues_until_loaded();
     test_core0_video_begin_never_waits_for_loader_guard();
     test_core0_image_begin_never_waits_for_loader_guard();
+    test_core0_deferred_release_dies_with_its_module_lifetime();
     if (argc == 2)
         check_kit_minigl(argv[1]);
     loader_open_calls = 0U;

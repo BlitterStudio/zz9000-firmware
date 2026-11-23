@@ -150,8 +150,12 @@ that core 0 makes while the guard is held returns `SDK_TASK_IN_PROGRESS`
 (65534) at once, before it touches any module state, and the Amiga side
 retries as it does for any load in progress. A reference release that core 0
 makes while the guard is held stays counted and is applied by the next
-main-loop poll that gets the guard. Retries of an in-progress begin are not
-logged; failures still are.
+main-loop poll that gets the guard. It is applied only if the module is still
+in the loaded lifetime it was made in: a release for a module that is not
+loaded is dropped, and one still pending when the lifetime ends (unload,
+fault, failed load, cancel, core-1 restart) is discarded, so it never takes a
+reference from the next load of that module. Retries of an in-progress begin
+are not logged; failures still are.
 
 Defining `ZZM_LOAD_BENCH` enables a firmware-only load instrument that times
 each load step on core 1 and keeps the longest step per module and phase. The

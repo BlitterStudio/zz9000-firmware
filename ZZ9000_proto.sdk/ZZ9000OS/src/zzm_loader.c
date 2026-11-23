@@ -37,6 +37,9 @@ static uint8_t module_dependencies[ZZM_MODULE_MAX][ZZM_V3_MAX_SERVICE_REQUIREMEN
 static uint8_t module_dependency_count[ZZM_MODULE_MAX];
 static uint8_t module_dependencies_held[ZZM_MODULE_MAX];
 static uint64_t module_idle_since[ZZM_MODULE_MAX];
+/* Bumped by every status change, so any end of a lifetime (unload, fault,
+ * failed load, cancel, core-1 restart) changes it. */
+static volatile uint32_t module_lifetime[ZZM_MODULE_MAX];
 static uint64_t last_poll_ms;
 static int (*storage_idle)(void);
 static int (*load_dispatch)(uint32_t module_id);
@@ -120,8 +123,11 @@ enum zzm_loader_test_work zzm_loader_test_work_kind(void)
  * masks local IRQs, so core 0 must never wait for it (see
  * zzm_loader_session_begin_enter). */
 static sdk_smp_lock_t session_begin_lock = SDK_SMP_LOCK_INIT;
-/* Releases core 0 requested while core 1 held the lock; poll applies them. */
-static volatile uint32_t deferred_releases[ZZM_MODULE_MAX];
+/* Releases core 0 requested while core 1 held the lock; poll applies them.
+ * Only core 0 touches these.  Each count belongs to the module lifetime in
+ * deferred_lifetime and is dropped if that lifetime has ended. */
+static uint32_t deferred_releases[ZZM_MODULE_MAX];
+static uint32_t deferred_lifetime[ZZM_MODULE_MAX];
 
 /* Core-1 loader work (load steps, cancel) may wait: nothing else runs there
  * while it does. */
@@ -182,6 +188,7 @@ static void status_from_slot(uint32_t index, enum zzm_state state,
         status->image_size = header->image_size;
         status->bss_size = header->bss_size;
     }
+    module_lifetime[index]++;
 }
 
 
@@ -207,6 +214,7 @@ static void status_from_v3_slot(uint32_t index, enum zzm_state state,
         status->image_size = header->image_size;
         status->bss_size = header->bss_size;
     }
+    module_lifetime[index]++;
 }
 
 static const char *boot_status_reason(enum zzm_state state)
@@ -1462,8 +1470,17 @@ void zzm_loader_release(uint32_t module_id)
         return;
     if (!zzm_loader_session_begin_enter()) {
         /* Core 0 while core 1 is mid-load: keep the reference counted and
-         * let the next poll pass that gets the guard drop it. */
-        __sync_fetch_and_add(&deferred_releases[index], 1U);
+         * let the next poll pass that gets the guard drop it.  Only a live
+         * reference can be released later; a module that is not loaded has
+         * lost it already. */
+        if (module_status[index].state == ZZM_STATE_LOADED &&
+            module_status[index].ref_count != 0U) {
+            if (deferred_lifetime[index] != module_lifetime[index]) {
+                deferred_releases[index] = 0U;
+                deferred_lifetime[index] = module_lifetime[index];
+            }
+            deferred_releases[index]++;
+        }
         return;
     }
     release_locked((uint32_t)index);
@@ -1480,10 +1497,15 @@ void zzm_loader_poll(uint64_t now_ms)
         return;
     last_poll_ms = now_ms;
     for (i = 0; i < zzm_slot_count; i++) {
-        while (deferred_releases[i] != 0U) {
-            __sync_fetch_and_sub(&deferred_releases[i], 1U);
+        uint32_t pending = deferred_releases[i];
+
+        deferred_releases[i] = 0U;
+        /* A release counted against a lifetime that has since ended (fault
+         * restart, cancel, unload, failed load) has nothing left to drop. */
+        if (deferred_lifetime[i] != module_lifetime[i])
+            continue;
+        while (pending-- != 0U)
             release_locked(i);
-        }
     }
     for (i = 0; i < zzm_slot_count; i++) {
         uint32_t idle_ms;
