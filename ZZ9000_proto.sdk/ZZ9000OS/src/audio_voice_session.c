@@ -270,6 +270,30 @@ static void publish_status(void)
 
 /* ---- render ---- */
 
+/* Render one period at `produced` and publish it to the ISR. */
+static void render_period(void)
+{
+	uint64_t produced = g_s.produced;
+	uint8_t *out = g_staging + (uint32_t)(produced % STAGING_BYTES);
+	size_t used;
+	uint32_t irq_state;
+
+	used = audio_voice_render(&g_engine, (int16_t *)(void *)out,
+		AUDIO_VOICE_PERIOD_FRAMES, g_queue + g_s.queue_head,
+		g_s.queue_count);
+	g_s.queue_head += (uint32_t)used;
+	g_s.queue_count -= (uint32_t)used;
+	if (g_s.queue_count == 0U)
+		g_s.queue_head = 0U;
+	Xil_DCacheFlushRange((INTPTR)out, PERIOD_BYTES);
+	if (g_s.slot_live)
+		g_s.period_stamp[(produced / PERIOD_BYTES) %
+			STAGING_PERIODS] = now_ticks();
+	irq_state = smp_local_irq_save();
+	g_s.produced = produced + PERIOD_BYTES;
+	smp_local_irq_restore(irq_state);
+}
+
 /*
  * Render whole periods into the staging ring while the engine is less than
  * the granted lead past the playing frame. The rendered-but-unstaged
@@ -280,30 +304,12 @@ static void publish_status(void)
 static void render_to_lead(void)
 {
 	for (;;) {
-		uint64_t produced = g_s.produced;
 		uint32_t playing =
 			(uint32_t)(read_cursor64(&g_s.retired) / 4U);
-		uint8_t *out;
-		size_t used;
-		uint32_t irq_state;
 
 		if (g_engine.frame - playing >= g_s.lead)
 			break;
-		out = g_staging + (uint32_t)(produced % STAGING_BYTES);
-		used = audio_voice_render(&g_engine, (int16_t *)(void *)out,
-			AUDIO_VOICE_PERIOD_FRAMES, g_queue + g_s.queue_head,
-			g_s.queue_count);
-		g_s.queue_head += (uint32_t)used;
-		g_s.queue_count -= (uint32_t)used;
-		if (g_s.queue_count == 0U)
-			g_s.queue_head = 0U;
-		Xil_DCacheFlushRange((INTPTR)out, PERIOD_BYTES);
-		if (g_s.slot_live)
-			g_s.period_stamp[(produced / PERIOD_BYTES) %
-				STAGING_PERIODS] = now_ticks();
-		irq_state = smp_local_irq_save();
-		g_s.produced = produced + PERIOD_BYTES;
-		smp_local_irq_restore(irq_state);
+		render_period();
 	}
 }
 
@@ -585,6 +591,14 @@ uint16_t audio_voice_session_reset(uint32_t session)
 		 * from there, so the frame counter never goes backwards past
 		 * a frame the client was told was rendered and still agrees
 		 * with produced / 4.
+		 *
+		 * The first silent period is rendered before the interrupts
+		 * come back: the formatter ISR runs on this core and takes
+		 * one period per tick, so a tick landing between the cursor
+		 * reset and the first render would find nothing staged and
+		 * count a voice underrun for a stream the client just
+		 * flushed. The rest of the lead is rendered with interrupts
+		 * on; a tick needs one period at a time.
 		 */
 		irq_state = smp_local_irq_save();
 		audio_fabric_request_rebuild(VOICE_SLOT);
@@ -593,6 +607,7 @@ uint16_t audio_voice_session_reset(uint32_t session)
 		g_s.produced = consumed;
 		g_s.retired = consumed;
 		g_engine.frame = (uint32_t)(consumed / 4U);
+		render_period();
 		smp_local_irq_restore(irq_state);
 		render_to_lead();
 	}

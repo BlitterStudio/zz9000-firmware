@@ -29,8 +29,33 @@ uint64_t bench_clock;
 
 uint32_t smp_local_irq_save(void);
 void smp_local_irq_restore(uint32_t saved_i_bit);
-uint32_t smp_local_irq_save(void) { return 0U; }
-void smp_local_irq_restore(uint32_t saved_i_bit) { (void)saved_i_bit; }
+
+/*
+ * IRQ model: save masks and returns the previous mask, restore puts it
+ * back. A test arms g_irq_unmask_hook to run the fabric ISR at the first
+ * point the core-0 main loop is interruptible again, once.
+ */
+static uint32_t g_irq_masked;
+static void (*g_irq_unmask_hook)(void);
+
+uint32_t smp_local_irq_save(void)
+{
+	uint32_t was = g_irq_masked;
+
+	g_irq_masked = 1U;
+	return was;
+}
+
+void smp_local_irq_restore(uint32_t saved_i_bit)
+{
+	g_irq_masked = saved_i_bit;
+	if (saved_i_bit == 0U && g_irq_unmask_hook != NULL) {
+		void (*hook)(void) = g_irq_unmask_hook;
+
+		g_irq_unmask_hook = NULL;
+		hook();
+	}
+}
 
 #define RING_RECORDS 256U
 #define RING_LEN (AUDIO_VOICE_RING_HEADER_BYTES + \
@@ -1412,6 +1437,93 @@ static void scenario_reset(void)
 	      fmt("state=%u", st_state()));
 }
 
+/*
+ * The fabric ISR lands the moment the reset's critical section ends,
+ * before the main loop has rendered anything: the slot must already hold
+ * a staged (silent) period, so the tick counts no underrun and plays
+ * silence for the voice.
+ */
+static int g_tick_peer;
+
+static void isr_tick_after_unmask(void)
+{
+	if (g_tick_peer)
+		lease_publish();
+	dma_tick(1);
+	audio_fabric_isr();
+}
+
+static void reset_isr_case(uint32_t lead, int peer)
+{
+	const int16_t quiet = peer ? (int16_t)PEER_PCM : (int16_t)0;
+	char name[96];
+	uint32_t underruns_before;
+	uint32_t playing_before;
+	uint32_t pos;
+	uint32_t k;
+	int silent = 1;
+
+	fresh();
+	if (peer)
+		lease_start();
+	check(open_session(lead, 4U) == SDK_STATUS_OK, "reset isr: open", "");
+	(void)upload_ramp(g_grant.session);
+	rec_start_ramp(960U * 2U, 0U);
+	publish();
+	if (peer)
+		peer_run(20);
+	else
+		run(20);
+	underruns_before = st_underruns();
+	playing_before = st_playing();
+	check(underruns_before == 0U, "reset isr: clean before the reset",
+	      fmt("underruns=%u", underruns_before));
+	g_tick_peer = peer;
+	g_irq_unmask_hook = isr_tick_after_unmask;
+	check(audio_voice_session_reset(g_grant.session) == SDK_STATUS_OK,
+	      "reset isr: ok", "");
+	check(g_irq_unmask_hook == NULL, "reset isr: the tick ran", "");
+	snprintf(name, sizeof(name),
+	      "reset isr: lead %u peer %d, ISR right after the reset counts no underrun",
+	      lead, peer);
+	check(audio_fabric_slot_underruns(AUDIO_FABRIC_SLOT_VOICE) == 0U &&
+	      st_underruns() == 0U, name,
+	      fmt("fabric=%u status=%u",
+	      audio_fabric_slot_underruns(AUDIO_FABRIC_SLOT_VOICE),
+	      st_underruns()));
+	/* The queued periods ahead of the DMA (the five
+	 * voice_periods_ahead() inspects) play silence for the voice. */
+	pos = dma_period();
+	for (k = 1U; k <= 5U; k++) {
+		if (!period_all(tx_period(pos + k), quiet))
+			silent = 0;
+	}
+	check(silent, "reset isr: the periods after the reset are silent",
+	      fmt("lead %u peer %d", lead, peer));
+	check(st_playing() >= playing_before,
+	      "reset isr: the playing frame never goes backwards",
+	      fmt("playing %u -> %u", playing_before, st_playing()));
+	/* The session keeps running cleanly afterwards. */
+	if (peer)
+		peer_run(10);
+	else
+		run(10);
+	check(st_underruns() == 0U && st_state() == AUDIO_VOICE_STATE_LIVE,
+	      "reset isr: no underrun afterwards, session stays live",
+	      fmt("underruns=%u", st_underruns()));
+	check(st_horizon() - st_playing() == g_grant.lead_frames,
+	      "reset isr: the lead is restored",
+	      fmt("horizon=%u playing=%u", st_horizon(), st_playing()));
+}
+
+static void scenario_reset_isr(void)
+{
+	reset_isr_case(7680U, 0);
+	reset_isr_case(7680U, 1);
+	reset_isr_case(24000U, 0);
+	reset_isr_case(24000U, 1);
+}
+
 /* ---- E. staged periods survive a peer detach ---- */
 
 static void scenario_peer_detach(uint32_t lead)
@@ -2163,6 +2275,7 @@ int main(void)
 	scenario_ll_end();
 	scenario_status();
 	scenario_reset();
+	scenario_reset_isr();
 	scenario_peer_detach(7680U);
 	scenario_peer_detach(24000U);
 	scenario_heartbeat();
