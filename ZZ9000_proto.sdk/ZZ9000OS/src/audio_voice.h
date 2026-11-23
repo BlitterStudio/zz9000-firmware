@@ -197,6 +197,11 @@ struct audio_voice {
 	int32_t gain_r;
 	int32_t inc_l;
 	int32_t inc_r;
+	/* Render state, no meaning between render calls: the frames of the
+	 * current chunk this voice has been mixed to, and for a fade slot
+	 * the engine frame at which it ends. */
+	uint32_t cur;
+	uint32_t die;
 };
 
 struct audio_voice_engine {
@@ -216,11 +221,18 @@ struct audio_voice_engine {
 	struct audio_voice fade[AUDIO_VOICE_FADE_SLOTS];
 	uint32_t fade_age[AUDIO_VOICE_FADE_SLOTS];
 	struct audio_voice_sample sample[AUDIO_VOICE_MAX_SAMPLES];
-	/* Scratch of audio_voice_render(), no state: the int32 sum of the
-	 * voices per side (left, right), and the samples of the voice being
-	 * ramped, for one chunk of frames. */
+	/* Scratch of audio_voice_render(), no state between calls: the int32
+	 * sum of the voices per side (left, right), and the samples of the
+	 * voice being ramped, for one chunk of frames; and the chunk being
+	 * rendered (see audio_voice.c, "Rendering a chunk"). */
 	int32_t mix[2][AUDIO_VOICE_MIX_FRAMES];
 	int32_t smp[2][AUDIO_VOICE_MIX_FRAMES];
+	int16_t *chunk_out;
+	uint32_t chunk_n;     /* frames of the chunk */
+	uint32_t chunk_abs;   /* engine frame of its first frame */
+	uint32_t chunk_fin;   /* frames already scaled into the output */
+	uint32_t chunk_off;   /* frame of the chunk the next record applies at */
+	int chunk_dirty;      /* the sums were cleared and may hold sound */
 };
 
 /*
