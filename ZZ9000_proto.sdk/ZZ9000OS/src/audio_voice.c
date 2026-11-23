@@ -1448,131 +1448,313 @@ static void cubic_interior(const int wide, const int stereo,
 }
 
 #ifdef AV_NEON_READ
-/* cubic_interp() on four frames: VQRDMULH by t << 15 is (u * t + 2^15) >> 16
- * and by t << 14 is (u * t + 2^16) >> 17, each with a 64-bit product. */
-AV_INLINE int32x4_t cubic4(int32x4_t a, int32x4_t b, int32x4_t c,
-                           int32x4_t d, int32x4_t t15, int32x4_t t14)
+/*
+ * cubic_interp() on four frames, one side, from the four taps as S16 (8-bit
+ * data promoted by 8 bits first): the differences are widening operations on
+ * the S16 taps, VQRDMULH by t << 15 is (u * t + 2^15) >> 16 and by t << 14 is
+ * (u * t + 2^16) >> 17, each with a 64-bit product. kk is { 3, 2, 0, 0 }.
+ * cubic4w2() is two sides at once with their steps interleaved: the chain of
+ * three dependent multiplies is a long wait on the A9.
+ */
+AV_INLINE int32x4_t cubic4w(const int16x4_t kk, const int16x4_t a,
+                            const int16x4_t b, const int16x4_t c,
+                            const int16x4_t d, const int32x4_t t15,
+                            const int32x4_t t14)
 {
-	const int32x4_t c1 = vsubq_s32(c, a);
-	const int32x4_t c3 = vmlaq_s32(vsubq_s32(d, a), vsubq_s32(b, c),
-	                               vdupq_n_s32(3));
-	const int32x4_t c2 = vsubq_s32(
-		vmlsq_s32(vaddq_s32(a, c), b, vdupq_n_s32(2)), c3);
-	int32x4_t u = vqrdmulhq_s32(c3, t15);
+	int32x4_t d1 = vsubl_s16(c, a);
+	int32x4_t d3 = vsubl_s16(d, a);
+	int32x4_t d2 = vaddl_s16(a, c);
+	int32x4_t u;
 
-	u = vqrdmulhq_s32(vaddq_s32(c2, u), t15);
-	u = vqrdmulhq_s32(vaddq_s32(c1, u), t14);
-	return vaddq_s32(b, u);
+	d3 = vmlal_lane_s16(d3, b, kk, 0);
+	d2 = vmlsl_lane_s16(d2, b, kk, 1);
+	d3 = vmlsl_lane_s16(d3, c, kk, 0);
+	d2 = vsubq_s32(d2, d3);
+	u = vqrdmulhq_s32(d3, t15);
+	u = vqrdmulhq_s32(vaddq_s32(d2, u), t15);
+	u = vqrdmulhq_s32(vaddq_s32(d1, u), t14);
+	return vaddw_s16(u, b);
 }
 
-/* gather4() with 8-bit data promoted by 8 bits. */
-AV_INLINE void gather4p(const int wide, const int stereo, const uint8_t *q0,
-                        const uint8_t *q1, const uint8_t *q2,
-                        const uint8_t *q3, int32x4_t *l, int32x4_t *r)
+AV_INLINE void cubic4w2(const int16x4_t kk, const int16x4_t al,
+                        const int16x4_t bl, const int16x4_t cl,
+                        const int16x4_t dl, const int16x4_t ar,
+                        const int16x4_t br, const int16x4_t cr,
+                        const int16x4_t dr, const int32x4_t t15,
+                        const int32x4_t t14, int32x4_t *ol, int32x4_t *orr)
 {
-	gather4(wide, stereo, q0, q1, q2, q3, l, r);
-	if (!wide) {
-		*l = vshlq_n_s32(*l, 8);
-		*r = vshlq_n_s32(*r, 8);
-	}
+	int32x4_t d1l = vsubl_s16(cl, al), d1r = vsubl_s16(cr, ar);
+	int32x4_t d3l = vsubl_s16(dl, al), d3r = vsubl_s16(dr, ar);
+	int32x4_t d2l = vaddl_s16(al, cl), d2r = vaddl_s16(ar, cr);
+	int32x4_t ul, ur;
+
+	d3l = vmlal_lane_s16(d3l, bl, kk, 0);
+	d3r = vmlal_lane_s16(d3r, br, kk, 0);
+	d2l = vmlsl_lane_s16(d2l, bl, kk, 1);
+	d2r = vmlsl_lane_s16(d2r, br, kk, 1);
+	d3l = vmlsl_lane_s16(d3l, cl, kk, 0);
+	d3r = vmlsl_lane_s16(d3r, cr, kk, 0);
+	d2l = vsubq_s32(d2l, d3l);
+	d2r = vsubq_s32(d2r, d3r);
+	ul = vqrdmulhq_s32(d3l, t15);
+	ur = vqrdmulhq_s32(d3r, t15);
+	ul = vqrdmulhq_s32(vaddq_s32(d2l, ul), t15);
+	ur = vqrdmulhq_s32(vaddq_s32(d2r, ur), t15);
+	ul = vqrdmulhq_s32(vaddq_s32(d1l, ul), t14);
+	ur = vqrdmulhq_s32(vaddq_s32(d1r, ur), t14);
+	*ol = vaddw_s16(ul, bl);
+	*orr = vaddw_s16(ur, br);
+}
+
+/* Four rows of four S16 (one row a frame, one column a tap) transposed:
+ * mem[j] holds the j-th lowest-address tap of each of the four frames. */
+AV_INLINE void transpose4h(const int16x4_t f0, const int16x4_t f1,
+                           const int16x4_t f2, const int16x4_t f3,
+                           int16x4_t mem[4])
+{
+	const int16x4x2_t xa = vtrn_s16(f0, f1);
+	const int16x4x2_t xb = vtrn_s16(f2, f3);
+	const int32x2x2_t z0 = vtrn_s32(vreinterpret_s32_s16(xa.val[0]),
+	                                vreinterpret_s32_s16(xb.val[0]));
+	const int32x2x2_t z1 = vtrn_s32(vreinterpret_s32_s16(xa.val[1]),
+	                                vreinterpret_s32_s16(xb.val[1]));
+
+	mem[0] = vreinterpret_s16_s32(z0.val[0]);
+	mem[1] = vreinterpret_s16_s32(z1.val[0]);
+	mem[2] = vreinterpret_s16_s32(z0.val[1]);
+	mem[3] = vreinterpret_s16_s32(z1.val[1]);
 }
 
 /*
- * Four interior frames: the taps of each frame gathered (gather4p), the
- * curve of the left and right side, and the result added to the sums at al
- * and ar. vvl and vvr are the volumes of the four frames shifted up by 15:
- * VQDMULH doubles the product and keeps the high half, so (sample * (volume
- * << 15)) * 2 >> 32 is (sample * volume) >> 16, exact, with no overflow
- * for a sample of at most AV_CUBIC_PEAK (volume << 15 stays below 2^31). x
- * is the fraction of the first frame, t its four fractions.
+ * The taps a, b, c and d (tl[0] to tl[3], left; tr[], right) of four
+ * interior frames, as S16: the frames at x0 to x3 (16.16, relative to p).
+ * The four taps of a frame are neighbours in memory (going back one frame
+ * forward and two backward), so one load of the four of them gets everything
+ * of a frame; the loads of the four frames are transposed instead of
+ * gathered a lane at a time. Backward, the lowest address is the last tap.
  */
-AV_INLINE void cubic_block(const int wide, const int stereo, const int sides,
-                           const uint8_t *restrict p, const int32_t x,
-                           const int32_t dx, const int32_t nb,
-                           const int32x4_t lane, int32x4_t vvl,
-                           int32x4_t vvr, int32_t *restrict al,
-                           int32_t *restrict ar)
+AV_INLINE void cubic_load4(const int wide, const int stereo, const int back,
+                           const uint8_t *p, const int32_t x0,
+                           const int32_t x1, const int32_t x2,
+                           const int32_t x3, int16x4_t tl[4],
+                           int16x4_t tr[4])
 {
 	const int fs = wide + stereo;
-	const uint8_t *q0 = p + (x >> 16) * (1 << fs);
-	const uint8_t *q1 = p + ((x + dx) >> 16) * (1 << fs);
-	const uint8_t *q2 = p + ((x + 2 * dx) >> 16) * (1 << fs);
-	const uint8_t *q3 = p + ((x + 3 * dx) >> 16) * (1 << fs);
-	const int32x4_t t = vandq_s32(vmlaq_s32(vdupq_n_s32(x), lane,
-	                                        vdupq_n_s32(dx)),
-	                              vdupq_n_s32(0xFFFF));
-	const int32x4_t t15 = vshlq_n_s32(t, 15);
-	const int32x4_t t14 = vshlq_n_s32(t, 14);
-	int32x4_t ta_l, ta_r, tb_l, tb_r, tc_l, tc_r, td_l, td_r;
+	const int32_t lo = (back ? -2 : -1) * (1 << fs);
+	const uint8_t *const q0 = p + (x0 >> 16) * (1 << fs) + lo;
+	const uint8_t *const q1 = p + (x1 >> 16) * (1 << fs) + lo;
+	const uint8_t *const q2 = p + (x2 >> 16) * (1 << fs) + lo;
+	const uint8_t *const q3 = p + (x3 >> 16) * (1 << fs) + lo;
+	int16x4_t ml[4], mr[4];
 
-	gather4p(wide, stereo, q0 - nb, q1 - nb, q2 - nb, q3 - nb, &ta_l, &ta_r);
-	gather4p(wide, stereo, q0, q1, q2, q3, &tb_l, &tb_r);
-	gather4p(wide, stereo, q0 + nb, q1 + nb, q2 + nb, q3 + nb, &tc_l, &tc_r);
-	gather4p(wide, stereo, q0 + 2 * nb, q1 + 2 * nb, q2 + 2 * nb,
-	         q3 + 2 * nb, &td_l, &td_r);
-	if (sides & 1) {
-		const int32x4_t o = cubic4(ta_l, tb_l, tc_l, td_l, t15, t14);
+	if (wide && stereo) {
+		const int16x8x2_t pa = vtrnq_s16(
+			vreinterpretq_s16_u8(vld1q_u8(q0)),
+			vreinterpretq_s16_u8(vld1q_u8(q1)));
+		const int16x8x2_t pb = vtrnq_s16(
+			vreinterpretq_s16_u8(vld1q_u8(q2)),
+			vreinterpretq_s16_u8(vld1q_u8(q3)));
+		const int32x4x2_t zl = vtrnq_s32(vreinterpretq_s32_s16(pa.val[0]),
+		                                 vreinterpretq_s32_s16(pb.val[0]));
+		const int32x4x2_t zr = vtrnq_s32(vreinterpretq_s32_s16(pa.val[1]),
+		                                 vreinterpretq_s32_s16(pb.val[1]));
+		const int16x8_t l02 = vreinterpretq_s16_u8(
+			vrev16q_u8(vreinterpretq_u8_s32(zl.val[0])));
+		const int16x8_t l13 = vreinterpretq_s16_u8(
+			vrev16q_u8(vreinterpretq_u8_s32(zl.val[1])));
+		const int16x8_t r02 = vreinterpretq_s16_u8(
+			vrev16q_u8(vreinterpretq_u8_s32(zr.val[0])));
+		const int16x8_t r13 = vreinterpretq_s16_u8(
+			vrev16q_u8(vreinterpretq_u8_s32(zr.val[1])));
+
+		ml[0] = vget_low_s16(l02);
+		ml[1] = vget_low_s16(l13);
+		ml[2] = vget_high_s16(l02);
+		ml[3] = vget_high_s16(l13);
+		mr[0] = vget_low_s16(r02);
+		mr[1] = vget_low_s16(r13);
+		mr[2] = vget_high_s16(r02);
+		mr[3] = vget_high_s16(r13);
+	} else if (wide) {
+		/* mono S16: 8 bytes a frame */
+		int16x4_t m[4];
+
+		transpose4h(vreinterpret_s16_u8(vld1_u8(q0)),
+		            vreinterpret_s16_u8(vld1_u8(q1)),
+		            vreinterpret_s16_u8(vld1_u8(q2)),
+		            vreinterpret_s16_u8(vld1_u8(q3)), m);
+		ml[0] = vreinterpret_s16_u8(vrev16_u8(vreinterpret_u8_s16(m[0])));
+		ml[1] = vreinterpret_s16_u8(vrev16_u8(vreinterpret_u8_s16(m[1])));
+		ml[2] = vreinterpret_s16_u8(vrev16_u8(vreinterpret_u8_s16(m[2])));
+		ml[3] = vreinterpret_s16_u8(vrev16_u8(vreinterpret_u8_s16(m[3])));
+		mr[0] = ml[0];
+		mr[1] = ml[1];
+		mr[2] = ml[2];
+		mr[3] = ml[3];
+	} else if (stereo) {
+		/* S8S: 8 bytes a frame, each tap a (left, right) byte pair */
+		int16x4_t m[4];
+
+		transpose4h(vreinterpret_s16_u8(vld1_u8(q0)),
+		            vreinterpret_s16_u8(vld1_u8(q1)),
+		            vreinterpret_s16_u8(vld1_u8(q2)),
+		            vreinterpret_s16_u8(vld1_u8(q3)), m);
+		ml[0] = vshl_n_s16(m[0], 8);
+		ml[1] = vshl_n_s16(m[1], 8);
+		ml[2] = vshl_n_s16(m[2], 8);
+		ml[3] = vshl_n_s16(m[3], 8);
+		mr[0] = vand_s16(m[0], vdup_n_s16(-256));
+		mr[1] = vand_s16(m[1], vdup_n_s16(-256));
+		mr[2] = vand_s16(m[2], vdup_n_s16(-256));
+		mr[3] = vand_s16(m[3], vdup_n_s16(-256));
+	} else {
+		/* mono S8: 4 bytes a frame */
+		uint32x2_t g01 = vdup_n_u32(0), g23 = vdup_n_u32(0);
+		uint8x8x2_t ev, ab, cd;
+
+		g01 = vld1_lane_u32((const uint32_t *)(const void *)q0, g01, 0);
+		g01 = vld1_lane_u32((const uint32_t *)(const void *)q1, g01, 1);
+		g23 = vld1_lane_u32((const uint32_t *)(const void *)q2, g23, 0);
+		g23 = vld1_lane_u32((const uint32_t *)(const void *)q3, g23, 1);
+		/* even bytes: taps 0 and 2 of the frames, odd bytes: 1 and 3 */
+		ev = vuzp_u8(vreinterpret_u8_u32(g01), vreinterpret_u8_u32(g23));
+		ab = vuzp_u8(ev.val[0], ev.val[0]);
+		cd = vuzp_u8(ev.val[1], ev.val[1]);
+		ml[0] = vget_low_s16(vshll_n_s8(vreinterpret_s8_u8(ab.val[0]), 8));
+		ml[2] = vget_low_s16(vshll_n_s8(vreinterpret_s8_u8(ab.val[1]), 8));
+		ml[1] = vget_low_s16(vshll_n_s8(vreinterpret_s8_u8(cd.val[0]), 8));
+		ml[3] = vget_low_s16(vshll_n_s8(vreinterpret_s8_u8(cd.val[1]), 8));
+		mr[0] = ml[0];
+		mr[1] = ml[1];
+		mr[2] = ml[2];
+		mr[3] = ml[3];
+	}
+	tl[0] = ml[back ? 3 : 0];
+	tl[1] = ml[back ? 2 : 1];
+	tl[2] = ml[back ? 1 : 2];
+	tl[3] = ml[back ? 0 : 3];
+	tr[0] = mr[back ? 3 : 0];
+	tr[1] = mr[back ? 2 : 1];
+	tr[2] = mr[back ? 1 : 2];
+	tr[3] = mr[back ? 0 : 3];
+}
+
+/*
+ * Four interior frames: the taps of each frame (cubic_load4), the curve of
+ * the left and right side, and the result added to the sums at al and ar.
+ * vvl and vvr are the volumes of the four frames shifted up by 15: VQDMULH
+ * doubles the product and keeps the high half, so (sample * (volume << 15))
+ * * 2 >> 32 is (sample * volume) >> 16, exact, with no overflow for a
+ * sample of at most AV_CUBIC_PEAK (volume << 15 stays below 2^31). xv holds
+ * the fractions of the four frames in its low 16 bits: t << 15 and t << 14
+ * come from shifting the fraction to the top of the lane and back.
+ */
+AV_INLINE void cubic_block(const int wide, const int stereo, const int sides,
+                           const int back, const uint8_t *restrict p,
+                           const int32_t x0, const int32_t x1,
+                           const int32_t x2, const int32_t x3,
+                           const int32x4_t xv, const int16x4_t kk,
+                           const int32x4_t vvl, const int32x4_t vvr,
+                           int32_t *restrict al, int32_t *restrict ar)
+{
+	const uint32x4_t top = vshlq_n_u32(vreinterpretq_u32_s32(xv), 16);
+	const int32x4_t t15 = vreinterpretq_s32_u32(vshrq_n_u32(top, 1));
+	const int32x4_t t14 = vreinterpretq_s32_u32(vshrq_n_u32(top, 2));
+	int16x4_t tl[4], tr[4];
+
+	cubic_load4(wide, stereo, back, p, x0, x1, x2, x3, tl, tr);
+	if (!stereo) {
+		const int32x4_t o = cubic4w(kk, tl[0], tl[1], tl[2], tl[3], t15, t14);
 
 		vst1q_s32(al, vaddq_s32(vld1q_s32(al), vqdmulhq_s32(o, vvl)));
-		if (!stereo)
-			ta_r = o;
-	} else if (!stereo) {
-		ta_r = cubic4(ta_l, tb_l, tc_l, td_l, t15, t14);
-	}
-	if (sides & 2) {
-		const int32x4_t o = stereo ?
-			cubic4(ta_r, tb_r, tc_r, td_r, t15, t14) : ta_r;
+		vst1q_s32(ar, vaddq_s32(vld1q_s32(ar), vqdmulhq_s32(o, vvr)));
+	} else if (sides == 3) {
+		int32x4_t ol, o2;
+
+		cubic4w2(kk, tl[0], tl[1], tl[2], tl[3], tr[0], tr[1], tr[2], tr[3],
+		         t15, t14, &ol, &o2);
+		vst1q_s32(al, vaddq_s32(vld1q_s32(al), vqdmulhq_s32(ol, vvl)));
+		vst1q_s32(ar, vaddq_s32(vld1q_s32(ar), vqdmulhq_s32(o2, vvr)));
+	} else if (sides & 1) {
+		const int32x4_t o = cubic4w(kk, tl[0], tl[1], tl[2], tl[3], t15, t14);
+
+		vst1q_s32(al, vaddq_s32(vld1q_s32(al), vqdmulhq_s32(o, vvl)));
+	} else {
+		const int32x4_t o = cubic4w(kk, tr[0], tr[1], tr[2], tr[3], t15, t14);
 
 		vst1q_s32(ar, vaddq_s32(vld1q_s32(ar), vqdmulhq_s32(o, vvr)));
 	}
 }
 
 /*
- * The interior frames four at a time, added to the sums at al (left) and
+ * All n interior frames, four at a time, added to the sums at al (left) and
  * al + AUDIO_VOICE_MIX_FRAMES (right) with the gain of each frame, (gain + i
  * * inc) >> 8 as in apply_ramp(), the volume vector rebuilt per block only
  * when the gain moves. sides names the sounding sides of a stereo sample (a
- * mono sample takes 3). Returns the frames done, a multiple of 4.
+ * mono sample takes 3). A last block of fewer than four frames reads the
+ * taps of its last frame again for the lanes it does not use (so it reads
+ * nothing outside the interior) and adds through a copy of the sums. Returns
+ * n.
  */
 AV_INLINE uint32_t cubic_kernel_neon(const int wide, const int stereo,
-                                     const int sides,
+                                     const int sides, const int back,
                                      const uint8_t *restrict p, int32_t x,
-                                     const int32_t dx, const int32_t nb,
-                                     uint32_t n, int32_t *restrict al,
-                                     int32_t gl, int32_t il, int32_t gr,
-                                     int32_t ir)
+                                     const int32_t dx, uint32_t n,
+                                     int32_t *restrict al, int32_t gl,
+                                     int32_t il, int32_t gr, int32_t ir)
 {
-	const int32_t lanes[4] = { 0, 1, 2, 3 };
+	static const int32_t lanes[4] = { 0, 1, 2, 3 };
+	static const int16_t ks[4] = { 3, 2, 0, 0 };
 	const int32x4_t lane = vld1q_s32(lanes);
+	const int16x4_t kk = vld1_s16(ks);
 	int32_t *const ar = al + AUDIO_VOICE_MIX_FRAMES;
+	const int ramp = (il | ir) != 0;
+	const int32x4_t dx4 = vdupq_n_s32(4 * dx);
+	const int32x4_t dgl = vdupq_n_s32(4 * il);
+	const int32x4_t dgr = vdupq_n_s32(4 * ir);
+	int32x4_t xv = vmlaq_n_s32(vdupq_n_s32(x), lane, dx);
+	int32x4_t gvl = vmlaq_n_s32(vdupq_n_s32(gl), lane, il);
+	int32x4_t gvr = vmlaq_n_s32(vdupq_n_s32(gr), lane, ir);
+	int32x4_t vvl = vdupq_n_s32((gl >> 8) << 15);
+	int32x4_t vvr = vdupq_n_s32((gr >> 8) << 15);
+	int32_t tmpl[4] = { 0, 0, 0, 0 }, tmpr[4] = { 0, 0, 0, 0 };
 	uint32_t i;
 
-	if ((il | ir) == 0) {
-		/* a constant gain: one volume vector for the whole run */
-		const int32x4_t vvl = vdupq_n_s32((gl >> 8) << 15);
-		const int32x4_t vvr = vdupq_n_s32((gr >> 8) << 15);
+	for (i = 0; i < n; i += 4U) {
+		const uint32_t rem = n - i;
+		int32_t x1 = x + dx, x2 = x + 2 * dx, x3 = x + 3 * dx;
+		int32_t *bl = al + i, *br = ar + i;
+		uint32_t k;
 
-		for (i = 0; i + 4U <= n; i += 4U) {
-			cubic_block(wide, stereo, sides, p, x, dx, nb, lane, vvl, vvr,
-			            al + i, ar + i);
-			x += 4 * dx;
-		}
-	} else {
-		int32x4_t gvl = vmlaq_s32(vdupq_n_s32(gl), lane, vdupq_n_s32(il));
-		int32x4_t gvr = vmlaq_s32(vdupq_n_s32(gr), lane, vdupq_n_s32(ir));
-		const int32x4_t dgl = vdupq_n_s32(4 * il);
-		const int32x4_t dgr = vdupq_n_s32(4 * ir);
-
-		for (i = 0; i + 4U <= n; i += 4U) {
-			cubic_block(wide, stereo, sides, p, x, dx, nb, lane,
-			            vshlq_n_s32(vshrq_n_s32(gvl, 8), 15),
-			            vshlq_n_s32(vshrq_n_s32(gvr, 8), 15), al + i, ar + i);
+		if (ramp) {
+			vvl = vshlq_n_s32(vshrq_n_s32(gvl, 8), 15);
+			vvr = vshlq_n_s32(vshrq_n_s32(gvr, 8), 15);
 			gvl = vaddq_s32(gvl, dgl);
 			gvr = vaddq_s32(gvr, dgr);
-			x += 4 * dx;
 		}
+		if (rem < 4U) {
+			x1 = rem > 1U ? x1 : x;
+			x2 = rem > 2U ? x2 : x1;
+			x3 = x2;
+			for (k = 0; k < rem; k++) {
+				tmpl[k] = bl[k];
+				tmpr[k] = br[k];
+			}
+			bl = tmpl;
+			br = tmpr;
+		}
+		cubic_block(wide, stereo, sides, back, p, x, x1, x2, x3, xv, kk,
+		            vvl, vvr, bl, br);
+		if (rem < 4U) {
+			for (k = 0; k < rem; k++) {
+				al[i + k] = tmpl[k];
+				ar[i + k] = tmpr[k];
+			}
+		}
+		x += 4 * dx;
+		xv = vaddq_s32(xv, dx4);
 	}
-	return i;
+	return n;
 }
 
 AV_NOINLINE uint32_t run_cubic(const struct audio_voice *v, int sides,
@@ -1581,7 +1763,10 @@ AV_NOINLINE uint32_t run_cubic(const struct audio_voice *v, int sides,
                                int32_t gl, int32_t il, int32_t gr, int32_t ir)
 {
 #define AV_CK(w, s, sd) \
-	return cubic_kernel_neon(w, s, sd, p, x, dx, nb, n, al, gl, il, gr, ir)
+	return nb < 0 ? cubic_kernel_neon(w, s, sd, 1, p, x, dx, n, al, gl, il, \
+	                                  gr, ir) \
+	              : cubic_kernel_neon(w, s, sd, 0, p, x, dx, n, al, gl, il, \
+	                                  gr, ir)
 	if (!v->stereo) {
 		if (v->wide)
 			AV_CK(1, 0, 3);
