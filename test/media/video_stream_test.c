@@ -44,7 +44,7 @@ void zzm_loader_release(uint32_t module_id)
 	(void)module_id;
 }
 
-void zzm_loader_session_begin_lock(void) {}
+int zzm_loader_session_begin_enter(void) { return 1; }
 void zzm_loader_session_begin_unlock(void) {}
 
 static uint8_t decoder_storage;

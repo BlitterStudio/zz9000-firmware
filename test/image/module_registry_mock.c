@@ -147,7 +147,7 @@ void zzm_loader_release(uint32_t id)
         webp_refs--;
 }
 
-void zzm_loader_session_begin_lock(void) {}
+int zzm_loader_session_begin_enter(void) { return 1; }
 void zzm_loader_session_begin_unlock(void) {}
 
 uint16_t zzm_registry_sdk_status(uint32_t id)
