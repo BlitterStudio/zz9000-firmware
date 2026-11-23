@@ -156,9 +156,8 @@ struct audio_voice_engine {
 	struct audio_voice voice[AUDIO_VOICE_MAX_VOICES];
 	struct audio_voice_sample sample[AUDIO_VOICE_MAX_SAMPLES];
 	/* Scratch of audio_voice_render(), no state: the int32 sum of the
-	 * voices per side, for one chunk of frames. */
-	int32_t mix_l[AUDIO_VOICE_MIX_FRAMES];
-	int32_t mix_r[AUDIO_VOICE_MIX_FRAMES];
+	 * voices per side (left, right), for one chunk of frames. */
+	int32_t mix[2][AUDIO_VOICE_MIX_FRAMES];
 };
 
 /*
