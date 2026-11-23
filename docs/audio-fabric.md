@@ -360,17 +360,19 @@ exited.
 | Audio | 1440000 frames played, 0 underruns |
 | A/V sync | 273 late pictures, 637 holds, largest drift 260 ms |
 | SDK calls, per call | write 8390 us, decode 12825 us, retire 2842 us |
-| Voice session | 240 late, 0 rejected, 0 underruns, 0 dropped |
+| Voice session | late counter 240 voice records, 0 rejected, 0 underruns, 0 dropped |
 | Voice host pacing | largest wait 67876 us against 5000 us asked, first late at 3.224 s |
 
 The release fix removes the freeze. It does not qualify the combination:
 the same movie plays 750 pictures with no discards when it runs alone, and
 with the 32-voice low-latency load running, 273 pictures were discarded and
-240 voice periods were late. The cause of the late pictures and periods is
-not established. The voice host waits of up to 67876 us fit the mailbox and
-main-loop stalls that are already open. Qualifying ZZPlay beside this voice
-load stays an open item until a run presents all pictures without late voice
-periods.
+the voice late counter read 240 records. That counts late voice records, not
+late periods: with `CHURN GROUPS=32` and `RAMP=256` one 20 ms producer period
+carries 240 records, and the first late record was one such window. The cause
+of the late pictures and records is not established. The voice host waits of
+up to 67876 us fit the mailbox and main-loop stalls that are already open.
+Qualifying ZZPlay beside this voice load stays an open item until a run
+presents all pictures with a late counter of 0.
 
 ## History
 
