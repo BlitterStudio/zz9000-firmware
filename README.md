@@ -66,11 +66,12 @@ Install its matching bitstream and drivers as one update; do not pair the
 The [documentation index](docs/README.md) lists every document by task:
 setting up the card, writing Amiga programs that use card services, writing
 ARM apps, and working on the firmware. The core-1 app kernel runs user-mode
-apps as process records, each in a private address space, with the record count
-chosen from card memory at boot (four launcher windows remain the ceiling until
-the transport swap). Its slot protocol, memory limits, lifecycle, and SVC
-interface are in the
-[app runtime contract](docs/app-runtime.md).
+apps as process records, each in a private address space, with admission
+limited by card memory. Its claim and queue protocol, memory limits,
+lifecycle, and SVC interface are in the
+[app runtime contract](docs/app-runtime.md). Amiga programs use `aar.library`;
+the SDK ships the reference launcher `aar-run`. See the
+[ZZ9000 client layer](sdk/docs/zz9k-library.md#arm-app-client).
 
 ## Build and contribute
 
