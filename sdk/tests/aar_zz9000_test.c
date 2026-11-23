@@ -313,6 +313,8 @@ static struct {
     uint32_t handle;
     uint32_t revoked;               /* handle the card has revoked, 0: none */
     uint32_t refuse_reason;         /* CLAIM refusal, 0: none */
+    int end_status;                 /* LOAD_END refusal status, 0: none */
+    uint32_t end_len, end_words[2]; /* its reply: length, reason and code */
     int corrupt_magic;              /* CLAIM yields a block that does not check */
     int bad_cb_token;               /* CLAIM names memory the board lacks */
     uint32_t abi_major;             /* what QUERY reports */
@@ -477,6 +479,15 @@ static int fb_call(void *user, uint16_t op, const uint8_t *payload,
         return 0;
     }
     case ZZAPP_OP_LOAD_END:
+        if (card.end_status) {
+            zzapp_put_be32(reply->payload + ZZAPP_REFUSAL_REASON,
+                           card.end_words[0]);
+            zzapp_put_be32(reply->payload + ZZAPP_REFUSAL_CODE,
+                           card.end_words[1]);
+            reply->len = card.end_len;
+            reply->status = card.end_status;
+            return card.end_status;
+        }
         return 0;
     case ZZAPP_OP_START: {
         zzapp_xport_buf_t load;
@@ -2261,6 +2272,53 @@ static void test_start_carries_the_advertised_argument_limits(void)
     CHECK(CLOSE(h) == AAR_OK && heap.live == 0U);
 }
 
+/* A refused LOAD_END: the reply carries the reason and the AAR_E_* code, and
+ * the library returns that code instead of what the status maps to. A reply
+ * without a code (an older card) falls back to the status mapping. */
+static void test_load_refusal_codes(void)
+{
+    static const struct {
+        int status;
+        uint32_t len, reason, code;
+        int expected;
+    } cases[] = {
+        { ZZ9K_STATUS_BAD_REQUEST, 8U, 0U, 13U, AAR_E_PROFILE },
+        { ZZ9K_STATUS_UNSUPPORTED, 8U, 0U, 14U, AAR_E_NOGROUP },
+        { ZZ9K_STATUS_BAD_REQUEST, 8U, 0U, 2U, AAR_E_INVAL },
+        { ZZ9K_STATUS_NO_MEMORY, 8U, 0U, 3U, AAR_E_NOMEM },
+        { ZZ9K_STATUS_NO_MEMORY, 8U, AAR_REASON_MEMORY, 3U, AAR_E_NORESOURCE },
+        /* No code: an older card, or a code the library does not know. */
+        { ZZ9K_STATUS_BAD_REQUEST, 0U, 0U, 0U, AAR_E_INVAL },
+        { ZZ9K_STATUS_UNSUPPORTED, 0U, 0U, 0U, AAR_E_NOSYS },
+        { ZZ9K_STATUS_BAD_REQUEST, 4U, 0U, 13U, AAR_E_INVAL },
+        { ZZ9K_STATUS_NO_MEMORY, 4U, AAR_REASON_MEMORY, 0U, AAR_E_NORESOURCE },
+        { ZZ9K_STATUS_BAD_REQUEST, 8U, 0U, 0U, AAR_E_INVAL },
+        { ZZ9K_STATUS_UNSUPPORTED, 8U, 0U, 99U, AAR_E_NOSYS },
+    };
+    static uint8_t image[100];
+    unsigned i, bad = 0U;
+
+    for (i = 0U; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        AARHandle *h;
+        int rc;
+
+        reset_all();
+        h = claim();
+        card.end_status = cases[i].status;
+        card.end_len = cases[i].len;
+        card.end_words[0] = cases[i].reason;
+        card.end_words[1] = cases[i].code;
+        rc = aar_core_load_memory(&core, h, image, sizeof(image));
+        if (rc != cases[i].expected) {
+            fprintf(stderr, "refusal case %u: got %d, wanted %d\n", i, rc,
+                    cases[i].expected);
+            bad++;
+        }
+        CHECK(CLOSE(h) == AAR_OK);
+    }
+    CHECK(bad == 0U);
+}
+
 /* Every client capability the tags carry reaches LOAD_BEGIN as the platform's
  * own bit. */
 static void test_tags_reach_the_card(void)
@@ -3342,6 +3400,7 @@ int main(void)
     test_poll_reports_in_flight();
     test_load_start_stop_status();
     test_start_carries_the_advertised_argument_limits();
+    test_load_refusal_codes();
     test_tags_reach_the_card();
     test_load_refused_and_unknown_caps();
     test_lease();

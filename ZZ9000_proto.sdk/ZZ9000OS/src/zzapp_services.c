@@ -1007,6 +1007,11 @@ __attribute__((weak)) int zzapp_loader_end(void)
 		AAR_E_NOSYS;
 }
 
+__attribute__((weak)) uint32_t zzapp_loader_card(void)
+{
+	return 0U;
+}
+
 __attribute__((weak)) int zzapp_loader_abort(void)
 {
 	service_test_loader_abort_count++;
@@ -4546,13 +4551,24 @@ static int finish_deferred(zzapp_rec_t *rec, int rc, uint32_t publish_state)
 	defer->status = zz_to_sdk(rc);
 	if (rc != AAR_OK) {
 		defer->reply_len = 0U;
-		/* A refused load names the reason alone (ZZAPP_REFUSAL_REASON). */
-		if ((defer->opcode == ZZAPP_OP_LOAD_BEGIN ||
-		     defer->opcode == ZZAPP_OP_LOAD_END) &&
-		    rec->claim.refusal_reason != AAR_REASON_NONE) {
-			zzapp_put_be32(defer->reply + ZZAPP_REFUSAL_REASON,
-				       rec->claim.refusal_reason);
-			defer->reply_len = ZZAPP_REFUSAL_REPLY_BYTES;
+		/* A refused load names the reason and, for the codes the status
+		 * cannot tell apart, the AAR_E_* code (ZZAPP_REFUSAL_CODE). */
+		if (defer->opcode == ZZAPP_OP_LOAD_BEGIN ||
+		    defer->opcode == ZZAPP_OP_LOAD_END) {
+			uint32_t code = (rc == AAR_E_INVAL || rc == AAR_E_NOMEM ||
+					 rc == AAR_E_PROFILE || rc == AAR_E_NOGROUP)
+				? (uint32_t)-rc : 0U;
+
+			if (rec->claim.refusal_reason != AAR_REASON_NONE || code) {
+				zzapp_put_be32(defer->reply + ZZAPP_REFUSAL_REASON,
+					       rec->claim.refusal_reason);
+				defer->reply_len = ZZAPP_REFUSAL_REPLY_BYTES;
+			}
+			if (code) {
+				zzapp_put_be32(defer->reply + ZZAPP_REFUSAL_CODE,
+					       code);
+				defer->reply_len = ZZAPP_REFUSAL_CODE_REPLY_BYTES;
+			}
 		}
 	}
 	if (publish_state == ZZAPP_ST_LOADING)
@@ -4702,6 +4718,11 @@ static void run_deferred(zzapp_rec_t *rec)
 			reject_reason = "note profile is not A32";
 		else if (rc == AAR_E_NOGROUP)
 			reject_reason = "note requires a group this runtime lacks";
+		if (rc == AAR_OK)
+			/* The card address of image offset 0, which fault_pc less
+			 * load_base is relative to. */
+			zzapp_xport_cb_put64(rec, AAR_CB_LOAD_BASE_HI,
+					     zzapp_loader_card());
 		/* A failed LOAD_END ends the claim: the loader dropped its
 		 * frames and staging, and the record goes through retire. */
 		if (rc != AAR_OK)

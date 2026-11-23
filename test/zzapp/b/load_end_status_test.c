@@ -2,10 +2,12 @@
 /*
  * What LOAD_END reports to the client when the loader refuses an image: a
  * note whose profile this runtime does not run is BAD_REQUEST, a note that
- * requires a group the runtime lacks is UNSUPPORTED (the client tells the
- * two apart by the code), the other refusals keep their usual codes, and the
- * claim ends either way: its control block reads IDLE and the record is the
- * client's to release, after which a new claim loads normally.
+ * requires a group the runtime lacks is UNSUPPORTED, the other refusals keep
+ * their usual statuses, and the reply names the AAR_E_* code and the reason
+ * (the client tells the refusals apart by the code). The claim ends either
+ * way: its control block reads IDLE and the record is the client's to
+ * release, after which a new claim loads normally. A load that completes
+ * publishes AAR_CB_LOAD_BASE_*.
  */
 #ifndef ZZAPP_HOST_DEFERRED_TEST
 #define ZZAPP_HOST_DEFERRED_TEST
@@ -26,8 +28,11 @@ static uint16_t load_status(const uint8_t image[RT_IMAGE_BYTES])
     return rt_simple(0U, ZZAPP_OP_LOAD_END);
 }
 
+static unsigned code_failures;
+
+/* `code` is the AAR_E_* code the refusal reply must carry (0: no refusal). */
 static void expect_load(unsigned word, uint32_t value, uint32_t groups,
-                        uint16_t status)
+                        uint16_t status, int code)
 {
     uint8_t image[RT_IMAGE_BYTES];
     uint16_t got;
@@ -46,6 +51,19 @@ static void expect_load(unsigned word, uint32_t value, uint32_t groups,
         assert(0 && "LOAD_END status");
     }
     if (status != SDK_STATUS_OK) {
+        /* The reply carries the reason and the code of the refusal; a memory
+         * refusal also names its reason. */
+        uint32_t reason = code == AAR_E_NOMEM ? AAR_REASON_MEMORY
+                                              : AAR_REASON_NONE;
+
+        if (rt_last_reply_len != ZZAPP_REFUSAL_CODE_REPLY_BYTES ||
+            zzapp_get_be32(rt_last_reply + ZZAPP_REFUSAL_REASON) != reason ||
+            zzapp_get_be32(rt_last_reply + ZZAPP_REFUSAL_CODE) !=
+                (uint32_t)-code) {
+            fprintf(stderr, "note word %u = 0x%x: reply len %u, wanted code "
+                    "%d\n", word, value, (unsigned)rt_last_reply_len, code);
+            code_failures++;
+        }
         /* A refusal ends the claim at once: nothing is left loaded and the
          * control block says so; only the shell stays for the client. */
         assert(RT_STATE(0U) == AAR_STATE_IDLE);
@@ -56,6 +74,19 @@ static void expect_load(unsigned word, uint32_t value, uint32_t groups,
         rt_assert_back(start);
     } else {
         assert(RT_STATE(0U) == AAR_STATE_LOADING);
+        /* A completed load publishes the loader's card base: the address of
+         * image offset 0, which fault_pc minus load_base is relative to. */
+        zzapp_services_select_pid(rt_pid[0]);
+        if (zzapp_test_arena_card() == 0U ||
+            mock_client_cb_get(&rt_cl[0], AAR_CB_LOAD_BASE_HI) != 0U ||
+            mock_client_cb_get(&rt_cl[0], AAR_CB_LOAD_BASE_LO) !=
+                zzapp_test_arena_card()) {
+            fprintf(stderr, "load base: control block %08x%08x, loader %08x\n",
+                    (unsigned)mock_client_cb_get(&rt_cl[0], AAR_CB_LOAD_BASE_HI),
+                    (unsigned)mock_client_cb_get(&rt_cl[0], AAR_CB_LOAD_BASE_LO),
+                    (unsigned)zzapp_test_arena_card());
+            code_failures++;
+        }
         assert(rt_simple(0U, ZZAPP_OP_RELEASE) == SDK_STATUS_OK);
         rt_settle(4U);
         rt_assert_back(start);
@@ -67,29 +98,40 @@ int main(void)
 {
     /* The refusals the client distinguishes by status. */
     expect_load(TEST_NOTE_W_PROFILE, AAR_PROFILE_A64, 0U,
-                SDK_STATUS_BAD_REQUEST);
-    expect_load(TEST_NOTE_W_PROFILE, 0U, 0U, SDK_STATUS_BAD_REQUEST);
+                SDK_STATUS_BAD_REQUEST, AAR_E_PROFILE);
+    expect_load(TEST_NOTE_W_PROFILE, 0U, 0U, SDK_STATUS_BAD_REQUEST,
+                AAR_E_PROFILE);
     expect_load(TEST_NOTE_W_GROUPS_REQUIRED, 0x80000000U, 0U,
-                SDK_STATUS_UNSUPPORTED);
+                SDK_STATUS_UNSUPPORTED, AAR_E_NOGROUP);
     expect_load(TEST_NOTE_W_GROUPS_REQUIRED, AAR_GROUP_DISPLAY,
-                AAR_GROUP_INPUT | AAR_GROUP_SERVICES, SDK_STATUS_UNSUPPORTED);
+                AAR_GROUP_INPUT | AAR_GROUP_SERVICES, SDK_STATUS_UNSUPPORTED,
+                AAR_E_NOGROUP);
     expect_load(TEST_NOTE_W_GROUPS_REQUIRED, AAR_GROUP_AUDIO | AAR_GROUP_GL,
-                AAR_GROUP_DISPLAY | AAR_GROUP_AUDIO, SDK_STATUS_UNSUPPORTED);
+                AAR_GROUP_DISPLAY | AAR_GROUP_AUDIO, SDK_STATUS_UNSUPPORTED,
+                AAR_E_NOGROUP);
 
     /* The other refusals, and what is accepted. */
-    expect_load(TEST_NOTE_W_MAGIC, 0x4E524142U, 0U, SDK_STATUS_BAD_REQUEST);
-    expect_load(TEST_NOTE_W_VERSION, 2U, 0U, SDK_STATUS_BAD_REQUEST);
+    expect_load(TEST_NOTE_W_MAGIC, 0x4E524142U, 0U, SDK_STATUS_BAD_REQUEST,
+                AAR_E_INVAL);
+    expect_load(TEST_NOTE_W_VERSION, 2U, 0U, SDK_STATUS_BAD_REQUEST,
+                AAR_E_INVAL);
     expect_load(TEST_NOTE_W_API_MAJOR, AAR_API_MAJOR + 1U, 0U,
-                SDK_STATUS_BAD_REQUEST);
+                SDK_STATUS_BAD_REQUEST, AAR_E_INVAL);
     expect_load(TEST_NOTE_W_API_MINOR, AAR_API_MINOR + 1U, 0U,
-                SDK_STATUS_BAD_REQUEST);
-    expect_load(TEST_NOTE_W_STACK_BYTES, 16U, 0U, SDK_STATUS_BAD_REQUEST);
-    expect_load(TEST_NOTE_W_RESERVED, 1U, 0U, SDK_STATUS_BAD_REQUEST);
-    expect_load(TEST_NOTE_W_MIN_HEAP_MIB, 600U, 0U, SDK_STATUS_NO_MEMORY);
-    expect_load(NO_WORD, 0U, 0U, SDK_STATUS_OK);
+                SDK_STATUS_BAD_REQUEST, AAR_E_INVAL);
+    expect_load(TEST_NOTE_W_STACK_BYTES, 16U, 0U, SDK_STATUS_BAD_REQUEST,
+                AAR_E_INVAL);
+    expect_load(TEST_NOTE_W_RESERVED, 1U, 0U, SDK_STATUS_BAD_REQUEST,
+                AAR_E_INVAL);
+    expect_load(TEST_NOTE_W_MIN_HEAP_MIB, 600U, 0U, SDK_STATUS_NO_MEMORY,
+                AAR_E_NOMEM);
+    expect_load(NO_WORD, 0U, 0U, SDK_STATUS_OK, AAR_OK);
     expect_load(TEST_NOTE_W_GROUPS_REQUIRED, AAR_GROUP_INPUT,
-                AAR_GROUP_INPUT | AAR_GROUP_SERVICES, SDK_STATUS_OK);
-    expect_load(TEST_NOTE_W_GROUPS_OPTIONAL, 0x80000000U, 0U, SDK_STATUS_OK);
+                AAR_GROUP_INPUT | AAR_GROUP_SERVICES, SDK_STATUS_OK, AAR_OK);
+    expect_load(TEST_NOTE_W_GROUPS_OPTIONAL, 0x80000000U, 0U, SDK_STATUS_OK,
+                AAR_OK);
+    fprintf(stderr, "refusal code failures: %u\n", code_failures);
+    assert(code_failures == 0U);
 
     /* A refused load frees what it held for the next one. */
     {

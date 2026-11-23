@@ -559,10 +559,13 @@ and a multiple of 16 (`AAR_E_INVAL`); the reserved word 0; every
 second AAR note, or a descriptor of the wrong size is `AAR_E_INVAL`. The load
 status the client sees maps `AAR_E_INVAL` and `AAR_E_PROFILE` to
 `BAD_REQUEST`, `AAR_E_NOGROUP` to `UNSUPPORTED`, and `AAR_E_NOMEM` to
-`NO_MEMORY`; a profile or group refusal prints its reason in the `[app] reject
-op` line. The groups a note names (required and optional) set the display,
-audio and GL bits of `AAR_CB_FLAGS`, which the client reads. An image
-without a v1 note, including one that carries a 0.4 note, does not load.
+`NO_MEMORY`. The status alone cannot tell `AAR_E_INVAL` from `AAR_E_PROFILE`
+or `AAR_E_NOGROUP` from a missing call, so the refusal reply carries the code
+too (see `LOAD_END` below). A profile or group refusal prints its reason in
+the `[app] reject op` line. The groups a note names (required and optional)
+set the display, audio and GL bits of `AAR_CB_FLAGS`, which the client reads.
+An image without a v1 note, including one that carries a 0.4 note, does not
+load.
 
 **Events.** `aar_event_poll` always delivers `AAR_EV_STOP` and
 `AAR_EV_LOW_MEMORY`, and delivers the client's key, mouse, joystick and
@@ -867,8 +870,16 @@ commits the image on its first step, all or nothing and before any zeroing
 `MEMORY`), and releases the staging block when it completes. Mapping the image
 takes tables from the record's reserve; an image that needs more than 16
 gives `TABLES`. A failed `LOAD_END` ends the claim: the frames, tables and
-staging go back and the state reads `IDLE`, with the reason in the reply (a
-4-byte `AAR_REASON_*`).
+staging go back and the state reads `IDLE`. The reply of a refused
+`LOAD_BEGIN` or `LOAD_END` holds the `AAR_REASON_*` word at 0 (`NONE` when no
+resource ran out) and, for `AAR_E_INVAL`, `AAR_E_NOMEM`, `AAR_E_PROFILE` and
+`AAR_E_NOGROUP`, that code as a positive number at 4
+(`ZZAPP_REFUSAL_CODE`; the reply is then 8 bytes). `aar.library` returns the
+code, except that a reason makes it return `AAR_E_NORESOURCE` with the reason.
+A reply of 4 bytes or none, as an older firmware sends, leaves the library on
+the status mapping. When `LOAD_END` completes, the firmware writes
+`AAR_CB_LOAD_BASE_HI` and `AAR_CB_LOAD_BASE_LO`: the app address of image
+offset 0 (`0xc0000000`), which a fault's `pc` is relative to.
 
 `START` carries only `argc`. The argv area of the load buffer is 4 KiB and
 holds a `u32` argc, 16 offsets from the start of the load buffer, then the

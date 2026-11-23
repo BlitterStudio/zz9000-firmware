@@ -863,8 +863,9 @@ static void test_load_refused(void)
 	heap.fail_after = 0;
 	CHECK(deferred(ZZAPP_OP_LOAD_BEGIN, handle, 0U, 0U, reply, &len) ==
 	      SDK_STATUS_NO_MEMORY);
-	CHECK(len == ZZAPP_REFUSAL_REPLY_BYTES);
+	CHECK(len == ZZAPP_REFUSAL_CODE_REPLY_BYTES);
 	CHECK(zzapp_get_be32(reply + ZZAPP_REFUSAL_REASON) == AAR_REASON_MEMORY);
+	CHECK(zzapp_get_be32(reply + ZZAPP_REFUSAL_CODE) == (uint32_t)-AAR_E_NOMEM);
 	CHECK(zzapp_rec_state(rec->hdr.pid) == ZZAPP_REC_RECLAIMED);
 	CHECK(word(&c, AAR_CB_STATE) == AAR_STATE_IDLE);
 	CHECK(heap.live == 1U);
