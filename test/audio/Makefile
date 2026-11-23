@@ -34,6 +34,7 @@ VOICE_RAMP_TARGET := $(BUILD_DIR)/audio_voice_ramp_test
 VOICE_LIMITER_TARGET := $(BUILD_DIR)/audio_voice_limiter_test
 VOICE_CUBIC_TARGET := $(BUILD_DIR)/audio_voice_cubic_test
 VOICE_CUBIC_GUARD_TARGET := $(BUILD_DIR)/audio_voice_cubic_guard_test
+VOICE_OVERSAMPLE_TARGET := $(BUILD_DIR)/audio_voice_oversample_test
 VOICE_PARITY_TARGET := $(BUILD_DIR)/audio_voice_abi_parity_test
 TARGETS := $(CONVERT_TARGET) $(CONVERT_EXACT_TARGET) $(CAPTURE_TARGET) $(PROFILE_TARGET) \
 	$(PLAYBACK_TARGET) $(RATE_TARGET) $(PRECONVERT_TARGET) \
@@ -44,7 +45,7 @@ TARGETS := $(CONVERT_TARGET) $(CONVERT_EXACT_TARGET) $(CAPTURE_TARGET) $(PROFILE
 	$(REDUCE_TARGET) $(VOICE_TARGET) $(VOICE_PT4_TARGET) \
 	$(VOICE_BASELINE_TARGET) \
 	$(VOICE_RAMP_TARGET) $(VOICE_LIMITER_TARGET) $(VOICE_CUBIC_TARGET) \
-	$(VOICE_CUBIC_GUARD_TARGET) \
+	$(VOICE_CUBIC_GUARD_TARGET) $(VOICE_OVERSAMPLE_TARGET) \
 	$(VOICE_PARITY_TARGET) \
 	$(VOICE_SESSION_TARGET)
 
@@ -88,6 +89,7 @@ test: $(TARGETS)
 	$(VOICE_LIMITER_TARGET)
 	$(VOICE_CUBIC_TARGET)
 	$(VOICE_CUBIC_GUARD_TARGET)
+	$(VOICE_OVERSAMPLE_TARGET)
 
 # U2 fabric compositor: the characterization golden (pump_golden.c, a
 # verbatim capture of the pre-fabric pump) drives the parity scenarios
@@ -364,6 +366,18 @@ $(VOICE_CUBIC_GUARD_TARGET): audio_voice_cubic_guard_test.c \
 	@mkdir -p $(BUILD_DIR)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ audio_voice_cubic_guard_test.c \
 		$(SRC_DIR)/audio_voice.c
+
+# 2x oversampling (CONFIG OVERSAMPLE): the 96 kHz stream of the engine on a
+# half-frame time base, convolved with the taps of audio_reduce_table.h by
+# an independent direct convolution; impulse, level, master, ramp, history,
+# acceptance and alias cases worked out by hand. ZZ9K_VOICE_OS_SEQS sets the
+# random scenarios (default 3000).
+$(VOICE_OVERSAMPLE_TARGET): audio_voice_oversample_test.c \
+	$(SRC_DIR)/audio_voice.c $(SRC_DIR)/audio_voice.h \
+	$(SRC_DIR)/audio_reduce_table.h $(SDK_INC)/zz9k/voice.h
+	@mkdir -p $(BUILD_DIR)
+	$(CC) $(CPPFLAGS) -I$(SDK_INC) $(CFLAGS) -o $@ audio_voice_oversample_test.c \
+		$(SRC_DIR)/audio_voice.c -lm
 
 # The voice constants of the SDK header and of the firmware headers agree.
 $(VOICE_PARITY_TARGET): audio_voice_abi_parity_test.c \

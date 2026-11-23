@@ -849,7 +849,7 @@ static uint32_t gen_cmds(uint32_t frame, uint32_t frames, uint32_t r,
 			c->arg0 = rnd(3) == 0 ? 0xFFFF : rnd(2) ? 256 : rnd(600);
 		} else if (pick < 86 && with_ramp) {
 			c->op = AUDIO_VOICE_OP_CONFIG;
-			c->flags = rnd(12) ? 1 : (uint16_t)(rnd(4) << 3);
+			c->flags = rnd(12) ? 1 : (uint16_t)(rnd(4) << 4);
 			c->arg0 = rnd(20) ? pick_ramp() : 513 + rnd(1000);
 		} else if (pick < 94 && with_mode) {
 			if (rnd(3)) {

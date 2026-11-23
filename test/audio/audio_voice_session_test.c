@@ -2735,8 +2735,63 @@ static void scenario_interp_records(int use_config)
 	      "interp: close", "");
 }
 
+/*
+ * 2x oversampling through the ring: the output delay word of the status block
+ * is 0 until the engine has taken the CONFIG record, 14 while the setting
+ * is on at the horizon, and 0 again after the record that turns it off. The
+ * record with the wrong factor is counted and changes nothing; the features
+ * word does not advertise OVERSAMPLE (0x8F).
+ */
+static void scenario_oversample_delay(void)
+{
+	const uint32_t on_at = 4900U, off_at = 14000U;
+	uint32_t i;
+	int early = 1, late_on = 0, after_off = 0;
+
+	fresh();
+	check(open_session(7680U, 4U) == SDK_STATUS_OK, "oversample: open", "");
+	check(upload_ramp(g_grant.session) == SDK_STATUS_OK,
+	      "oversample: upload", "");
+	check(st16(AUDIO_VOICE_STATUS_OFF_OUTPUT_DELAY) == 0U,
+	      "oversample: the delay is 0 at open", "");
+	rec(on_at, 0U, AUDIO_VOICE_OP_CONFIG, AUDIO_VOICE_CONFIG_OVERSAMPLE,
+	    AUDIO_VOICE_OVERSAMPLE_2X, 0U);
+	rec(on_at, 0U, AUDIO_VOICE_OP_CONFIG, AUDIO_VOICE_CONFIG_OVERSAMPLE, 3U,
+	    0U);
+	rec(off_at, 0U, AUDIO_VOICE_OP_CONFIG, AUDIO_VOICE_CONFIG_OVERSAMPLE,
+	    AUDIO_VOICE_OVERSAMPLE_OFF, 0U);
+	publish();
+	for (i = 0U; i < 40U; i++) {
+		const uint32_t delay = st16(AUDIO_VOICE_STATUS_OFF_OUTPUT_DELAY);
+		const uint32_t horizon = st_horizon();
+
+		period(1);
+		if (horizon + AUDIO_VOICE_PERIOD_FRAMES <= on_at && delay != 0U)
+			early = 0;
+		if (horizon > on_at + AUDIO_VOICE_PERIOD_FRAMES &&
+		    horizon < off_at && delay == AUDIO_VOICE_OVERSAMPLE_DELAY_FRAMES)
+			late_on = 1;
+		if (horizon > off_at + AUDIO_VOICE_PERIOD_FRAMES && delay == 0U)
+			after_off = 1;
+	}
+	check(early, "oversample: no delay before the record is rendered", "");
+	check(late_on, "oversample: the delay is 14 while the setting is on", "");
+	check(after_off, "oversample: the delay is 0 after it is turned off", "");
+	check(st_rejected() == 1U,
+	      "oversample: the bad factor is counted, nothing else",
+	      fmt("rejected=%u", st_rejected()));
+	check(st32(AUDIO_VOICE_STATUS_OFF_FEATURES) == 0x8FU &&
+	      (st32(AUDIO_VOICE_STATUS_OFF_FEATURES) &
+	       AUDIO_VOICE_FEATURE_OVERSAMPLE) == 0U,
+	      "oversample: the features word does not advertise OVERSAMPLE",
+	      fmt("features=%x", st32(AUDIO_VOICE_STATUS_OFF_FEATURES)));
+	check(audio_voice_session_close(g_grant.session) == SDK_STATUS_OK,
+	      "oversample: close", "");
+}
+
 int main(void)
 {
+	scenario_oversample_delay();
 	scenario_config();
 	scenario_limiter_order();
 	scenario_interp_records(0);

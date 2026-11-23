@@ -1105,7 +1105,7 @@ static void test_silence_keeps(void)
 static void test_config_matrix(void)
 {
 	static const unsigned flags[] = {
-		0U, 1U, 2U, 3U, 4U, 5U, 6U, 7U, 8U, 0x100U, 0x8000U, 0x8002U,
+		0U, 1U, 2U, 3U, 4U, 5U, 6U, 7U, 0x10U, 0x100U, 0x8000U, 0x8002U,
 		0x8003U, 0xFFFFU
 	};
 	static const uint32_t arg0s[] = {
