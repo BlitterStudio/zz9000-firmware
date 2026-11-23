@@ -97,6 +97,11 @@ It is a third mechanism next to the two above and replaces neither:
 - It acts inside the voice engine, on the sum of the voices after the master
   gain, and passes samples up to 24576 in magnitude unchanged. Louder
   samples are bent toward the rails and stay at or below 32766 in magnitude.
+  With 2x oversampling the sum is formed at 96 kHz, scaled by the master and
+  decimated first, and the knee (or the clamp) acts once on the resulting
+  48 kHz samples; a 96 kHz sum that overshoots but filters below the rails
+  is not bent or clipped early
+  (see [Oversampling](../sdk/docs/zz9k-voice.md#oversampling)).
 - It does not change the Paula and AX ceilings, the weighted boundary or the
   mixer trims. Those rules stay as described above, with or without the
   knee.

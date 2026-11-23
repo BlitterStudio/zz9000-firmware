@@ -217,7 +217,22 @@ typedef struct ZZ9KVoiceRingHeader {
  * reads with it from the record's frame. A record with no flag, an unknown
  * flag, a ramp length above the maximum, a limiter value above 1, a
  * limiter-only record with a nonzero arg0 or an interpolation record that
- * breaks the rules above is rejected whole. */
+ * breaks the rules above is rejected whole.
+ * ZZ9K_VOICE_CONFIG_OVERSAMPLE: arg0 = ZZ9K_VOICE_OVERSAMPLE_OFF (1, the
+ * default) or ZZ9K_VOICE_OVERSAMPLE_2X (2), arg1 must be 0, and the record
+ * names no other setting. With 2x the engine mixes at 96 kHz and decimates
+ * with a 59-tap half-band filter after the master gain and before the
+ * limiter or the clamp; stamps, rates in Hz, positions, the horizon and
+ * every frame number stay at 48 kHz, and a ramp or a fade tail keeps its
+ * length in time. The decimator delays the sound by
+ * ZZ9K_VOICE_OVERSAMPLE_DELAY_FRAMES output frames, published as
+ * output_delay_frames of ZZ9KVoiceExtStatus; a record is not itself
+ * delayed, and a change of level reaches the output through the filter's
+ * response over 29 frames. A record that changes the setting is accepted only
+ * while no voice and no fade tail is sounding, otherwise it is rejected
+ * and nothing changes; a record that sets the value already in force is
+ * accepted and changes nothing. Enabling it clears the decimator's history;
+ * disabling it drops what the filter still holds. */
 #define ZZ9K_VOICE_OP_START     1U
 #define ZZ9K_VOICE_OP_LOOP      2U
 #define ZZ9K_VOICE_OP_SET       3U
@@ -236,6 +251,14 @@ typedef struct ZZ9KVoiceRingHeader {
 #define ZZ9K_VOICE_CONFIG_RAMP    0x0001U
 #define ZZ9K_VOICE_CONFIG_LIMITER 0x0002U
 #define ZZ9K_VOICE_CONFIG_INTERP  0x0004U
+#define ZZ9K_VOICE_CONFIG_OVERSAMPLE 0x0008U
+
+/* Factors of ZZ9K_VOICE_CONFIG_OVERSAMPLE (arg0), and the output delay of
+ * the 2x decimator in 48 kHz frames (the filter's 59 taps, the centre tap
+ * 14 frames behind the frame a pair of 96 kHz frames belongs to). */
+#define ZZ9K_VOICE_OVERSAMPLE_OFF 1U
+#define ZZ9K_VOICE_OVERSAMPLE_2X  2U
+#define ZZ9K_VOICE_OVERSAMPLE_DELAY_FRAMES 14U
 
 /* MODE flags: the settings a MODE record holds. */
 #define ZZ9K_VOICE_MODE_INTERP    0x0001U
@@ -308,9 +331,11 @@ typedef struct ZZ9KVoiceRecord {
 /* Extended status. The firmware writes the features word at open (and keeps
  * it in every status write); a firmware without it leaves all four words
  * zero, which reads as no features. A client checks a feature bit before it
- * sends the records of that feature. active_mask, ends and
- * output_delay_frames are reserved for the voice-ended reporting and the
- * oversampling units and read 0 until then. */
+ * sends the records of that feature. active_mask and ends are reserved for
+ * the voice-ended reporting and read 0 until then; output_delay_frames is
+ * the delay the output stage adds to the sound now (0, or
+ * ZZ9K_VOICE_OVERSAMPLE_DELAY_FRAMES with 2x oversampling on at the
+ * engine's horizon). */
 #define ZZ9K_VOICE_STATUS_FEATURES_OFFSET      40U /* u32 */
 #define ZZ9K_VOICE_STATUS_ACTIVE_MASK_OFFSET   44U /* u32 */
 #define ZZ9K_VOICE_STATUS_ENDS_OFFSET          48U /* u32 */
@@ -385,7 +410,7 @@ typedef struct ZZ9KVoiceExtStatus {
   uint32_t features;            /* ZZ9K_VOICE_FEATURE_*, 0 on old firmware */
   uint32_t active_mask;         /* reserved: voices sounding, bit per voice */
   uint32_t ends;                /* reserved: voices that ended by themselves */
-  uint16_t output_delay_frames; /* reserved: delay of the output stage */
+  uint16_t output_delay_frames; /* delay of the output stage, 48 kHz frames */
 } ZZ9KVoiceExtStatus;
 
 /* ---- Host-facing descriptors ---- */
@@ -479,6 +504,16 @@ static inline uint32_t zz9k_voice_rate_step(uint32_t hz)
     hz = ZZ9K_VOICE_RATE_MAX_HZ;
   }
   return (uint32_t)(((uint64_t)hz << 16) / ZZ9K_VOICE_OUTPUT_RATE);
+}
+
+/* The step of the engine with 2x oversampling, per 96 kHz frame:
+ * ((min(hz, 192000) << 16) / 96000), which is zz9k_voice_rate_step(hz) >> 1.
+ * A rate below 1.5 Hz gives 0: the voice does not move. The pass timing
+ * helpers below count 48 kHz frames; with oversampling use this step and
+ * count 96 kHz frames, twice the output frames. */
+static inline uint32_t zz9k_voice_rate_step_oversampled(uint32_t hz)
+{
+  return zz9k_voice_rate_step(hz) >> 1;
 }
 
 /* Frames a voice renders until its pass ends. The voice is about to render
@@ -828,6 +863,24 @@ static inline void zz9k_voice_build_config_interp(ZZ9KVoiceRecord *record,
                                                   uint32_t interp)
 {
   zz9k_voice_build_config(record, stamp, ZZ9K_VOICE_CONFIG_INTERP, interp,
+                          0U);
+}
+
+/* 2x oversampling on (nonzero) or off (0), as ZZ9K_VOICE_OVERSAMPLE_2X or
+ * _OFF in arg0 with arg1 0 and no other setting, as the firmware requires.
+ * The firmware accepts a change only while no voice and no fade tail is
+ * sounding: stamp it after the last sound has ended, and send it before the
+ * first START. The sound is then delayed by
+ * ZZ9K_VOICE_OVERSAMPLE_DELAY_FRAMES. Check ZZ9K_VOICE_FEATURE_CONFIG first,
+ * and ZZ9K_VOICE_FEATURE_OVERSAMPLE before using it outside a qualification
+ * run. */
+static inline void zz9k_voice_build_config_oversample(ZZ9KVoiceRecord *record,
+                                                      uint32_t stamp,
+                                                      int enabled)
+{
+  zz9k_voice_build_config(record, stamp, ZZ9K_VOICE_CONFIG_OVERSAMPLE,
+                          enabled ? ZZ9K_VOICE_OVERSAMPLE_2X
+                                  : ZZ9K_VOICE_OVERSAMPLE_OFF,
                           0U);
 }
 

@@ -299,7 +299,7 @@ helper `ZZ9KVoiceWrite()` encodes records to the wire form.
 | DIRECTION | 6 | 1 plays backward, 0 plays forward | Unused | Unused |
 | MODE | 7 | 1 sets the interpolation of the voice | The selector, 0 (the session default) to 3 | 0 |
 | ENVELOPE | 8 | Reserved | Reserved | Reserved |
-| CONFIG | 9 | 1 sets the ramp length, 2 sets the limiter, 3 sets both, 4 sets the default interpolation | With flag 1, the ramp length in frames, 0 to 512. With flag 2 alone, 0. With flag 4, the selector, 1 to 3 | With flag 2, 0 (off) or 1 (on). Ignored with flag 1 alone. With flag 4, 0 |
+| CONFIG | 9 | 1 sets the ramp length, 2 sets the limiter, 3 sets both, 4 sets the default interpolation, 8 sets oversampling | With flag 1, the ramp length in frames, 0 to 512. With flag 2 alone, 0. With flag 4, the selector, 1 to 3. With flag 8, the factor, 1 (off) or 2 | With flag 2, 0 (off) or 1 (on). Ignored with flag 1 alone. With flags 4 and 8, 0 |
 
 Behaviour of each op:
 
@@ -343,6 +343,7 @@ argument it reads, so a record holds one setting or both:
 | 2 | Must be 0 | 0 or 1 | The limiter |
 | 3 | Ramp length, 0 to 512 | 0 or 1 | Both, together |
 | 4 | Selector, 1 to 3 | Must be 0 | The default interpolation, see [Interpolation](#interpolation) |
+| 8 | Factor, 1 (off) or 2 | Must be 0 | 2x oversampling, see [Oversampling](#oversampling) |
 
 The firmware checks every setting the record names before it applies any. A
 record is rejected whole, none of its settings applied, and counted in
@@ -361,7 +362,8 @@ The builders in `zz9k/voice.h` fill these records:
 `zz9k_voice_build_config_limiter()` (flag 2, arg0 0, arg1 0 or 1),
 `zz9k_voice_build_config_ramp_limiter()` (flags 3) and
 `zz9k_voice_build_config_interp()` (flag 4, see
-[Interpolation](#interpolation)). The generic
+[Interpolation](#interpolation)) and `zz9k_voice_build_config_oversample()`
+(flag 8, see [Oversampling](#oversampling)). The generic
 `zz9k_voice_build_config()` writes any flags and arguments, which is how a
 test sends a record the firmware must reject.
 
@@ -544,6 +546,76 @@ selector) and `zz9k_voice_build_config_interp()` (selector). The generic
 builders write any flags and arguments, which is how a test sends a record the
 firmware must reject.
 
+### Oversampling
+
+With `ZZ9K_VOICE_CONFIG_OVERSAMPLE` (flag 8, arg0 `ZZ9K_VOICE_OVERSAMPLE_2X`
+= 2, arg1 0, no other flag) the engine mixes the voices at 96 kHz and
+decimates to the card's 48 kHz, so that what a voice plays above 24 kHz (a
+voice stepping at more than 48 kHz, its harmonics) is filtered out instead of
+folding into the audible band. Everything a client sees stays at 48 kHz:
+stamps, the horizon, rates in Hz, the sample positions, ramp lengths and the
+fade tails (a ramp of R frames still lasts R output frames). Arg0 1
+(`ZZ9K_VOICE_OVERSAMPLE_OFF`) is the default and turns it off again. An
+invalid record (another factor, a nonzero arg1, another flag in the same
+record) is rejected whole and counted. `zz9k_voice_build_config_oversample()`
+builds the record.
+
+What the engine does with it:
+
+- Each voice reads its sample at 96 kHz, nearest, linear or cubic as without
+  oversampling, moving by `(hz << 16) / 96000` per 96 kHz frame (the 48 kHz
+  step halved, rounded down; `zz9k_voice_rate_step_oversampled()`). A rate
+  below 1.5 Hz gives a step of 0, so the voice does not move. A record applies
+  at the first 96 kHz frame of its output frame.
+- The sides of all voices and fade slots are summed in 32 bits per 96 kHz
+  frame and multiplied by the Q8.8 master in 64 bits, for each stretch between
+  two `MASTER` records, as without oversampling. Nothing is clamped yet.
+- The decimator is the 59-tap half-band filter of the stream reducer
+  (`audio_reduce_table.h`, Q30) run on the 32-bit values with a 64-bit
+  accumulator, one output per two 96 kHz frames, with the same phase as the
+  reducer. Only after it does the limiter or the clamp make 16 bits, once. So
+  a mix that overshoots the 16-bit range at 96 kHz but not after the filter is
+  not clipped.
+
+Output frame k is `sum over j = 0..58 of h[j] * x[2k - 57 + j]` for the 96 kHz
+frames x (zero before the first), with the centre tap `h[29]` on `x[2k - 28]`,
+which is the first 96 kHz frame of output frame k - 14. The sound is therefore
+late by exactly 14 whole output frames, and the firmware writes that number to
+`output_delay_frames` of the status block (0 when oversampling is off). The
+filter's group delay is 29 96 kHz frames, 14.5 output frames from the newest
+input it uses; the 14 above is the delay against the output frame a sound was
+scheduled at. The filter is not a pure delay, though. A single 96 kHz frame at
+the first half of output frame F reaches the output only at frame F + 14,
+while the second half of an output frame spreads over frames F to F + 29, and
+a sound that starts, stops or changes level at frame F (a `MASTER` record, a
+ramp, a `START`) arrives through the filter's step response over output frames
+F to F + 28, centred at F + 14, with no change before F. A client that
+schedules against the delay (a `STOP` followed by a `CONFIG`) allows the 29
+frames of the response, not just the 14.
+
+The limiter and the clamp act on the 48 kHz output, so a `LIMITER` record
+applies from its own stamp on the output frames, not 14 frames later with the
+sound.
+
+A record that changes the setting is accepted only while no voice and no
+fade tail is sounding (a voice that is active with a rate and a volume, or a
+ramp that is not over, or a fade slot): the engine would otherwise have to
+change the unit of a sound in flight. Otherwise it is rejected, counted, and
+nothing changes. A record for the value already in force is accepted and does
+nothing. A change clears the decimator's history: switching on filters from
+silence, and switching off drops what the filter still holds of the last
+sound (up to 29 output frames of its tail), so a client turns it off after
+the voices have faded. `ZZ9KVoiceReset()` clears the history too and keeps the
+setting. A session that never sends the record renders exactly as before,
+byte for byte.
+
+Oversampling doubles the mixing work of every voice and fade slot; the
+filter costs little in comparison. The `OVERSAMPLE` feature bit stays clear:
+no card timing gate has passed for it, so a client uses the record only for a
+qualification run until the bit is set. The AHI driver does not use it (the
+driver's channel model predicts pass ends with 48 kHz steps, which differ
+from the 96 kHz ones by up to one 96 kHz frame per pass).
+
 ### The ring
 
 The client owns the command ring: a host-window buffer with a 16-byte header
@@ -724,9 +796,11 @@ that was too small for that machine's load.
 
 The extended words follow at offsets 40 to 53, also in formerly reserved
 bytes. `features` (offset 40, 32 bits) is the features word described under
-[Discovery](#discovery) and is kept in every status write. `active_mask` (44),
-`ends` (48) and `output_delay_frames` (52, 16 bits) are reserved for later
-features and read 0. Read them with `zz9k_voice_ext_status_read()` into a
+[Discovery](#discovery) and is kept in every status write. `active_mask` (44)
+and `ends` (48) are reserved for later features and read 0. `output_delay_frames`
+(52, 16 bits) is the delay of the output stage in 48 kHz frames at the
+engine's horizon: 0, or 14 with [oversampling](#oversampling) on. Read them
+with `zz9k_voice_ext_status_read()` into a
 `ZZ9KVoiceExtStatus`, with the same tear protection and cache rule as the
 status words. Bytes 54 to 63 stay reserved.
 
@@ -826,8 +900,9 @@ cubic interpolation, and `VOICE_INTERP` of the `MODE` record and the `CONFIG`
 default interpolation, see [Interpolation](#interpolation). The firmware
 advertises all of them once their card timing gates have passed; cubic
 reading is used only when a client asks for it.
-The other bits (`OVERSAMPLE`, `ENVELOPE`, `EVENTS`) belong to features that
-are not in the firmware yet and stay clear.
+The `OVERSAMPLE` bit is reserved for [Oversampling](#oversampling) and stays
+clear until its card timing gate has passed; `ENVELOPE` and `EVENTS` belong
+to features that are not in the firmware yet and stay clear too.
 
 ## zz9k-voiceplay
 
@@ -841,7 +916,7 @@ zz9k-voiceplay MODULE [LEAD=frames] [NTSC] [LINEAR] [SECONDS=n] [LOWLAT]
 zz9k-voiceplay CLICK [LEAD=frames] [SECONDS=n] [LOWLAT]
 zz9k-voiceplay LIVE [LEAD=frames] [SECONDS=n] [LOWLAT]
 zz9k-voiceplay LOAD VOICES=n SECONDS=n [LINEAR] [STEREO] [RATE=hz] [GAIN=n] [CHURN] [GROUPS=n] [LOWLAT]
-zz9k-voiceplay <any of the above> [RAMP=frames] [LIMITER] [INTERP=nearest|linear|cubic] [PERVOICE]
+zz9k-voiceplay <any of the above> [RAMP=frames] [LIMITER] [INTERP=nearest|linear|cubic] [PERVOICE] [OVERSAMPLE]
 ```
 
 | Argument | Meaning |
@@ -854,6 +929,7 @@ zz9k-voiceplay <any of the above> [RAMP=frames] [LIMITER] [INTERP=nearest|linear
 | `LIMITER` | Any mode: switch the static soft knee on with a `CONFIG` record (flag 2, arg1 1) before any other record. Needs firmware with the `CONFIG` feature, otherwise the tool exits with code 20. When `LIMITER` is not advertised it prints a warning that the knee is unqualified and runs it anyway, which is how the firmware is qualified. There is no option to send arg1 0 |
 | `INTERP` | Any mode: `nearest`, `linear` or `cubic`, the interpolation of the session, in place of `LINEAR`. Sent as a `CONFIG` default (flag 4) before any note, or with `PERVOICE` as a `MODE` record for each voice. When the firmware does not advertise `VOICE_INTERP` (or `CUBIC` with `cubic`) the tool prints a warning that the setting is unqualified and runs it anyway, which is how the firmware is qualified |
 | `PERVOICE` | With `INTERP`: send a `MODE` record for each voice in place of the `CONFIG` default |
+| `OVERSAMPLE` | Any mode: switch 2x oversampling on with a `CONFIG` record (flag 8, arg0 2) at the lead stamp, before every other record. Needs firmware with the `CONFIG` feature, otherwise the tool exits with code 20. When `OVERSAMPLE` is not advertised it prints a warning that it is unqualified and runs it anyway, which is how the firmware is qualified. The report prints the output delay the firmware published |
 | `GAIN` | LOAD mode only: the volume of every voice on each side, 0 to 65535, in place of 65535 divided by the voice count |
 | `CHURN` | LOAD mode only: restart the voices continuously, see below |
 | `GROUPS` | With `CHURN`: restart groups, 1 to 32 (default 32) |
@@ -932,6 +1008,7 @@ level. For example:
 zz9k-voiceplay LOAD VOICES=32 GAIN=65535 LIMITER SECONDS=20
 zz9k-voiceplay LOAD VOICES=32 GAIN=65535 CHURN RAMP=256 LIMITER STEREO LINEAR SECONDS=20
 zz9k-voiceplay LOAD VOICES=32 STEREO RATE=96000 CHURN RAMP=256 GAIN=65535 LIMITER INTERP=cubic SECONDS=20
+zz9k-voiceplay LOAD VOICES=32 STEREO RATE=96000 CHURN RAMP=256 GAIN=65535 LIMITER INTERP=linear OVERSAMPLE SECONDS=20
 ```
 
 These runs are loud and harsh by design. Turn the amplifier or speakers down
@@ -961,9 +1038,9 @@ tool resets the session unless the song ended, closes it and prints a report:
 | late, rejected, underruns, dropped | The firmware counters from the status block |
 | session | `low latency` or `standard`, with the granted lead floor in frames |
 | jitter | The two jitter words of the status block: the smallest wait of a rendered period for the audio interrupt and the largest gap between firmware polls, in microseconds |
-| engine features | The features word of the status block, with `CONFIG`, `RAMP`, `LIMITER`, `CUBIC` and `VOICE_INTERP` named when they are set |
+| engine features | The features word of the status block, with `CONFIG`, `RAMP`, `LIMITER`, `CUBIC`, `VOICE_INTERP` and `OVERSAMPLE` named when they are set |
 | load | LOAD mode only: the voices, sample type, interpolation, rate range and the volume per side (65535 divided by the voice count unless `GAIN` is given) |
-| ramp, limiter, interpolation, churn | Only with `RAMP`, `LIMITER`, `INTERP` or `CHURN`: the ramp length, the limiter state, the interpolation and how it was set, the restarts written, the groups and the interval between restarts |
+| ramp, limiter, interpolation, oversampling, churn | Only with `RAMP`, `LIMITER`, `INTERP`, `OVERSAMPLE` or `CHURN`: the ramp length, the limiter state, the interpolation and how it was set, the oversampling factor with the output delay the firmware published, the restarts written, the groups and the interval between restarts |
 | keys played | Live mode only |
 | smallest scheduling margin | The smallest stamp minus horizon at the moment a record was written, in frames and microseconds |
 | record latency | Minimum, average and maximum of each record's stamp minus the playing frame of the status read before its write, in frames and milliseconds: how far ahead of the sound the records were queued. Click records are included |
