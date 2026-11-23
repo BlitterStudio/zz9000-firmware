@@ -5394,9 +5394,15 @@ static int client_media_sessions_released(uint16_t client_id)
 	uint32_t close_session;
 
 	/* Stop the AX media pump before the release path unbinds the session's
-	 * audio: the pump's ISR view must not race the staging rewind. */
+	 * audio: the pump's ISR view must not race the staging rewind. Only
+	 * the releasing client's own session is concerned. Another opener's
+	 * release (a tool that opened zz9k.library beside a player) must leave
+	 * the pump and the session it plays bound: stopping it here leaves the
+	 * owner's audio bound with nothing retiring it, so its output clock
+	 * never moves again. */
 	if (g_audio_playback.session != 0U &&
-	    g_audio_playback.source_kind == AUDIO_PUMP_SOURCE_MEDIA)
+	    g_audio_playback.source_kind == AUDIO_PUMP_SOURCE_MEDIA &&
+	    sdk_media_session_owned_by(g_audio_playback.session, client_id))
 		audio_playback_stop();
 	close_session = 0U;
 	if (sdk_media_session_release_client(client_id, &close_session))
