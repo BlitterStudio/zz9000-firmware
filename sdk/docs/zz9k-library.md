@@ -100,8 +100,9 @@ functions.
 ## ARM app client
 
 Programs reach the ARM app runtime through `aar.library`, the resident client
-library of the AAR standard (`Libs/aar.library`; the API is in
-`docs/aar-client-api.md` of [BlitterStudio/aar](https://github.com/BlitterStudio/aar)).
+library of the [AAR standard](https://github.com/BlitterStudio/aar/blob/main/spec/aar.md),
+shipped as `Libs/aar.library`. Its portable API is in the
+[aar client reference](https://github.com/BlitterStudio/aar/blob/main/docs/aar-client-api.md).
 It claims an app, maps its control block and its pair of queues with
 `mmu.library`, loads and starts the image, serves the requests the app posts,
 exchanges messages and input events, keeps the lease and closes the claim.
@@ -120,9 +121,9 @@ The library is built from two parts that the SDK build links into one
   implements the platform interface `client/src/aar_plat.h` with the private
   mailbox operations of `zzapp_proto.h`, the board and `mmu.library`.
 
-The library is GPL-3.0-or-later as linked, because of the second part. A
-program that opens it with `OpenLibrary()` and calls its vectors through the
-MIT headers is not bound by the GPL (see `LICENSING.md`). The packaged SDK
+See [LICENSING.md](../../LICENSING.md) for the linked library's licence and
+the permission for programs that call its vectors through the MIT headers.
+The packaged SDK
 ships those headers under `Developer/Include` (`proto/aar.h`,
 `libraries/aar.h`, `libraries/aar_zz9000.h`, the generated `clib`, `pragmas`
 and `inline` files, and `aar/app.h` and `aar/transport.h` they include) and
@@ -153,13 +154,14 @@ CloseLibrary(AARBase);
 built on, come from the same pinned checkout (`client/run` and `client/serve`,
 MIT) and link no code of this repository: they call `aar.library` through its
 vectors. `aar-run` serves an app's files, console, display, audio and input;
-it ships as `C/aar-run` with `Docs/aar-run.guide` as its manual. The loop
+it ships as `C/aar-run` with `Docs/aar-run.guide` as its manual, generated from
+[aar client/run/README.md](https://github.com/BlitterStudio/aar/blob/main/client/run/README.md). The loop
 installs the log sink with `AARSetLogSink`. `Developer/Lib/libaarserve.a` and
 `libraries/aar_serve.h` let a program embed the same loop.
 
 Points that matter to a caller:
 
-- **Mapping.** Every buffer the card names (control block, queues, console,
+- Every buffer the card names (control block, queues, console,
   file data, audio ring, load buffer) is a board offset (a token) in memory the
   card allocated 8 KiB aligned and sized. The platform layer makes it
   cache-inhibited with `mmu.library` once per block (`CacheClearE`,
@@ -170,17 +172,15 @@ Points that matter to a caller:
   an app publishes, and `AARSharedToken` is its inverse. `AARSharedUnmap` is
   bookkeeping: the pages stay cache-inhibited, because restoring them costs
   about 0.7 s a range.
-- **Shared limit.** `AARInfo.shared_max_mib` is 62 on the ZZ9000, the largest
-  limit the card grants (`ZZAPP_SHARED_MAX_MIB`, the alias window one app
-  maps its shared blocks through). `AARSetTags` with `AAR_TAG_SHARED_MIB`
-  above it returns `AAR_E_INVAL`. The firmware refuses a larger limit at
-  `LOAD_BEGIN` with `NO_MEMORY` (`docs/app-runtime.md`, "Load, start and
-  stop").
-- **Lease.** The card stops an app whose client does not advance
-  `AAR_CB_LEASE_COUNTER`: after 2 s while it runs (10 s with
-  `ZZAPP_CLIENT_LEASE_EXTENDED`, which the library sets unless
-  `AAR_TAG_LEASE_EXTENDED` says otherwise, 30 s while loading). The library
-  stores the counter of every open handle from a vertical-blank interrupt
+- `AARInfo.shared_max_mib` is 62 on the ZZ9000, the largest limit the card
+  grants (`ZZAPP_SHARED_MAX_MIB`, the app's shared alias window).
+  `AARSetTags` with `AAR_TAG_SHARED_MIB` above it returns `AAR_E_INVAL`.
+  The firmware check is described under
+  [Load, start and stop](../../docs/app-runtime.md#load-start-and-stop).
+- The firmware enforces the
+  [claim lease](../../docs/app-runtime.md#leases). The library requests
+  `ZZAPP_CLIENT_LEASE_EXTENDED` unless `AAR_TAG_LEASE_EXTENDED` says otherwise.
+  It stores the counter of every open handle from a vertical-blank interrupt
   server about every 100 ms, so an owner that is blocked for a long time (a
   requester, `Forbid()`) does not lose its app. The interrupt renews only
   while the library's dispatcher process (priority 5) has run in the last
@@ -189,7 +189,7 @@ Points that matter to a caller:
   their handles (about once a second) and stops and releases their claims. A
   task must not rename itself while it owns a handle. A wedged but live owner
   keeps its app alive.
-- **Requests.** `AARServiceNext()` returns the next request of the app
+- `AARServiceNext()` returns the next request of the app
   (file, console, display, audio) with its buffer already mapped, and moves
   messages and logs in front of it aside. `AARServiceReply()` posts the
   completion and rings the card's doorbell (`ZZAPP_OP_KICK`, coalesced,
@@ -199,15 +199,15 @@ Points that matter to a caller:
   queue, so a parked app is woken at once. `AAR_E_BUSY` means the completion
   queue is full: try again. A request that does not arrive is not an error:
   `AARServiceNext()` returns `AAR_E_BUSY` when none waits.
-- **Event counts.** When the firmware publishes its event block (`QUERY`
-  `EVENTS`, see `docs/app-runtime.md`), the platform layer maps it once,
+- When firmware publishes its event block (`QUERY` `EVENTS`, see
+  [the runtime contract](../../docs/app-runtime.md#the-control-block-and-the-doorbell)), the platform layer maps it once,
   cache-inhibited, at the first claim. The dispatcher reads one word of it
   per pass (`events_sample`) and the 15 group words only when that word
   moved; `claim_news` then answers from those samples, without touching the
   card, whether a claim's group (record index / 32; records from 480 up use
   the global count) changed since that claim last asked. A firmware without
   the block reports 0 and the library polls every armed claim as before.
-- **Messages** are 32 bytes. Sending is credited: at most `AAR_MSG_CAPACITY`
+- Messages are 32 bytes. Sending is credited: at most `AAR_MSG_CAPACITY`
   (63) messages may be unconsumed by the app (`AAR_CB_MSG_CONSUMED`), else
   `AAR_E_BUSY`. A message the app sends is held in the library's inbox of 64
   until read. When that inbox is full, the next message stays at the SQ head
