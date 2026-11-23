@@ -245,13 +245,30 @@ static uint16_t open_session(uint32_t lead, uint32_t voices)
 	return audio_voice_session_open(&o, &g_grant);
 }
 
+/*
+ * The poll renders one period per call and the firmware main loop calls it
+ * many times in 20 ms: poll until a call stages nothing more.
+ */
+static void poll_loop(void)
+{
+	uint32_t i;
+
+	for (i = 0U; i < 64U; i++) {
+		uint32_t before = st_horizon();
+
+		audio_voice_session_poll();
+		if (st_horizon() == before)
+			break;
+	}
+}
+
 /* One 20 ms main-loop period: heartbeat (optional), poll, DMA, ISR. */
 static void period(int with_beat)
 {
 	bench_clock += 20U;
 	if (with_beat)
 		beat();
-	audio_voice_session_poll();
+	poll_loop();
 	dma_tick(1);
 	audio_fabric_isr();
 }
@@ -2173,15 +2190,18 @@ static const char *cname(const char *mode, const char *what)
 	return name;
 }
 
+static const char *chord32_mode(uint32_t flags)
+{
+	return (flags & AUDIO_VOICE_OPEN_LINEAR) != 0U ? "linear" : "nearest";
+}
+
 /*
  * ZZAXVoiceTest S2 as the AHI driver sends it: 32 voices of one 64-frame
  * looped cycle in a major chord over three octaves (7040 Hz up to about
  * 42 kHz), master gain 8 (1/32), the 97 records of the model at the first
- * stamp. The card hung in this scenario in the interpolated mode, so both
- * interpolations must keep rendering to the lead, with no late, rejected,
- * dropped or underrun counts.
+ * stamp. Opens the session and publishes the records; nothing is polled.
  */
-static void scenario_chord32(uint32_t flags)
+static void chord32_start(uint32_t flags)
 {
 	static const uint32_t semitone[12] = {
 		65536U, 69433U, 73561U, 77935U, 82570U, 87480U, 92682U,
@@ -2190,10 +2210,8 @@ static void scenario_chord32(uint32_t flags)
 	static const uint32_t chord[3] = { 0U, 4U, 7U };
 	struct audio_voice_session_upload up;
 	struct audio_voice_session_open o;
-	const char *mode = (flags & AUDIO_VOICE_OPEN_LINEAR) != 0U ?
-		"linear" : "nearest";
+	const char *mode = chord32_mode(flags);
 	uint32_t i;
-	int nonzero = 0;
 
 	fresh();
 	for (i = 0U; i < 64U; i++) {
@@ -2230,6 +2248,20 @@ static void scenario_chord32(uint32_t flags)
 		rec(7680U, (uint8_t)i, AUDIO_VOICE_OP_LOOP, 0U, 0U, 128U);
 	}
 	publish();
+}
+
+/*
+ * The card hung in this scenario in the interpolated mode, so both
+ * interpolations must keep rendering to the lead, with no late, rejected,
+ * dropped or underrun counts.
+ */
+static void scenario_chord32(uint32_t flags)
+{
+	const char *mode = chord32_mode(flags);
+	uint32_t i;
+	int nonzero = 0;
+
+	chord32_start(flags);
 	run(250);
 	for (i = 0U; i < AUDIO_NUM_PERIODS; i++) {
 		const int16_t *p = tx_period(i);
@@ -2252,6 +2284,135 @@ static void scenario_chord32(uint32_t flags)
 	      fmt("late=%u rejected=%u dropped=%u underruns=%u", st_late(),
 	      st_rejected(), st_dropped(), st_underruns()));
 	check(nonzero, cname(mode, "the chord is audible"), "");
+}
+
+/*
+ * A poll call must return to the main loop after one period: the 32-voice
+ * interpolated render costs about 3 ms a period on the card, and rendering
+ * the whole 8-period lead in the first call stalled every Zorro register
+ * access for about 24 ms. The calls here run back to back, as the main loop
+ * does after a START, and each may stage one period at most; the lead is
+ * complete after as many calls as it has periods. Then a reset: it stages
+ * its one silent period and the polls refill the lead the same way.
+ */
+static void scenario_chord32_bounded(uint32_t flags)
+{
+	const char *mode = chord32_mode(flags);
+	uint32_t periods;
+	uint32_t calls = 0U;
+	uint32_t last = 0U;
+	uint32_t step_max = 0U;
+
+	chord32_start(flags);
+	periods = g_grant.lead_frames / AUDIO_VOICE_PERIOD_FRAMES;
+	while (st_horizon() < g_grant.lead_frames && calls < 64U) {
+		uint32_t horizon;
+
+		audio_voice_session_poll();
+		calls++;
+		horizon = st_horizon();
+		if (horizon - last > step_max)
+			step_max = horizon - last;
+		last = horizon;
+	}
+	check(step_max <= AUDIO_VOICE_PERIOD_FRAMES,
+	      cname(mode, "one poll call stages at most one period"),
+	      fmt("largest step=%u frames", step_max));
+	check(calls == periods && st_horizon() == g_grant.lead_frames,
+	      cname(mode, "repeated polls reach the full lead"),
+	      fmt("calls=%u periods=%u horizon=%u", calls, periods,
+	      st_horizon()));
+	run(60);
+	check(st_late() == 0U && st_rejected() == 0U && st_dropped() == 0U &&
+	      st_underruns() == 0U,
+	      cname(mode, "no late, rejected, dropped or underrun after the staged start"),
+	      fmt("late=%u rejected=%u dropped=%u underruns=%u", st_late(),
+	      st_rejected(), st_dropped(), st_underruns()));
+	check(st_playing() > 0U &&
+	      st_horizon() - st_playing() == g_grant.lead_frames,
+	      cname(mode, "the slot plays and keeps the full lead"),
+	      fmt("horizon=%u playing=%u", st_horizon(), st_playing()));
+
+	/* RESET: the cursors restart at the staged frame. */
+	check(audio_voice_session_reset(g_grant.session) == SDK_STATUS_OK,
+	      cname(mode, "reset"), "");
+	check(st_horizon() - st_playing() == AUDIO_VOICE_PERIOD_FRAMES,
+	      cname(mode, "a reset stages one silent period, not the lead"),
+	      fmt("horizon=%u playing=%u", st_horizon(), st_playing()));
+	calls = 0U;
+	step_max = 0U;
+	last = st_horizon();
+	while (st_horizon() - st_playing() < g_grant.lead_frames &&
+	       calls < 64U) {
+		uint32_t horizon;
+
+		audio_voice_session_poll();
+		calls++;
+		horizon = st_horizon();
+		if (horizon - last > step_max)
+			step_max = horizon - last;
+		last = horizon;
+	}
+	check(step_max <= AUDIO_VOICE_PERIOD_FRAMES &&
+	      calls == periods - 1U,
+	      cname(mode, "after a reset the polls refill the lead one period a call"),
+	      fmt("calls=%u step=%u", calls, step_max));
+	run(60);
+	check(st_underruns() == 0U && st_late() == 0U,
+	      cname(mode, "no underrun or late after the reset"),
+	      fmt("underruns=%u late=%u", st_underruns(), st_late()));
+}
+
+/*
+ * Zorro traffic that never pauses keeps the main loop out of the poll's
+ * no-request branch; the request branch calls audio_voice_session_poll_busy
+ * instead, which polls once 2 ms have passed since the last poll (the host
+ * clock is 1 ms per tick) and not before. Hammering it every millisecond
+ * for 2 s must keep the lead without an underrun.
+ */
+static void scenario_busy_poll(void)
+{
+	uint32_t i;
+	uint32_t horizon;
+
+	chord32_start(AUDIO_VOICE_OPEN_LINEAR);
+	run(30);
+	check(st_horizon() - st_playing() == g_grant.lead_frames,
+	      "busy poll: steady state keeps the lead", "");
+	/* One period elapsed at the ISR; the last poll was at this tick. */
+	dma_tick(1);
+	audio_fabric_isr();
+	audio_voice_session_poll_busy();
+	horizon = st_horizon();
+	bench_clock += 1U;
+	audio_voice_session_poll_busy();
+	check(st_horizon() == horizon,
+	      "busy poll: less than 2 ms after a poll does nothing",
+	      fmt("horizon %u -> %u", horizon, st_horizon()));
+	bench_clock += 1U;
+	audio_voice_session_poll_busy();
+	check(st_horizon() == horizon + AUDIO_VOICE_PERIOD_FRAMES,
+	      "busy poll: 2 ms after a poll renders the missing period",
+	      fmt("horizon %u -> %u", horizon, st_horizon()));
+	check(st_horizon() - st_playing() <= g_grant.lead_frames,
+	      "busy poll: the lead is not exceeded", "");
+
+	for (i = 0U; i < 2000U; i++) {
+		bench_clock += 1U;
+		if (i % 20U == 0U) {
+			beat();
+			dma_tick(1);
+			audio_fabric_isr();
+		}
+		audio_voice_session_poll_busy();
+	}
+	check(audio_voice_session_active() && st_underruns() == 0U &&
+	      st_late() == 0U &&
+	      st_horizon() - st_playing() >= g_grant.lead_frames -
+	      AUDIO_VOICE_PERIOD_FRAMES,
+	      "busy poll: Zorro traffic alone keeps the engine fed",
+	      fmt("underruns=%u late=%u horizon=%u playing=%u", st_underruns(),
+	      st_late(), st_horizon(), st_playing()));
 }
 
 int main(void)
@@ -2288,6 +2449,9 @@ int main(void)
 	scenario_define_formats();
 	scenario_chord32(0U);
 	scenario_chord32(AUDIO_VOICE_OPEN_LINEAR);
+	scenario_chord32_bounded(0U);
+	scenario_chord32_bounded(AUDIO_VOICE_OPEN_LINEAR);
+	scenario_busy_poll();
 	if (failures != 0)
 		printf("audio_voice_session_test: %d FAILED\n", failures);
 	else

@@ -296,14 +296,24 @@ static void render_period(void)
 
 /*
  * Render whole periods into the staging ring while the engine is less than
- * the granted lead past the playing frame. The rendered-but-unstaged
- * periods never exceed the lead (the ISR consumes before it retires), so
- * the ring keeps the TX replay window behind `consumed` intact; the size
- * assert at the top of the file holds that arithmetic.
+ * the granted lead past the playing frame, at most `max_periods` of them.
+ * The rendered-but-unstaged periods never exceed the lead (the ISR consumes
+ * before it retires), so the ring keeps the TX replay window behind
+ * `consumed` intact; the size assert at the top of the file holds that
+ * arithmetic.
+ *
+ * The poll runs in the main loop's no-request branch, and every Zorro
+ * register access from the 68k waits while a render runs. 32 interpolated
+ * voices cost about 3 ms a period, so rendering the whole 8-period lead in
+ * one call after an OPEN or START stalled the 68k for about 24 ms and
+ * froze the machine. The poll renders one period per call: the main loop
+ * serves the next Zorro request between periods, and the steady state needs
+ * one period per 20 ms anyway. Catching up after a stall takes one call per
+ * period; the loop makes many calls in a period.
  */
-static void render_to_lead(void)
+static void render_to_lead(uint32_t max_periods)
 {
-	for (;;) {
+	while (max_periods-- != 0U) {
 		uint32_t playing =
 			(uint32_t)(read_cursor64(&g_s.retired) / 4U);
 
@@ -597,8 +607,8 @@ uint16_t audio_voice_session_reset(uint32_t session)
 		 * one period per tick, so a tick landing between the cursor
 		 * reset and the first render would find nothing staged and
 		 * count a voice underrun for a stream the client just
-		 * flushed. The rest of the lead is rendered with interrupts
-		 * on; a tick needs one period at a time.
+		 * flushed. The poll renders the rest of the lead, one period
+		 * per call; a tick needs one period at a time.
 		 */
 		irq_state = smp_local_irq_save();
 		audio_fabric_request_rebuild(VOICE_SLOT);
@@ -609,7 +619,6 @@ uint16_t audio_voice_session_reset(uint32_t session)
 		g_engine.frame = (uint32_t)(consumed / 4U);
 		render_period();
 		smp_local_irq_restore(irq_state);
-		render_to_lead();
 	}
 	publish_status();
 	return SDK_STATUS_OK;
@@ -655,6 +664,20 @@ uint16_t audio_voice_session_upload(uint32_t session,
 
 /* ---- main-loop poll ---- */
 
+/* One period per poll call: see render_to_lead(). */
+#define POLL_MAX_PERIODS 1U
+
+/*
+ * The poll runs in the main loop's no-request branch only. A 68k that keeps
+ * a Zorro request in flight every iteration (a P96 blit, a long copy) would
+ * hold the poll off for as long as it lasts, and the lead only covers
+ * (lead - fill-ahead) * 20 ms, 40 ms at the floor. audio_voice_session_
+ * poll_busy() is called from the request branch and polls anyway once this
+ * long has passed since the last poll, so a render and a ring drain are at
+ * most this far apart however busy the bus is.
+ */
+#define BUSY_POLL_TICKS (COUNTS_PER_SECOND / 500U)
+
 void audio_voice_session_poll(void)
 {
 	uint16_t write_cursor;
@@ -687,14 +710,34 @@ void audio_voice_session_poll(void)
 	    g_s.state == AUDIO_VOICE_STATE_OPEN)
 		g_s.state = AUDIO_VOICE_STATE_LIVE;
 	if (g_s.state == AUDIO_VOICE_STATE_LIVE) {
-		render_to_lead();
-		if (!g_s.slot_live) {
-			/* The first record fixes frame 0: the slot goes live
-			 * with the first periods already staged. */
+		render_to_lead(POLL_MAX_PERIODS);
+		/*
+		 * The first record fixes frame 0. The slot goes live once the
+		 * whole lead is staged, which takes one call per period: going
+		 * live primes the TX ring with the staged periods up to the
+		 * fabric fill-ahead (6 periods, 2 in a low-latency session;
+		 * the lead is always at least one more), and the ISR adds one
+		 * period per tick after that, so a slot that went live with
+		 * fewer periods staged would leave the ring short of its
+		 * fill-ahead and run out before the poll caught up. Until
+		 * then the playing frame stays 0 and the engine renders up
+		 * to the lead.
+		 */
+		if (!g_s.slot_live && g_engine.frame >= g_s.lead) {
 			g_s.slot_live = 1U;
 			(void)audio_fabric_producer_go_live_when_ready(
 				VOICE_SLOT, 1);
 		}
 	}
 	publish_status();
+}
+
+void audio_voice_session_poll_busy(void)
+{
+	if (g_s.state == AUDIO_VOICE_STATE_CLOSED)
+		return;
+	if (g_s.poll_seen &&
+	    now_ticks() - g_s.last_poll_ticks < BUSY_POLL_TICKS)
+		return;
+	audio_voice_session_poll();
 }

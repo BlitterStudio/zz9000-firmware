@@ -180,11 +180,16 @@ this.
 
 Every record carries a stamp, the engine frame it takes effect at. The
 firmware renders whole 960-frame periods (20 ms) on its main loop, up to
-`playing_frame + lead_frames`, into a staging ring. The fabric copies those
+`playing_frame + lead_frames`, into a staging ring, one period per pass of
+the loop so that the 68k's register accesses are served between periods. A
+session starts playing once the whole lead is staged, as long after the first
+record as it takes to render the lead. Until then the status `horizon` climbs
+one period per pass and `playing_frame` stays 0. The fabric copies those
 periods into the transmit ring from its interrupt. A record must reach the
-firmware before the engine renders its frame. A record whose frame has already
-been rendered is applied at the first frame of the next period the engine
-renders, and counts as late.
+firmware before the
+engine renders its frame. A record whose frame has already been rendered is
+applied at the first frame of the next period the engine renders, and counts
+as late.
 
 Three numbers in the grant bound the lead:
 
