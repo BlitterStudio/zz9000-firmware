@@ -774,6 +774,8 @@ static int api_image_decode(uint32_t session, const void *src, uint32_t bytes,
         return AAR_E_INVAL;
     if (!ds)
         return AAR_E_FAULT;
+    if (!session)
+        return AAR_E_INVAL;
     for (i = 0; i < ZZAPP_DECODE_SESSIONS && ds->image[i].id != session; ++i) {}
     if (i == ZZAPP_DECODE_SESSIONS)
         return AAR_E_INVAL;
@@ -802,6 +804,8 @@ static int api_image_close(uint32_t session)
 
     if (!ds)
         return AAR_E_FAULT;
+    if (!session)
+        return AAR_E_INVAL;
     for (i = 0; i < ZZAPP_DECODE_SESSIONS && ds->image[i].id != session; ++i) {}
     if (i == ZZAPP_DECODE_SESSIONS)
         return AAR_E_INVAL;
@@ -822,7 +826,8 @@ static struct zzapp_audio_session *audio_session_find(uint32_t session)
     struct zzapp_decode_state *ds = decode_state(api_pid());
     uint32_t i;
 
-    if (!ds || !ds->audio)
+    /* Session 0 is no session: an empty slot has id 0. */
+    if (!session || !ds || !ds->audio)
         return NULL;
     for (i = 0; i < ZZAPP_DECODE_SESSIONS; ++i)
         if (ds->audio->session[i].id == session)
