@@ -725,6 +725,92 @@ static int run_sweep(void)
 	return 1;
 }
 
+/*
+ * Exhaustive small-state sweep: a sample of 12 frames, every start frame,
+ * every loop (none, or any start and length inside the sample), forward and
+ * backward, nearest and linear, all formats, steps from far below one frame
+ * to above the 4.0 cap. Loops of 1 or 2 frames at a step of 4.0 wrap several
+ * times per output frame; any of these that stopped advancing would end in
+ * the watchdog.
+ */
+static int run_exhaustive(void)
+{
+	static const uint32_t hz[] = {
+		1, 700, 6000, 24000, 47999, 48000, 48001, 72000, 96000, 192000, 200000
+	};
+	enum { NF = 12 };
+	static cur_engine ec;
+	static ref_engine er;
+	uint32_t fmt, lin, back, h, off, ls, ll, r;
+	uint32_t count = 0;
+
+	for (fmt = 0; fmt < 4; fmt++)
+	for (lin = 0; lin < 2; lin++)
+	for (back = 0; back < 2; back++)
+	for (h = 0; h < sizeof(hz) / sizeof(hz[0]); h++)
+	for (off = 0; off < NF; off++)
+	for (ls = 0; ls <= NF; ls++)
+	for (ll = 0; ll + ls <= NF; ll++) {
+		const uint32_t shift = fmt == 3U ? 2U : (fmt == 1U || fmt == 2U) ? 1U : 0U;
+		const uint32_t bytes = NF << shift;
+		cur_cmd cmds[4];
+		ref_cmd rcmds[4];
+		uint32_t i;
+
+		S.seq = 200000U + count++;
+		S.bank_len = bytes;
+		S.bank = bank_alloc(bytes);
+		rng_state = 0xABCDEFULL + count / 997U;
+		for (i = 0; i < bytes; i++)
+			S.bank[i] = (uint8_t)(rnd64() >> 40);
+		audio_voice_init(&ec, S.bank, bytes, AUDIO_VOICE_CLOCK_PAL);
+		audio_voice_baseline_init(&er, S.bank, bytes, AUDIO_VOICE_CLOCK_PAL);
+		ec.interp = er.interp = lin ? AUDIO_VOICE_INTERP_LINEAR :
+		                              AUDIO_VOICE_INTERP_NEAREST;
+		audio_voice_sample_set(&ec, 0, 0, bytes, fmt);
+		audio_voice_baseline_sample_set(&er, 0, 0, bytes, fmt);
+		memset(cmds, 0, sizeof(cmds));
+		cmds[0].op = AUDIO_VOICE_OP_START;
+		cmds[0].arg0 = off << shift;
+		cmds[1].op = AUDIO_VOICE_OP_LOOP;
+		cmds[1].arg0 = ls << shift;
+		cmds[1].arg1 = ll << shift;
+		cmds[2].op = AUDIO_VOICE_OP_SET;
+		cmds[2].flags = AUDIO_VOICE_SET_RATE | AUDIO_VOICE_RATE_HZ |
+		                AUDIO_VOICE_SET_VOLUME;
+		cmds[2].arg0 = hz[h];
+		cmds[2].arg1 = (65535U << 16) | 30000U;
+		cmds[3].op = AUDIO_VOICE_OP_DIRECTION;
+		cmds[3].flags = back ? AUDIO_VOICE_DIR_BACKWARD : 0U;
+		for (i = 0; i < 4; i++) {
+			rcmds[i].stamp = cmds[i].stamp;
+			rcmds[i].voice = cmds[i].voice;
+			rcmds[i].op = cmds[i].op;
+			rcmds[i].flags = cmds[i].flags;
+			rcmds[i].arg0 = cmds[i].arg0;
+			rcmds[i].arg1 = cmds[i].arg1;
+		}
+		for (r = 0; r < 2; r++) {
+			const uint32_t frames = r == 0 ? 37U : 101U;
+			const size_t nrec = r == 0 ? 4U : 0U;
+			size_t uc, ur;
+
+			memset(g_out_cur, 0x5A, sizeof(g_out_cur));
+			memset(g_out_ref, 0x5A, sizeof(g_out_ref));
+			uc = audio_voice_render(&ec, g_out_cur, frames, cmds, nrec);
+			ur = audio_voice_baseline_render(&er, g_out_ref, frames, rcmds,
+			                                 nrec);
+			if (uc != ur || memcmp(g_out_cur, g_out_ref,
+			                       sizeof(g_out_cur)) != 0)
+				FAILF("exhaustive fmt %u lin %u back %u hz %u off %u loop "
+				      "%u+%u render %u", fmt, lin, back, hz[h], off, ls, ll, r);
+			if (!compare_state(&ec, &er, "exhaustive"))
+				return 0;
+		}
+	}
+	return 1;
+}
+
 int main(void)
 {
 	const char *env;
@@ -751,6 +837,7 @@ int main(void)
 		run_sequence(only, seed);
 	} else {
 		(void)run_sweep();
+		(void)run_exhaustive();
 		for (seq = 0; seq < seqs && failures < 5; seq++) {
 			(void)run_sequence(seq, seed);
 			done++;
@@ -768,7 +855,8 @@ int main(void)
 		       st.renders, st.audible, st.clipped, st.linear, st.active_end);
 		return 1;
 	}
-	printf("audio_voice_baseline_test: %u random sequences + rate sweep "
+	printf("audio_voice_baseline_test: %u random sequences + rate and "
+	       "boundary sweeps "
 	       "identical to the baseline engine (seed %llu); %u renders, %u "
 	       "audible, %u clipped, %u with voices still sounding, %u with "
 	       "records late\n", done, (unsigned long long)seed, st.renders,
