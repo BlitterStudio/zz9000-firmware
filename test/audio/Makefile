@@ -30,6 +30,7 @@ VOICE_TARGET := $(BUILD_DIR)/audio_voice_test
 VOICE_PT4_TARGET := $(BUILD_DIR)/audio_voice_pt4_test
 VOICE_SESSION_TARGET := $(BUILD_DIR)/audio_voice_session_test
 VOICE_BASELINE_TARGET := $(BUILD_DIR)/audio_voice_baseline_test
+VOICE_RAMP_TARGET := $(BUILD_DIR)/audio_voice_ramp_test
 TARGETS := $(CONVERT_TARGET) $(CONVERT_EXACT_TARGET) $(CAPTURE_TARGET) $(PROFILE_TARGET) \
 	$(PLAYBACK_TARGET) $(RATE_TARGET) $(PRECONVERT_TARGET) \
 	$(MEDIA_VIEW_TARGET) $(DRAIN_TARGET) $(CLOSE_TARGET) $(RECLAIM_TARGET) \
@@ -38,6 +39,7 @@ TARGETS := $(CONVERT_TARGET) $(CONVERT_EXACT_TARGET) $(CAPTURE_TARGET) $(PROFILE
 	$(RING_TARGET) $(BENCH_SMOKE_TARGET) $(STREAM_DECODE_TARGET) \
 	$(REDUCE_TARGET) $(VOICE_TARGET) $(VOICE_PT4_TARGET) \
 	$(VOICE_BASELINE_TARGET) \
+	$(VOICE_RAMP_TARGET) \
 	$(VOICE_SESSION_TARGET)
 
 # mock/ shadows ff.h and xil_cache.h for the TUs (zz_config.c) whose
@@ -75,6 +77,7 @@ test: $(TARGETS)
 	$(VOICE_BASELINE_TARGET)
 	$(VOICE_PT4_TARGET)
 	$(VOICE_SESSION_TARGET)
+	$(VOICE_RAMP_TARGET)
 
 # U2 fabric compositor: the characterization golden (pump_golden.c, a
 # verbatim capture of the pre-fabric pump) drives the parity scenarios
@@ -312,6 +315,15 @@ $(VOICE_BASELINE_TARGET): audio_voice_baseline_test.c \
 	$(SRC_DIR)/audio_voice.c $(SRC_DIR)/audio_voice.h
 	@mkdir -p $(BUILD_DIR)
 	$(CC) $(CPPFLAGS) -Ibaseline $(CFLAGS) -o $@ audio_voice_baseline_test.c \
+		baseline/audio_voice_baseline.c $(SRC_DIR)/audio_voice.c
+
+# Ramping and fade slots against a frame-by-frame model, plus directed cases.
+# ZZ9K_VOICE_RAMP_SEQS sets the random sequences (default 20000).
+$(VOICE_RAMP_TARGET): audio_voice_ramp_test.c \
+	baseline/audio_voice_baseline.c baseline/audio_voice_baseline.h \
+	$(SRC_DIR)/audio_voice.c $(SRC_DIR)/audio_voice.h
+	@mkdir -p $(BUILD_DIR)
+	$(CC) $(CPPFLAGS) -Ibaseline $(CFLAGS) -o $@ audio_voice_ramp_test.c \
 		baseline/audio_voice_baseline.c $(SRC_DIR)/audio_voice.c
 
 # Host timing of the render path, baseline engine against the current one.

@@ -49,8 +49,16 @@ void audio_voice_silence(struct audio_voice_engine *e)
 {
 	uint32_t i;
 
-	for (i = 0; i < AUDIO_VOICE_MAX_VOICES; i++)
+	for (i = 0; i < AUDIO_VOICE_MAX_VOICES; i++) {
 		e->voice[i].active = 0;
+		e->voice[i].ramp_left = 0;
+		e->voice[i].stopping = 0;
+	}
+	for (i = 0; i < AUDIO_VOICE_FADE_SLOTS; i++) {
+		e->fade[i].active = 0;
+		e->fade[i].ramp_left = 0;
+		e->fade[i].stopping = 0;
+	}
 }
 
 int audio_voice_sample_set(struct audio_voice_engine *e, uint32_t id,
@@ -121,6 +129,8 @@ static void start_voice(struct audio_voice_engine *e, struct audio_voice *v,
 	uint32_t shift, nsamples, off, len, end;
 
 	v->active = 0;
+	v->ramp_left = 0;
+	v->stopping = 0;
 	if (c->flags >= AUDIO_VOICE_MAX_SAMPLES ||
 	    !e->sample[c->flags].defined) {
 		e->rejected++;
@@ -175,14 +185,123 @@ static void set_loop(struct audio_voice_engine *e, struct audio_voice *v,
 	e->rejected++;
 }
 
+/* ---- Ramping ----
+ * The records of a session with CONFIG ramp (AUDIO_VOICE_OP_CONFIG) change
+ * a gain over e->ramp_frames frames instead of at once; see "Ramping" in
+ * audio_voice.h for the rules. */
+
+/* Q8 gain of a volume. */
+static int32_t q8(uint32_t volume)
+{
+	return (int32_t)(volume << 8);
+}
+
+/* The gains a voice has at this frame. */
+static void gains_now(const struct audio_voice *v, int32_t *l, int32_t *r)
+{
+	if (v->ramp_left != 0U) {
+		*l = v->gain_l;
+		*r = v->gain_r;
+	} else {
+		*l = q8(v->vol_l);
+		*r = q8(v->vol_r);
+	}
+}
+
+/* Start a ramp from the gains (gl, gr) to (tl, tr) over `frames` frames. The
+ * per-frame change is the difference divided by the frames, truncated
+ * toward zero. */
+static void ramp_to(struct audio_voice *v, int32_t gl, int32_t gr,
+                    int32_t tl, int32_t tr, uint32_t frames)
+{
+	if (gl == tl && gr == tr) {
+		v->ramp_left = 0;
+		return;
+	}
+	v->gain_l = gl;
+	v->gain_r = gr;
+	v->inc_l = (tl - gl) / (int32_t)frames;
+	v->inc_r = (tr - gr) / (int32_t)frames;
+	v->ramp_left = frames;
+}
+
+/* A START on a sounding voice: its sound goes on in a fade slot. */
+static void fade_out(struct audio_voice_engine *e, const struct audio_voice *v)
+{
+	struct audio_voice *slot;
+	uint32_t i, free_slot = AUDIO_VOICE_FADE_SLOTS, oldest = 0;
+	int32_t gl, gr;
+
+	if (v->step == 0U)
+		return;
+	gains_now(v, &gl, &gr);
+	if (v->stopping == 0U && (gl | gr) == 0)
+		return;
+	for (i = 0; i < AUDIO_VOICE_FADE_SLOTS; i++) {
+		if (!e->fade[i].active) {
+			free_slot = i;
+			break;
+		}
+		if (e->fade_age[i] < e->fade_age[oldest])
+			oldest = i;
+	}
+	if (free_slot == AUDIO_VOICE_FADE_SLOTS)
+		free_slot = oldest;
+	slot = &e->fade[free_slot];
+	*slot = *v;
+	if (!v->stopping) {
+		ramp_to(slot, gl, gr, 0, 0, e->ramp_frames);
+		slot->stopping = 1;
+	}
+	e->fade_age[free_slot] = ++e->fade_seq;
+}
+
+/* A STOP on a sounding voice with ramping on. */
+static void stop_ramped(struct audio_voice_engine *e, struct audio_voice *v)
+{
+	int32_t gl, gr;
+
+	if (v->stopping)
+		return;
+	gains_now(v, &gl, &gr);
+	if ((gl | gr) == 0 || v->step == 0U) {
+		v->active = 0;
+		v->ramp_left = 0;
+		return;
+	}
+	ramp_to(v, gl, gr, 0, 0, e->ramp_frames);
+	v->stopping = 1;
+}
+
+static void apply_config(struct audio_voice_engine *e,
+                         const struct audio_voice_cmd *c)
+{
+	if (c->flags == 0U || (c->flags & ~AUDIO_VOICE_CONFIG_KNOWN) != 0U) {
+		e->rejected++;
+		return;
+	}
+	if ((c->flags & AUDIO_VOICE_CONFIG_RAMP) != 0U) {
+		if (c->arg0 > AUDIO_VOICE_RAMP_MAX_FRAMES) {
+			e->rejected++;
+			return;
+		}
+		e->ramp_frames = c->arg0;
+	}
+}
+
 static void apply(struct audio_voice_engine *e,
                   const struct audio_voice_cmd *c)
 {
 	struct audio_voice *v;
+	const uint32_t ramp = e->ramp_frames;
 
 	if (c->op == AUDIO_VOICE_OP_MASTER) {
 		e->master = c->arg0 > AUDIO_VOICE_MASTER_MAX ?
 		            AUDIO_VOICE_MASTER_MAX : c->arg0;
+		return;
+	}
+	if (c->op == AUDIO_VOICE_OP_CONFIG) {
+		apply_config(e, c);
 		return;
 	}
 	if (c->voice >= AUDIO_VOICE_MAX_VOICES) {
@@ -192,7 +311,11 @@ static void apply(struct audio_voice_engine *e,
 	v = &e->voice[c->voice];
 	switch (c->op) {
 	case AUDIO_VOICE_OP_START:
+		if (ramp != 0U && v->active)
+			fade_out(e, v);
 		start_voice(e, v, c);
+		if (ramp != 0U && v->active)
+			ramp_to(v, 0, 0, q8(v->vol_l), q8(v->vol_r), ramp);
 		break;
 	case AUDIO_VOICE_OP_LOOP:
 		set_loop(e, v, c);
@@ -201,12 +324,28 @@ static void apply(struct audio_voice_engine *e,
 		if (c->flags & AUDIO_VOICE_SET_RATE)
 			set_rate(e, v, c->flags, c->arg0);
 		if (c->flags & AUDIO_VOICE_SET_VOLUME) {
+			int32_t gl, gr;
+
+			gains_now(v, &gl, &gr);
 			v->vol_l = c->arg1 >> 16;
 			v->vol_r = c->arg1 & 0xFFFFU;
+			if (v->stopping) {
+				/* only the target changes: the voice fades out */
+			} else if (ramp != 0U && v->active) {
+				ramp_to(v, gl, gr, q8(v->vol_l), q8(v->vol_r), ramp);
+			} else {
+				v->ramp_left = 0;
+			}
 		}
 		break;
 	case AUDIO_VOICE_OP_STOP:
-		v->active = 0;
+		if (ramp != 0U && v->active) {
+			stop_ramped(e, v);
+		} else {
+			v->active = 0;
+			v->ramp_left = 0;
+			v->stopping = 0;
+		}
 		break;
 	case AUDIO_VOICE_OP_DIRECTION:
 		if (v->active)
@@ -526,26 +665,218 @@ static void pass_end(struct audio_voice *v, int below)
 }
 
 /*
+ * ---- Ramped voices ----
+ *
+ * A voice whose gain is moving is mixed in two steps so that the sample
+ * kernels stay as they are: the samples of the run are read (nearest or
+ * linear, as for any voice) into the scratch e->smp, then added to the sums
+ * with the gain of each frame, (gain + i * inc) >> 8 per side, i counting
+ * from the start of the run. Every operation is the integer one of the
+ * plain path, so a ramp of constant gain gives the plain result.
+ */
+
+/* Read n frames at p without a volume: the sample of each frame in 16-bit
+ * units (8-bit data promoted, linear blends as in kernel()). A mono voice
+ * fills only out0. */
+AV_INLINE void read_kernel(const int wide, const int stereo, const int linear,
+                           const uint8_t *restrict p, int32_t x,
+                           const int32_t dx, const int32_t nbytes, uint32_t n,
+                           int32_t *restrict out0, int32_t *restrict out1)
+{
+	const int fs = wide + stereo;
+	const int ish = wide ? 16 : 8;
+	uint32_t i;
+
+	for (i = 0; i < n; i++) {
+		const uint8_t *q = p + (x >> 16) * (1 << fs);
+		int32_t l = 0, r = 0;
+
+		fetch(wide, stereo, 3, q, &l, &r);
+		if (linear) {
+			int32_t bl = 0, br = 0;
+			const int32_t fr = x & 0xFFFF;
+			const int32_t w0 = 65536 - fr;
+
+			fetch(wide, stereo, 3, q + nbytes, &bl, &br);
+			l = (l * w0 + bl * fr) >> ish;
+			r = stereo ? (r * w0 + br * fr) >> ish : l;
+		} else if (!wide) {
+			l *= 256;
+			r *= 256;
+		}
+		out0[i] = l;
+		if (stereo)
+			out1[i] = r;
+		x += dx;
+	}
+}
+
+AV_NOINLINE void run_read(const struct audio_voice *v, int linear,
+                          const uint8_t *p, int32_t x, int32_t dx,
+                          int32_t nbytes, uint32_t n, int32_t *out0,
+                          int32_t *out1)
+{
+#define AV_R(w, s, l) \
+	read_kernel(w, s, l, p, x, dx, nbytes, n, out0, out1); break
+	switch ((v->wide ? 4 : 0) | (v->stereo ? 2 : 0) | (linear ? 1 : 0)) {
+	case 0: AV_R(0, 0, 0);
+	case 1: AV_R(0, 0, 1);
+	case 2: AV_R(0, 1, 0);
+	case 3: AV_R(0, 1, 1);
+	case 4: AV_R(1, 0, 0);
+	case 5: AV_R(1, 0, 1);
+	case 6: AV_R(1, 1, 0);
+	default: AV_R(1, 1, 1);
+	}
+#undef AV_R
+}
+
+/* The edge frames of run_edge() as samples: out0 and out1 get both sides. */
+AV_NOINLINE void read_edge(const struct audio_voice *v, int32_t la, int32_t lb,
+                           int32_t ra, int32_t rb, int32_t x, int32_t dx,
+                           uint32_t n, int32_t *out0, int32_t *out1)
+{
+	const int ish = v->wide ? 16 : 8;
+	const int stereo = v->stereo;
+	uint32_t i;
+
+	for (i = 0; i < n; i++) {
+		const int32_t fr = x & 0xFFFF;
+		const int32_t w0 = 65536 - fr;
+		const int32_t l = (la * w0 + lb * fr) >> ish;
+
+		out0[i] = l;
+		out1[i] = stereo ? (ra * w0 + rb * fr) >> ish : l;
+		x += dx;
+	}
+}
+
+/* sums += (sample * ((gain + i * inc) >> 8)) >> 16 for each side, as
+ * mac16(). The gains stay between two volumes, so the volume is 0..65535. */
+AV_NOINLINE void apply_ramp(int32_t *restrict al, const int32_t *restrict sl,
+                            const int32_t *restrict sr, uint32_t n,
+                            int32_t gl, int32_t il, int32_t gr, int32_t ir)
+{
+	int32_t *const ar = al + AUDIO_VOICE_MIX_FRAMES;
+	uint32_t i = 0;
+
+#ifdef __ARM_NEON
+	const int32_t lane[4] = { 0, 1, 2, 3 };
+	const int32x4_t idx = vld1q_s32(lane);
+	int32x4_t gvl = vmlaq_n_s32(vdupq_n_s32(gl), idx, il);
+	int32x4_t gvr = vmlaq_n_s32(vdupq_n_s32(gr), idx, ir);
+	const int32x4_t dl = vdupq_n_s32(4 * il);
+	const int32x4_t dr = vdupq_n_s32(4 * ir);
+
+	for (; i + 4U <= n; i += 4U) {
+		const int32x4_t pl = vshrq_n_s32(
+			vmulq_s32(vld1q_s32(sl + i), vshrq_n_s32(gvl, 8)), 16);
+		const int32x4_t pr = vshrq_n_s32(
+			vmulq_s32(vld1q_s32(sr + i), vshrq_n_s32(gvr, 8)), 16);
+
+		vst1q_s32(al + i, vaddq_s32(vld1q_s32(al + i), pl));
+		vst1q_s32(ar + i, vaddq_s32(vld1q_s32(ar + i), pr));
+		gvl = vaddq_s32(gvl, dl);
+		gvr = vaddq_s32(gvr, dr);
+	}
+#endif
+	for (; i < n; i++) {
+		al[i] = mac16(al[i], (gl + (int32_t)i * il) >> 8, sl[i]);
+		ar[i] = mac16(ar[i], (gr + (int32_t)i * ir) >> 8, sr[i]);
+	}
+}
+
+/* Mix a run of a voice whose gain is moving. Returns step_state()'s result
+ * for the end of the run. */
+AV_NOINLINE int mix_ramp(struct audio_voice_engine *e, struct audio_voice *v,
+                         int linear, uint32_t run, uint32_t safe,
+                         uint32_t done)
+{
+	const uint8_t *const bank = e->bank;
+	int32_t *const al = e->mix[0] + done;
+	const int back = v->backward;
+	const int32_t dx = back ? -(int32_t)v->step : (int32_t)v->step;
+	const int32_t fb = (int32_t)1 << v->shift;
+	int32_t el, er;
+	int below;
+
+	/* The gains at the end of the run, to see whether it is silent. */
+	if (run == v->ramp_left) {
+		el = v->stopping ? 0 : (int32_t)(v->vol_l << 8);
+		er = v->stopping ? 0 : (int32_t)(v->vol_r << 8);
+	} else {
+		el = v->gain_l + v->inc_l * (int32_t)run;
+		er = v->gain_r + v->inc_r * (int32_t)run;
+	}
+	if ((v->gain_l | v->gain_r | el | er) == 0)
+		return step_state(v, run);
+
+	if (safe != 0U)
+		run_read(v, linear, bank + v->base + ((size_t)v->pos << v->shift),
+		         (int32_t)v->frac, dx, back ? -fb : fb, safe, e->smp[0],
+		         e->smp[1]);
+	below = step_state(v, safe);
+	if (safe < run) {
+		int32_t la, lb, ra, rb;
+
+		fetch(v->wide, v->stereo, 3,
+		      bank + v->base + ((size_t)v->pos << v->shift), &la, &ra);
+		fetch(v->wide, v->stereo, 3,
+		      bank + v->base + ((size_t)neighbour(v) << v->shift), &lb, &rb);
+		read_edge(v, la, lb, ra, rb, (int32_t)v->frac, dx, run - safe,
+		          e->smp[0] + safe, e->smp[1] + safe);
+		below = step_state(v, run - safe);
+	}
+	apply_ramp(al, e->smp[0], v->stereo ? e->smp[1] : e->smp[0], run,
+	           v->gain_l, v->inc_l, v->gain_r, v->inc_r);
+	return below;
+}
+
+/* Move a ramp on by `frames`, at most the frames left. At its end the gain
+ * is the target, and a stopping voice is done. */
+static void ramp_advance(struct audio_voice *v, uint32_t frames)
+{
+	if (frames >= v->ramp_left) {
+		v->ramp_left = 0;
+		v->gain_l = v->stopping ? 0 : (int32_t)(v->vol_l << 8);
+		v->gain_r = v->stopping ? 0 : (int32_t)(v->vol_r << 8);
+		if (v->stopping)
+			v->active = 0;
+	} else {
+		v->ramp_left -= frames;
+		v->gain_l += v->inc_l * (int32_t)frames;
+		v->gain_r += v->inc_r * (int32_t)frames;
+	}
+}
+
+/*
  * Mix n frames of an active voice (step != 0) into the sums, al for the left
  * side and AUDIO_VOICE_MIX_FRAMES further on for the right, advancing it. A
  * voice whose volumes are both zero adds exactly nothing to the sums and is
  * only advanced.
  */
-AV_NOINLINE void mix_voice(const uint8_t *bank, int linear,
-                           struct audio_voice *v, int32_t *al, uint32_t n)
+AV_NOINLINE void mix_voice(struct audio_voice_engine *e, int linear,
+                           struct audio_voice *v, uint32_t n)
 {
+	const uint8_t *const bank = e->bank;
+	int32_t *const al = e->mix[0];
 	const uint32_t step = v->step;
-	const int32_t vl = (int32_t)v->vol_l;
-	const int32_t vr = (int32_t)v->vol_r;
-	const int audible = (v->vol_l | v->vol_r) != 0U;
-	/* Which sides get sound: a side at volume 0 adds exactly nothing. */
-	const int sides = (v->vol_l != 0U ? 1 : 0) | (v->vol_r != 0U ? 2 : 0);
 	uint32_t done = 0;
 
 	while (done < n && v->active) {
 		const uint32_t left = n - done;
 		const uint64_t pos = ((uint64_t)v->pos << 16) | v->frac;
 		const int back = v->backward;
+		const int ramping = v->ramp_left != 0U;
+		const int32_t vl = (int32_t)v->vol_l;
+		const int32_t vr = (int32_t)v->vol_r;
+		/* A ramping voice is planned as audible: its gain is not its
+		 * volume. */
+		const int audible = ramping || (v->vol_l | v->vol_r) != 0U;
+		/* Which sides get sound: a side at volume 0 adds exactly
+		 * nothing. */
+		const int sides = (v->vol_l != 0U ? 1 : 0) |
+		                  (v->vol_r != 0U ? 2 : 0);
 		uint32_t run, safe;
 		int hit, below;
 
@@ -606,8 +937,17 @@ AV_NOINLINE void mix_voice(const uint8_t *bank, int linear,
 				}
 			}
 		}
+		/* A ramp ends the run too: the gain is constant after it. */
+		if (ramping && v->ramp_left < run) {
+			run = v->ramp_left;
+			hit = 0;
+			if (safe > run)
+				safe = run;
+		}
 
-		if (audible) {
+		if (ramping) {
+			below = mix_ramp(e, v, linear, run, safe, done);
+		} else if (audible) {
 			const int32_t dx = back ? -(int32_t)step : (int32_t)step;
 			const int32_t fb = (int32_t)1 << v->shift;
 
@@ -634,6 +974,8 @@ AV_NOINLINE void mix_voice(const uint8_t *bank, int linear,
 		}
 		if (hit)
 			pass_end(v, below);
+		if (ramping)
+			ramp_advance(v, run);
 		done += run;
 	}
 }
@@ -642,13 +984,13 @@ AV_NOINLINE void mix_voice(const uint8_t *bank, int linear,
  * Scale the sums by the master and clamp to S16: x = (sum * master) >> 8 in
  * 64 bits, arithmetic shift, then saturate, per side of every frame. Two
  * cases need no 64-bit product: at unity the shift undoes the scale, and for
- * a master up to AV_MASTER_NARROW the product of a sum (at most 2^20 in
- * magnitude) fits int32.
+ * a master up to AV_MASTER_NARROW the product of a sum (at most 2^21 in
+ * magnitude: 32 voices and 32 fade slots) fits int32.
  */
-#define AV_MASTER_NARROW 2047U
+#define AV_MASTER_NARROW 1023U
 typedef char av_master_narrow_fits[
-	((int64_t)AUDIO_VOICE_MAX_VOICES * 32768 * AV_MASTER_NARROW <
-	 2147483648LL) ? 1 : -1];
+	((int64_t)(AUDIO_VOICE_MAX_VOICES + AUDIO_VOICE_FADE_SLOTS) * 32768 *
+	 AV_MASTER_NARROW < 2147483648LL) ? 1 : -1];
 
 static int16_t clamp16(int64_t x)
 {
@@ -742,6 +1084,38 @@ static void av_zero(void *p, size_t bytes)
 #define av_zero(p, bytes) memset((p), 0, (bytes))
 #endif
 
+/* Whether a voice may add to the sums this chunk: active, with a rate and
+ * either a volume or, while it ramps, a gain. */
+static int may_sound(const struct audio_voice *v)
+{
+	if (!v->active || v->step == 0U)
+		return 0;
+	return (v->vol_l | v->vol_r) != 0U ||
+	       (v->ramp_left != 0U && (v->gain_l | v->gain_r) != 0);
+}
+
+/* Mix n frames of each active voice of a set (client voices, then fade
+ * slots). A voice without a rate does not move, but its ramp runs on, so a
+ * stop or a fade finishes on time. */
+static void mix_set(struct audio_voice_engine *e, struct audio_voice *set,
+                    uint32_t count, int linear, uint32_t n)
+{
+	uint32_t k;
+
+	for (k = 0; k < count; k++) {
+		struct audio_voice *v = &set[k];
+
+		if (!v->active)
+			continue;
+		if (v->step == 0U) {
+			if (v->ramp_left != 0U)
+				ramp_advance(v, v->ramp_left < n ? v->ramp_left : n);
+			continue;
+		}
+		mix_voice(e, linear, v, n);
+	}
+}
+
 static void mix(struct audio_voice_engine *e, int16_t *out, uint32_t frames)
 {
 	const int linear = e->interp == AUDIO_VOICE_INTERP_LINEAR;
@@ -752,18 +1126,16 @@ static void mix(struct audio_voice_engine *e, int16_t *out, uint32_t frames)
 		int dirty = 0;
 		uint32_t k;
 
-		for (k = 0; k < AUDIO_VOICE_MAX_VOICES; k++) {
-			struct audio_voice *v = &e->voice[k];
-
-			if (!v->active || v->step == 0U)
-				continue;
-			if (!dirty && (v->vol_l | v->vol_r) != 0U) {
-				av_zero(e->mix[0], n * sizeof(e->mix[0][0]));
-				av_zero(e->mix[1], n * sizeof(e->mix[1][0]));
-				dirty = 1;
-			}
-			mix_voice(e->bank, linear, v, e->mix[0], n);
+		for (k = 0; k < AUDIO_VOICE_MAX_VOICES && !dirty; k++)
+			dirty = may_sound(&e->voice[k]);
+		for (k = 0; k < AUDIO_VOICE_FADE_SLOTS && !dirty; k++)
+			dirty = may_sound(&e->fade[k]);
+		if (dirty) {
+			av_zero(e->mix[0], n * sizeof(e->mix[0][0]));
+			av_zero(e->mix[1], n * sizeof(e->mix[1][0]));
 		}
+		mix_set(e, e->voice, AUDIO_VOICE_MAX_VOICES, linear, n);
+		mix_set(e, e->fade, AUDIO_VOICE_FADE_SLOTS, linear, n);
 		if (dirty)
 			finish(e->mix[0], e->mix[1], out, n, e->master);
 		else

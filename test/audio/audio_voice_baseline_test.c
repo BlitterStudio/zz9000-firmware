@@ -304,7 +304,9 @@ static void gen_cmd(cur_cmd *c, uint32_t stamp)
 		c->op = AUDIO_VOICE_OP_MASTER;
 		c->arg0 = rand_master();
 	} else {
-		static const uint8_t bad[] = { 0, 7, 8, 9, 200, 255 };
+		/* Op 9 (CONFIG) is not an existing record any more: the
+		 * baseline engine rejects it, the engine now acts on it. */
+		static const uint8_t bad[] = { 0, 7, 8, 10, 200, 255 };
 
 		c->op = bad[rnd(sizeof(bad))];
 		c->flags = (uint16_t)rnd(65536);

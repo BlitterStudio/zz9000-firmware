@@ -33,6 +33,9 @@
 #define AUDIO_VOICE_MIN_PERIOD  5U
 #define AUDIO_VOICE_MASTER_UNITY 256U
 #define AUDIO_VOICE_MASTER_MAX   0xFFFFU
+/* Longest ramp, and the fade slots that hold the tails of restarted voices. */
+#define AUDIO_VOICE_RAMP_MAX_FRAMES 512U
+#define AUDIO_VOICE_FADE_SLOTS      32U
 /* Frames mixed per chunk; a longer render call is mixed in chunks. */
 #define AUDIO_VOICE_MIX_FRAMES   960U
 
@@ -84,18 +87,55 @@
  *          0..65535. A period below 5, or 0 Hz, is ignored and the voice
  *          keeps its previous step. A voice that never received a rate has
  *          step 0: it outputs nothing and does not advance.
- *   STOP   silences the voice.
+ *   STOP   silences the voice. With ramping on (see "Ramping") the voice
+ *          fades out instead.
  *   DIRECTION flags: AUDIO_VOICE_DIR_BACKWARD sets backward play, clear
  *          sets forward play, on the voice as it is. No-op on a silent
  *          voice.
  *   MASTER arg0: master gain Q8.8 (256 = unity, capped at 0xFFFF); the
  *          voice field is ignored.
+ *   MODE, ENVELOPE  reserved op numbers of later features. The engine
+ *          rejects them.
+ *   CONFIG flags: the settings the record carries; at least one, and only
+ *          known bits, else the record is rejected whole. The voice field
+ *          is ignored. AUDIO_VOICE_CONFIG_RAMP: arg0 is the ramp length in
+ *          frames, 0 (off, the default) to AUDIO_VOICE_RAMP_MAX_FRAMES; a
+ *          longer one rejects the record. arg1 is reserved.
  *
  * A voice number of 32 or more, or an unknown op, is rejected.
  * Every byte quantity (offsets and lengths of START and LOOP) is divided
  * into frames, rounding down: by 1 for S8, 2 for S16 and S8S, and 4 for
  * S16S. A stereo sample plays its left sample at the left volume and its
  * right sample at the right volume; a mono sample feeds both sides.
+ *
+ * Ramping. With a ramp length R above 0, set by CONFIG, volume changes,
+ * starts, stops and restarts are not instant. Each side of a voice has a
+ * gain, kept in Q8 (volume << 8), that moves linearly to its target over R
+ * frames and then equals the target; the volume used for frame j of a ramp
+ * is (gain + j * step) >> 8, where step is (target - gain) / R in C
+ * division (toward zero) taken when the ramp starts, and frame R uses the
+ * target. A ramp starts at the record's frame and a new target retargets
+ * from the gain the voice has at that frame.
+ *   START  the voice rises from silence to its volume over R frames. A
+ *          voice that was sounding hands its sound to a fade slot first:
+ *          a copy that keeps playing from where it was and fades from its
+ *          gain to silence over R frames (a voice that was already
+ *          stopping keeps the schedule it has). A START that is rejected
+ *          still hands the old sound over, so the old sound fades.
+ *          The pool has AUDIO_VOICE_FADE_SLOTS slots; when all are in
+ *          use the oldest is overwritten (its tail is cut). No slot is
+ *          taken for a sound that is silent or has no rate.
+ *   SET volume  on a sounding voice, ramps from the current gain to the
+ *          new volume. On a stopping voice it only stores the volume.
+ *   STOP   on a sounding voice that is not stopping, ramps its gain to
+ *          silence over R frames and then deactivates it (at once when it
+ *          is silent). A second STOP changes nothing.
+ * A fade slot is a frozen copy: later LOOP, DIRECTION, SET and STOP
+ * records for the voice number never touch it, and a STOP does not end
+ * earlier tails. A voice that reaches its pass end stops at once, as
+ * without ramping. With R 0 none of this applies and the output is
+ * identical to an engine without CONFIG; a ramp already running when R
+ * becomes 0 runs out, but new records act at once.
  */
 #define AUDIO_VOICE_OP_START     1U
 #define AUDIO_VOICE_OP_LOOP      2U
@@ -103,12 +143,18 @@
 #define AUDIO_VOICE_OP_STOP      4U
 #define AUDIO_VOICE_OP_MASTER    5U
 #define AUDIO_VOICE_OP_DIRECTION 6U
+#define AUDIO_VOICE_OP_MODE      7U
+#define AUDIO_VOICE_OP_ENVELOPE  8U
+#define AUDIO_VOICE_OP_CONFIG    9U
 
 #define AUDIO_VOICE_DIR_BACKWARD 0x0001U
 
 #define AUDIO_VOICE_SET_RATE   0x0001U
 #define AUDIO_VOICE_SET_VOLUME 0x0002U
 #define AUDIO_VOICE_RATE_HZ    0x0004U
+
+#define AUDIO_VOICE_CONFIG_RAMP  0x0001U
+#define AUDIO_VOICE_CONFIG_KNOWN AUDIO_VOICE_CONFIG_RAMP
 
 struct audio_voice_cmd {
 	uint32_t stamp; /* engine frame to apply at */
@@ -132,6 +178,7 @@ struct audio_voice {
 	uint8_t shift;      /* log2 of the frame size in bytes */
 	uint8_t wide;       /* 16-bit samples */
 	uint8_t stereo;     /* interleaved left and right samples */
+	uint8_t stopping;   /* ramping to silence, then inactive */
 	uint32_t base;      /* sample byte offset in the bank */
 	uint32_t len;       /* sample length in frames */
 	uint32_t pos;       /* frame index */
@@ -140,8 +187,16 @@ struct audio_voice {
 	uint32_t loopstart; /* frames; lower bound of backward play */
 	uint32_t looplen;   /* frames, 0 = no loop */
 	uint32_t step;      /* 16.16 samples per output frame, 0 = no rate */
-	uint32_t vol_l;
+	uint32_t vol_l;     /* volume target */
 	uint32_t vol_r;
+	/* Ramp state, used only while ramp_left is not 0: the gain of each
+	 * side in Q8 (volume << 8), its change per frame and the frames
+	 * left. With ramp_left 0 the volume is vol_l and vol_r. */
+	uint32_t ramp_left;
+	int32_t gain_l;
+	int32_t gain_r;
+	int32_t inc_l;
+	int32_t inc_r;
 };
 
 struct audio_voice_engine {
@@ -153,11 +208,19 @@ struct audio_voice_engine {
 	uint32_t frame;      /* index of the next frame to render; wraps */
 	uint32_t late;       /* commands applied after their frame */
 	uint32_t rejected;   /* commands refused */
+	uint32_t ramp_frames; /* CONFIG ramp length, 0 = off */
+	uint32_t fade_seq;   /* age counter of the fade slots */
 	struct audio_voice voice[AUDIO_VOICE_MAX_VOICES];
+	/* Sounds handed over by a restart (see "Ramping"): voices in the
+	 * stopping state that no record addresses. */
+	struct audio_voice fade[AUDIO_VOICE_FADE_SLOTS];
+	uint32_t fade_age[AUDIO_VOICE_FADE_SLOTS];
 	struct audio_voice_sample sample[AUDIO_VOICE_MAX_SAMPLES];
 	/* Scratch of audio_voice_render(), no state: the int32 sum of the
-	 * voices per side (left, right), for one chunk of frames. */
+	 * voices per side (left, right), and the samples of the voice being
+	 * ramped, for one chunk of frames. */
 	int32_t mix[2][AUDIO_VOICE_MIX_FRAMES];
+	int32_t smp[2][AUDIO_VOICE_MIX_FRAMES];
 };
 
 /*
@@ -169,7 +232,10 @@ struct audio_voice_engine {
 void audio_voice_init(struct audio_voice_engine *e, const uint8_t *bank,
                       uint32_t bank_len, uint32_t clock);
 
-/* Silence every voice at once; samples, master and counters are kept. */
+/*
+ * Silence every voice and every fade slot at once; samples, master, the
+ * ramp setting and counters are kept.
+ */
 void audio_voice_silence(struct audio_voice_engine *e);
 
 /*
