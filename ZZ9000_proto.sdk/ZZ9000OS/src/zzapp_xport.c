@@ -860,6 +860,44 @@ static void store_completion(zzapp_rec_t *rec, const aar_completion *c)
 	x->stats.unknown_dropped++;
 }
 
+/* Mouse motion that finds the event ring full is merged into one pending
+ * event, as the library merges it (sum dx and dy while the buttons stay the
+ * same), and goes into the ring ahead of anything newer as soon as there is
+ * room. 1 when `ev` was kept; a click or a button change is not folded into
+ * earlier motion, and any other event has nowhere to wait: 0, the caller
+ * counts the drop. */
+static int event_merge_mouse(zzapp_rec_xport_t *x, const aar_event *ev)
+{
+	int32_t dx, dy;
+
+	if (ev->type != AAR_EV_MOUSE)
+		return 0;
+	if (!x->ev_mouse_valid) {
+		x->ev_mouse = *ev;
+		x->ev_mouse.reserved = 0U;
+		x->ev_mouse_valid = 1U;
+		return 1;
+	}
+	if (x->ev_mouse.buttons != ev->buttons || x->ev_mouse.code != ev->code)
+		return 0;
+	dx = (int32_t)x->ev_mouse.dx + ev->dx;
+	dy = (int32_t)x->ev_mouse.dy + ev->dy;
+	x->ev_mouse.dx = (int16_t)(dx > 32767 ? 32767 : dx < -32768 ? -32768 : dx);
+	x->ev_mouse.dy = (int16_t)(dy > 32767 ? 32767 : dy < -32768 ? -32768 : dy);
+	x->ev_mouse.time_ms = ev->time_ms;
+	return 1;
+}
+
+static void event_flush_mouse(zzapp_rec_xport_t *x)
+{
+	if (x->ev_mouse_valid &&
+	    x->ev_tail - x->ev_head < ZZAPP_XPORT_EVENT_ENTRIES) {
+		x->events[x->ev_tail % ZZAPP_XPORT_EVENT_ENTRIES] = x->ev_mouse;
+		x->ev_tail++;
+		x->ev_mouse_valid = 0U;
+	}
+}
+
 int zzapp_xport_pump(zzapp_rec_t *rec)
 {
 	zzapp_rec_xport_t *x;
@@ -889,13 +927,16 @@ int zzapp_xport_pump(zzapp_rec_t *rec)
 				x->msg_count++;
 			}
 		} else if (op == AAR_OP_EVENT) {
-			if (x->ev_tail - x->ev_head >= ZZAPP_XPORT_EVENT_ENTRIES) {
-				x->stats.events_dropped++;
-			} else {
-				aar_entry_get_event(slot, &x->events[
-					x->ev_tail %
-					ZZAPP_XPORT_EVENT_ENTRIES]);
+			aar_event ev;
+
+			aar_entry_get_event(slot, &ev);
+			event_flush_mouse(x);
+			if (x->ev_tail - x->ev_head < ZZAPP_XPORT_EVENT_ENTRIES) {
+				x->events[x->ev_tail %
+					  ZZAPP_XPORT_EVENT_ENTRIES] = ev;
 				x->ev_tail++;
+			} else if (!event_merge_mouse(x, &ev)) {
+				x->stats.events_dropped++;
 			}
 		} else {
 			aar_completion c;
@@ -933,6 +974,7 @@ int zzapp_xport_take_event(zzapp_rec_t *rec, aar_event *ev)
 	if (ev)
 		*ev = x->events[x->ev_head % ZZAPP_XPORT_EVENT_ENTRIES];
 	x->ev_head++;
+	event_flush_mouse(x);
 	return 1;
 }
 

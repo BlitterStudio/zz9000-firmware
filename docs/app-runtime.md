@@ -297,9 +297,13 @@ before it parks, so a message that lands in that gap is found by the next
 service pass. A queued message ends the wait before a pending stop does. Like
 every declared wait it keeps the record out of the 30-second stall and
 10-second stuck-call watchdogs. Input events go into a 64-entry event ring of
-the record when the pump runs; the ring drops the newest event and counts it
-when full, and the client counts events it could not post in
-`AAR_CB_EVENTS_DROPPED`. The runtime keeps at least 64 events.
+the record when the pump runs. When the ring is full, mouse motion is merged
+into one pending event (`dx` and `dy` summed while the buttons stay the same)
+that goes into the ring, ahead of anything newer, as soon as the app takes an
+event. A key, a click or a button change that finds the ring full is dropped
+and counted in the record's own `events_dropped`, and the client counts events
+it could not post in `AAR_CB_EVENTS_DROPPED`. The runtime keeps at least 64
+events.
 
 Core 0 does not wait for core 1. It publishes work and raises doorbell SGI 15
 only when `service_pending` changes from zero to one. Core 1 drains a bounded
@@ -468,11 +472,18 @@ touching them. Invalid, overflowed, read-only-for-output, device, and
 other-slot pointers return `AAR_E_FAULT`. Firmware code never becomes a
 user-call target.
 
-GL client-array state is per slot. `DrawArrays` validates every enabled vertex,
-colour, and client texture-coordinate element in its requested range.
-`DrawElements` also validates its index buffer and every indexed element before
-MiniGL is called. An unmapped or changed range returns `AAR_E_FAULT` and records
-`GL_INVALID_VALUE` for `glGetError`.
+`aar_gl_bind` and `gl_bind_flags` take the id of the app's open display
+(`aar_surface.id`). Any other id, including 0, returns `NULL` (`AAR_E_INVAL`
+inside the runtime) before the module is loaded or a GL slot is taken, so the
+bind that follows with the right id is not refused as busy.
+
+GL client-array state is per slot. `glVertexPointer`, `glColorPointer` and
+`glTexCoordPointer` record their pointer without checking it, so a bad pointer
+is no error at that call. `DrawArrays` validates every enabled vertex, colour,
+and client texture-coordinate element in its requested range. `DrawElements`
+also validates its index buffer and every indexed element before MiniGL is
+called. An unmapped or changed range, or a pointer that is 0, returns
+`AAR_E_FAULT` from the draw and records `GL_INVALID_VALUE` for `glGetError`.
 
 ### Frames, commit, and teardown
 
@@ -541,7 +552,10 @@ minor words (`ZZAPP_ABI_MAJOR`, `ZZAPP_ABI_MINOR`).
 **Groups.** `aar_api.groups` and `aar_info.groups` report the same mask:
 `AAR_GROUP_INPUT` and `AAR_GROUP_SERVICES` always, and `AAR_GROUP_DISPLAY`,
 `AAR_GROUP_AUDIO`, `AAR_GROUP_GL` when the client capability word has the
-matching bit. `audio_stats` is `NULL`: the runtime keeps no underrun count.
+matching bit. `audio_stats` is `NULL`. On the card route the runtime counts
+played underruns in the ring header (`AAR_AUDIO_RING_UNDERRUNS`, a
+little-endian word beside `read_frame`), where the app and the client read
+them; on the AHI route the client consumes the ring and the word stays 0.
 
 **Image rules.** The loader reads an ELF32 ARM `ET_DYN` image. `e_flags` must
 say EABI version 5 and hard float, and must not say soft float; any other

@@ -1321,6 +1321,113 @@ static void test_events_messages(void)
 	CHECK(mbox(ZZAPP_OP_RELEASE, handle, 0U, 0U, NULL, NULL) == SDK_STATUS_OK);
 }
 
+static void post_mouse(client_t *c, int16_t dx, int16_t dy, uint16_t buttons)
+{
+	aar_event in;
+
+	memset(&in, 0, sizeof(in));
+	in.type = AAR_EV_MOUSE;
+	in.dx = dx;
+	in.dy = dy;
+	in.buttons = buttons;
+	CHECK(aar_queue_post_event(&c->cq, &in, NULL, NULL) == AAR_OK);
+}
+
+/* Fills the event ring with ZZAPP_XPORT_EVENT_ENTRIES key events. */
+static void fill_event_ring(client_t *c, zzapp_rec_t *rec)
+{
+	aar_event in;
+	uint32_t i;
+
+	for (i = 0U; i < ZZAPP_XPORT_EVENT_ENTRIES; i++) {
+		memset(&in, 0, sizeof(in));
+		in.type = AAR_EV_KEY_DOWN;
+		in.code = (uint16_t)i;
+		CHECK(aar_queue_post_event(&c->cq, &in, NULL, NULL) == AAR_OK);
+		if ((i & 15U) == 15U)
+			CHECK(zzapp_xport_pump(rec) == 16);
+	}
+	CHECK(zzapp_xport_event_pending(rec) == ZZAPP_XPORT_EVENT_ENTRIES);
+}
+
+struct drained {
+	uint32_t keys, mice, mouse_after_keys;
+	int32_t dx, dy;
+};
+
+static void drain_events(struct drained *d)
+{
+	aar_event ev[8];
+	uint32_t n, i;
+
+	memset(d, 0, sizeof(*d));
+	while (zzapp_svc_event_poll(ev, 8U, &n) == AAR_OK && n != 0U) {
+		for (i = 0U; i < n; i++) {
+			if (ev[i].type == AAR_EV_MOUSE) {
+				d->mice++;
+				d->dx += ev[i].dx;
+				d->dy += ev[i].dy;
+				if (d->keys == ZZAPP_XPORT_EVENT_ENTRIES)
+					d->mouse_after_keys++;
+			} else if (ev[i].type == AAR_EV_KEY_DOWN) {
+				d->keys++;
+			}
+		}
+	}
+}
+
+/* Mouse motion that finds the event ring full is merged and delivered when
+ * there is room (spec 10.4), not lost. Anything else that finds it full is
+ * dropped and counted. */
+static void test_event_ring_full_mouse(void)
+{
+	client_t c;
+	zzapp_rec_t *rec;
+	struct drained d;
+	uint32_t handle, i;
+	aar_event in;
+
+	reset_all();
+	rec = claim(&c, &handle);
+
+	/* 64 keys fill the ring, then 20 steps of motion: all of it arrives, in
+	 * one event, after the keys. */
+	fill_event_ring(&c, rec);
+	for (i = 0U; i < 20U; i++)
+		post_mouse(&c, 1, -2, 0U);
+	CHECK(zzapp_xport_pump(rec) == 20);
+	CHECK(zzapp_xport_stats(rec)->events_dropped == 0U);
+	drain_events(&d);
+	CHECK(d.keys == ZZAPP_XPORT_EVENT_ENTRIES);
+	CHECK(d.dx == 20 && d.dy == -40);
+	CHECK(d.mice == 1U && d.mouse_after_keys == 1U);
+	CHECK(zzapp_xport_event_pending(rec) == 0U);
+
+	/* A button change is not folded into earlier motion, a key has no place
+	 * to wait: both are dropped and counted. Motion with the same buttons
+	 * still merges. */
+	fill_event_ring(&c, rec);
+	post_mouse(&c, 2, 0, 0U);
+	post_mouse(&c, 5, 0, 1U);
+	memset(&in, 0, sizeof(in));
+	in.type = AAR_EV_KEY_UP;
+	CHECK(aar_queue_post_event(&c.cq, &in, NULL, NULL) == AAR_OK);
+	post_mouse(&c, 3, 0, 0U);
+	CHECK(zzapp_xport_pump(rec) == 4);
+	CHECK(zzapp_xport_stats(rec)->events_dropped == 2U);
+	drain_events(&d);
+	CHECK(d.keys == ZZAPP_XPORT_EVENT_ENTRIES && d.mice == 1U && d.dx == 5);
+
+	/* Motion saturates instead of wrapping. */
+	fill_event_ring(&c, rec);
+	post_mouse(&c, 30000, 0, 0U);
+	post_mouse(&c, 30000, 0, 0U);
+	CHECK(zzapp_xport_pump(rec) == 2);
+	drain_events(&d);
+	CHECK(d.mice == 1U && d.dx == 32767);
+	CHECK(mbox(ZZAPP_OP_RELEASE, handle, 0U, 0U, NULL, NULL) == SDK_STATUS_OK);
+}
+
 /* ---- The system pass ---------------------------------------------------------------------------- */
 
 static void test_pass_wakes(void)
@@ -1792,6 +1899,16 @@ static void test_audio_card(void)
 	CHECK(cl.nreq[AAR_OP_AUDIO_OPEN] == 0U);	/* the card route needs no client */
 	CHECK(zzapp_svc_audio_open(22050U, 2U, &a) == AAR_E_BUSY);
 	CHECK(set_core0.count == 1U);
+	/* The runtime counts the underruns of the card route in the ring header
+	 * (spec 8.4), little-endian next to read_frame; the app and the client
+	 * read the count from there. */
+	CHECK(hdr[AAR_AUDIO_RING_UNDERRUNS / 4U] == 0U);
+	zzapp_services_test_audio_underrun();
+	zzapp_services_test_audio_underrun();
+	zzapp_services_test_audio_underrun();
+	CHECK(hdr[AAR_AUDIO_RING_UNDERRUNS / 4U] == 3U);
+	CHECK(hdr[AAR_AUDIO_RING_READ_FRAME / 4U] == 0U &&
+	      hdr[AAR_AUDIO_RING_WRITE_FRAME / 4U] == 0U);
 	/* Close returns the ring. */
 	CHECK(zzapp_svc_audio_close() == AAR_OK);
 	CHECK(zzapp_services_test_audio_detach_count() == 1U);
@@ -2349,6 +2466,7 @@ int main(void)
 	test_console_after_exit();
 	test_log();
 	test_events_messages();
+	test_event_ring_full_mouse();
 	test_pass_wakes();
 	test_display_pan();
 	test_display_vblank();

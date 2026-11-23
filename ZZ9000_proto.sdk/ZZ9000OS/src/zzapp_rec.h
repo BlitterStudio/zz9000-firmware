@@ -378,6 +378,9 @@ typedef struct {
 	uint32_t reserved[3];
 	uint8_t  inbox[ZZAPP_XPORT_INBOX_ENTRIES][AAR_MSG_BYTES];
 	aar_event events[ZZAPP_XPORT_EVENT_ENTRIES];
+	/* Mouse motion that found the ring full, merged (zzapp_xport_pump). */
+	aar_event ev_mouse;
+	uint32_t ev_mouse_valid;
 } zzapp_rec_xport_t;
 
 /*

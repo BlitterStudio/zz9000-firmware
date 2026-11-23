@@ -361,8 +361,11 @@ int zzapp_xport_post_log(zzapp_rec_t *rec, const void *data, uint32_t len);
  *   a completion whose id and op match a POSTED table entry: stored, DONE;
  *   a completion of an abandoned id: dropped, late_dropped;
  *   any other completion: dropped, unknown_dropped;
- *   AAR_OP_EVENT: into the event ring, or dropped (events_dropped) when it
- *     is full;
+ *   AAR_OP_EVENT: into the event ring. When the ring is full, mouse motion
+ *     is merged into one pending event (dx and dy summed while the buttons
+ *     stay the same) that zzapp_xport_take_event moves into the ring as soon
+ *     as there is room; anything else, and a mouse event with other buttons,
+ *     is dropped (events_dropped);
  *   AAR_OP_MSG: into the inbox. The client's credits keep the inbox from
  *     overflowing, so the pump never leaves a message in the CQ. A client
  *     that broke its credit and overflows the inbox loses the message

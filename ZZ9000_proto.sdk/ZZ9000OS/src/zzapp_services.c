@@ -2880,6 +2880,13 @@ int zzapp_display_layout(uint32_t *layout)
 	return AAR_OK;
 }
 
+uint32_t zzapp_display_id(void)
+{
+	struct zzapp_service_runtime *state = current_runtime();
+
+	return state->display_bound ? state->display_id : 0U;
+}
+
 static uint32_t display_alias(uint32_t physical)
 {
 	struct zzapp_service_runtime *state = current_runtime();
@@ -3578,6 +3585,23 @@ static uint64_t audio_produced_frames(uint32_t write_frame, uint64_t staged_byte
 	return staged_frames + (uint32_t)(write_frame - (uint32_t)staged_frames);
 }
 
+/* The runtime counts a played underrun in the ring header (spec 8.4): the
+ * word at AAR_AUDIO_RING_UNDERRUNS, the runtime's own, beside read_frame. The
+ * ring is normal write-back shareable memory that the client reads through
+ * the ACP, so a plain store is enough (docs/app-runtime.md, host-visible
+ * memory). The caller holds the slot-state lock; the ring is little-endian. */
+_Static_assert(AAR_AUDIO_RING_UNDERRUNS == AAR_AUDIO_RING_READ_FRAME + 4U,
+	       "the underrun word follows read_frame");
+static void audio_note_underrun(struct zzapp_service_runtime *state)
+{
+	volatile uint32_t *word;
+
+	if (!state->audio_read_frame)
+		return;
+	word = state->audio_read_frame + 1;
+	*word = *word + 1U;
+}
+
 #ifndef ZZAPP_HOST_TEST
 static uint32_t runtime_pid(const struct zzapp_service_runtime *state)
 {
@@ -3726,18 +3750,18 @@ void audio_fabric_starvation_event(uint32_t producer_slot)
 
 static void app_audio_underrun_for(uint32_t producer_slot)
 {
-#if ZZAPP_PERF_COUNTERS
 	struct zzapp_service_runtime *state;
 
 	slot_state_lock_acquire();
 	state = audio_runtime(producer_slot);
-	if (state)
+	if (state) {
+		audio_note_underrun(state);
+#if ZZAPP_PERF_COUNTERS
 		zzapp_kernel_perf_audio(zzapp_runtime_kernel(),
 					runtime_pid(state), 0U, 0U, 1U);
-	slot_state_lock_release();
-#else
-	(void)producer_slot;
 #endif
+	}
+	slot_state_lock_release();
 }
 
 static void app_audio_underrun_mailbox(void)
@@ -5533,5 +5557,11 @@ uint32_t zzapp_services_test_audio_request(void)
 uint32_t zzapp_services_test_audio_detach_count(void)
 {
 	return test_runtime()->audio_detach_count;
+}
+
+/* The fabric's underrun callback only exists on the card. */
+void zzapp_services_test_audio_underrun(void)
+{
+	audio_note_underrun(test_runtime());
 }
 #endif
