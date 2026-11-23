@@ -113,12 +113,26 @@ enum zzm_loader_test_work zzm_loader_test_work_kind(void)
 /* Session-begin module callbacks run on core 1 while core 0 services idle
  * unloading.  This lock prevents a callback from observing a reclaimed
  * module image; it is recursive because load/init paths call back into the
- * loader. */
+ * loader.  Core 1 holds it across every SD-backed load step, and taking it
+ * masks local IRQs, so core 0 must never wait for it (see
+ * zzm_loader_session_begin_enter). */
 static sdk_smp_lock_t session_begin_lock = SDK_SMP_LOCK_INIT;
+/* Releases core 0 requested while core 1 held the lock; poll applies them. */
+static volatile uint32_t deferred_releases[ZZM_MODULE_MAX];
 
-void zzm_loader_session_begin_lock(void)
+/* Core-1 loader work (load steps, cancel) may wait: nothing else runs there
+ * while it does. */
+static void session_lock_owner(void)
 {
     sdk_smp_lock_acquire(&session_begin_lock);
+}
+
+int zzm_loader_session_begin_enter(void)
+{
+    if (smp_cpu_id() == 0)
+        return sdk_smp_lock_try_acquire(&session_begin_lock);
+    sdk_smp_lock_acquire(&session_begin_lock);
+    return 1;
 }
 
 void zzm_loader_session_begin_unlock(void)
@@ -1308,7 +1322,7 @@ int zzm_loader_load_on_owner(uint32_t module_id)
 {
     int loaded;
 
-    zzm_loader_session_begin_lock();
+    session_lock_owner();
     loaded = load_on_owner_locked(module_id);
     zzm_loader_session_begin_unlock();
     return loaded;
@@ -1318,7 +1332,7 @@ void zzm_loader_cancel_loading(uint32_t module_id)
 {
     int index;
 
-    zzm_loader_session_begin_lock();
+    session_lock_owner();
     index = module_index(module_id);
     if (index >= 0 && module_status[index].state == ZZM_STATE_LOADING) {
         if (module_format[index] == ZZM_V3_FORMAT_VERSION) {
@@ -1341,13 +1355,30 @@ void zzm_loader_cancel_loading(uint32_t module_id)
     zzm_loader_session_begin_unlock();
 }
 
+/* With core 1 online, core 0 only queues the load, and it must not wait for
+ * the guard core 1 holds during a load step: report the load as in progress
+ * and let the client retry. */
 int zzm_loader_ensure_loaded(uint32_t module_id)
 {
     int loaded;
 
-    zzm_loader_session_begin_lock();
-    loaded = load_dispatch ? load_dispatch(module_id) :
-        load_on_owner_locked(module_id);
+    if (!zzm_loader_session_begin_enter())
+        return ZZM_LOAD_IN_PROGRESS;
+    if (load_dispatch) {
+        loaded = load_dispatch(module_id);
+        if (loaded == ZZM_LOAD_FAILED && smp_cpu_id() == 0) {
+            zzm_status_t status;
+
+            /* The dispatcher only queued the load for core 1; a module
+             * that is still available or loading has not failed. */
+            if (zzm_loader_status_by_id(module_id, &status) &&
+                (status.state == ZZM_STATE_AVAILABLE ||
+                 status.state == ZZM_STATE_LOADING))
+                loaded = ZZM_LOAD_IN_PROGRESS;
+        }
+    } else {
+        loaded = load_on_owner_locked(module_id);
+    }
     zzm_loader_session_begin_unlock();
     return loaded;
 }
@@ -1357,7 +1388,8 @@ int zzm_loader_acquire(uint32_t module_id)
     int index;
     int result = ZZM_LOAD_FAILED;
 
-    zzm_loader_session_begin_lock();
+    if (!zzm_loader_session_begin_enter())
+        return ZZM_LOAD_IN_PROGRESS;
     index = module_index(module_id);
     if (index >= 0)
         result = zzm_loader_ensure_loaded(module_id);
@@ -1369,13 +1401,9 @@ int zzm_loader_acquire(uint32_t module_id)
     return result;
 }
 
-void zzm_loader_release(uint32_t module_id)
+static void release_locked(uint32_t index)
 {
-    int index;
-
-    zzm_loader_session_begin_lock();
-    index = module_index(module_id);
-    if (index >= 0 && module_status[index].state == ZZM_STATE_LOADED &&
+    if (module_status[index].state == ZZM_STATE_LOADED &&
         module_status[index].ref_count != 0U) {
         module_status[index].ref_count--;
         if (module_status[index].ref_count == 0U) {
@@ -1386,9 +1414,24 @@ void zzm_loader_release(uint32_t module_id)
              */
             if (module_format[index] == ZZM_V3_FORMAT_VERSION &&
                 smp_cpu_id() == 1)
-                unload_v3_on_owner((uint32_t)index);
+                unload_v3_on_owner(index);
         }
     }
+}
+
+void zzm_loader_release(uint32_t module_id)
+{
+    int index = module_index(module_id);
+
+    if (index < 0)
+        return;
+    if (!zzm_loader_session_begin_enter()) {
+        /* Core 0 while core 1 is mid-load: keep the reference counted and
+         * let the next poll pass that gets the guard drop it. */
+        __sync_fetch_and_add(&deferred_releases[index], 1U);
+        return;
+    }
+    release_locked((uint32_t)index);
     zzm_loader_session_begin_unlock();
 }
 
@@ -1401,6 +1444,12 @@ void zzm_loader_poll(uint64_t now_ms)
     if (!sdk_smp_lock_try_acquire(&session_begin_lock))
         return;
     last_poll_ms = now_ms;
+    for (i = 0; i < zzm_slot_count; i++) {
+        while (deferred_releases[i] != 0U) {
+            __sync_fetch_and_sub(&deferred_releases[i], 1U);
+            release_locked(i);
+        }
+    }
     for (i = 0; i < zzm_slot_count; i++) {
         uint32_t idle_ms;
         if (module_status[i].state != ZZM_STATE_LOADED ||

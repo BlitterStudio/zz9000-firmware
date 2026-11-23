@@ -141,6 +141,18 @@ image validation, BSS zeroing, cache maintenance, constructor/start work and
 atomic interface registration succeed, the module is **loaded** and may accept
 sessions.
 
+Each load runs on core 1 as a series of short steps (open, one read-and-hash
+chunk, BSS clear, cache maintenance, module init). Core 1 holds the
+session-begin guard for the length of a step, with its interrupts masked. Core
+0 serves the Zorro registers, RTG operations and the audio poll, so it never
+waits for that guard. A session begin, a module lookup or a module acquire
+that core 0 makes while the guard is held returns `SDK_TASK_IN_PROGRESS`
+(65534) at once, before it touches any module state, and the Amiga side
+retries as it does for any load in progress. A reference release that core 0
+makes while the guard is held stays counted and is applied by the next
+main-loop poll that gets the guard. Retries of an in-progress begin are not
+logged; failures still are.
+
 An accepted session takes a strong module reference. A pending host-owned
 callback or future job would also take a strong reference; a transient lookup
 does not. On session close, release the reference only after all of that
