@@ -2864,6 +2864,13 @@ int zzapp_display_layout(uint32_t *layout)
 	return AAR_OK;
 }
 
+uint32_t zzapp_display_id(void)
+{
+	struct zzapp_service_runtime *state = current_runtime();
+
+	return state->display_bound ? state->display_id : 0U;
+}
+
 static uint32_t display_alias(uint32_t physical)
 {
 	struct zzapp_service_runtime *state = current_runtime();

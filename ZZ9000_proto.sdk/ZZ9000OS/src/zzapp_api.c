@@ -87,6 +87,7 @@ WEAK int zzapp_svc_display_open(uint32_t w,uint32_t h,uint32_t f,uint32_t fl,aar
 WEAK int zzapp_svc_display_flip(uint32_t id) { (void)id; return AAR_E_NOSYS; }
 WEAK int zzapp_svc_display_flip_async(uint32_t id) { (void)id; return AAR_E_NOSYS; }
 WEAK int zzapp_display_flip_idle(void) { return 0; }
+WEAK uint32_t zzapp_display_id(void) { return 0U; }
 WEAK int zzapp_svc_display_refresh(aar_surface *o) { (void)o; return AAR_E_NOSYS; }
 WEAK int zzapp_svc_display_set_palette(uint32_t id,uint32_t first,uint32_t count,const uint32_t *rgb) { (void)id;(void)first;(void)count;(void)rgb; return AAR_E_NOSYS; }
 WEAK uint32_t zzapp_svc_display_latest_dropped(void) { return 0U; }
@@ -224,7 +225,8 @@ int zzapp_minigl_bind_flags(uint32_t surface_id, uint32_t flags,
 
     if (out)
         *out = NULL;
-    if (!surface_id)
+    /* Only the app's open display can be bound. */
+    if (!surface_id || surface_id != zzapp_display_id())
         return AAR_E_INVAL;
     if (g_minigl.ops ||
         zzapp_kernel_gl_bind(zzapp_runtime_kernel(), owner, generation) != 0)

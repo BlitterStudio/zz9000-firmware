@@ -469,6 +469,11 @@ touching them. Invalid, overflowed, read-only-for-output, device, and
 other-slot pointers return `AAR_E_FAULT`. Firmware code never becomes a
 user-call target.
 
+`aar_gl_bind` and `gl_bind_flags` take the id of the app's open display
+(`aar_surface.id`). Any other id, including 0, returns `NULL` (`AAR_E_INVAL`
+inside the runtime) before the module is loaded or a GL slot is taken, so the
+bind that follows with the right id is not refused as busy.
+
 GL client-array state is per slot. `DrawArrays` validates every enabled vertex,
 colour, and client texture-coordinate element in its requested range.
 `DrawElements` also validates its index buffer and every indexed element before
