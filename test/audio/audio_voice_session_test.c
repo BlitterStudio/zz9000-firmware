@@ -2656,10 +2656,96 @@ static void scenario_limiter_order(void)
 	      "limiter: close", "");
 }
 
+/*
+ * Interpolation records through the ring: a voice at half a sample per frame
+ * over the linear ramp reads exactly the ramp between the samples with the
+ * cubic (and not the repeated samples of nearest), set either with MODE on
+ * the voice or with the CONFIG default. Four bad records are counted and
+ * change nothing: a selector out of range, a voice the grant does not have,
+ * a default of 0 and a default with arg1. The features word stays as it
+ * was: the engine accepts the records without advertising CUBIC and
+ * VOICE_INTERP.
+ */
+static void scenario_interp_records(int use_config)
+{
+	const uint32_t start = 4900U;
+	const uint32_t index = start % AUDIO_VOICE_PERIOD_FRAMES;
+	uint32_t i;
+	int found = 0, wrong = 0;
+
+	fresh();
+	check(open_session(7680U, 4U) == SDK_STATUS_OK, "interp: open", "");
+	check(upload_ramp(g_grant.session) == SDK_STATUS_OK, "interp: upload", "");
+	rec(start, 0U, AUDIO_VOICE_OP_SET,
+	    AUDIO_VOICE_SET_RATE | AUDIO_VOICE_SET_VOLUME | AUDIO_VOICE_RATE_HZ,
+	    24000U, 0xFFFFFFFFU);
+	if (use_config)
+		rec(start, 0U, AUDIO_VOICE_OP_CONFIG, AUDIO_VOICE_CONFIG_INTERP,
+		    AUDIO_VOICE_INTERP_MODE_CUBIC, 0U);
+	else
+		rec(start, 0U, AUDIO_VOICE_OP_MODE, AUDIO_VOICE_MODE_INTERP,
+		    AUDIO_VOICE_INTERP_MODE_CUBIC, 0U);
+	rec(start, 0U, AUDIO_VOICE_OP_START, SAMPLE_ID, 0U, 0U);
+	rec(start, 0U, AUDIO_VOICE_OP_LOOP, 0U, 0U, 2U * LOOP_SAMPLES);
+	rec(start + 1000U, 0U, AUDIO_VOICE_OP_MODE, AUDIO_VOICE_MODE_INTERP, 9U,
+	    0U);
+	rec(start + 1000U, 7U, AUDIO_VOICE_OP_MODE, AUDIO_VOICE_MODE_INTERP, 3U,
+	    0U);
+	rec(start + 1000U, 0U, AUDIO_VOICE_OP_CONFIG, AUDIO_VOICE_CONFIG_INTERP,
+	    0U, 0U);
+	rec(start + 1000U, 0U, AUDIO_VOICE_OP_CONFIG, AUDIO_VOICE_CONFIG_INTERP,
+	    3U, 1U);
+	publish();
+	for (i = 0U; i < 14U; i++) {
+		uint32_t p;
+
+		period(1);
+		for (p = 0U; p < AUDIO_NUM_PERIODS; p++) {
+			const int16_t *t = tx_period(p);
+			const int started = t[0] == 0 && t[1] == 0 &&
+			                    t[2U * (index + 40U)] != 0;
+			uint32_t k;
+			int ok = 1;
+
+			if (!started)
+				continue;
+			/* frames 2 to 88 of the voice: all four taps are in the ramp */
+			for (k = 2U; k < 89U; k++) {
+				const int want = (int)(((1000 + 50 * (int)k) * 65535) >> 16);
+
+				if (t[2U * (index + k)] != want ||
+				    t[2U * (index + k) + 1U] != want)
+					ok = 0;
+			}
+			if (ok)
+				found = 1;
+			else
+				wrong = 1;
+		}
+	}
+	check(found && !wrong,
+	      use_config ? "interp: the CONFIG default makes the voice read with "
+	      "the cubic" : "interp: MODE makes the voice read with the cubic",
+	      fmt("found %d, wrong %d", found, wrong));
+	check(st_rejected() == 4U && st_late() == 0U && st_dropped() == 0U,
+	      "interp: the four bad records are counted, nothing else",
+	      fmt("rejected=%u late=%u dropped=%u", st_rejected(), st_late(),
+	      st_dropped()));
+	check((st32(AUDIO_VOICE_STATUS_OFF_FEATURES) &
+	       (AUDIO_VOICE_FEATURE_CUBIC | AUDIO_VOICE_FEATURE_VOICE_INTERP)) == 0U &&
+	      st32(AUDIO_VOICE_STATUS_OFF_FEATURES) == AUDIO_VOICE_FEATURES,
+	      "interp: CUBIC and VOICE_INTERP are not advertised",
+	      fmt("features=%x", st32(AUDIO_VOICE_STATUS_OFF_FEATURES)));
+	check(audio_voice_session_close(g_grant.session) == SDK_STATUS_OK,
+	      "interp: close", "");
+}
+
 int main(void)
 {
 	scenario_config();
 	scenario_limiter_order();
+	scenario_interp_records(0);
+	scenario_interp_records(1);
 	scenario_open();
 	scenario_open_refused();
 	scenario_ring_geometry();

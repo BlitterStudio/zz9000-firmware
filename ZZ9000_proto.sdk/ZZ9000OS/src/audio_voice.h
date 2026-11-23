@@ -57,6 +57,15 @@
 
 #define AUDIO_VOICE_INTERP_NEAREST 0U
 #define AUDIO_VOICE_INTERP_LINEAR  1U
+#define AUDIO_VOICE_INTERP_CUBIC   2U
+
+/* The selectors of MODE and CONFIG records on the wire (zz9k/voice.h,
+ * ZZ9K_VOICE_INTERP_*). A selector above INHERIT names the session value
+ * AUDIO_VOICE_INTERP_* plus one. */
+#define AUDIO_VOICE_INTERP_MODE_INHERIT 0U
+#define AUDIO_VOICE_INTERP_MODE_NEAREST 1U
+#define AUDIO_VOICE_INTERP_MODE_LINEAR  2U
+#define AUDIO_VOICE_INTERP_MODE_CUBIC   3U
 
 /*
  * Command ops. A command is one decoded record (host endian; the wire
@@ -94,8 +103,13 @@
  *          voice.
  *   MASTER arg0: master gain Q8.8 (256 = unity, capped at 0xFFFF); the
  *          voice field is ignored.
- *   MODE, ENVELOPE  reserved op numbers of later features. The engine
- *          rejects them.
+ *   MODE   voice: the voice. flags: the settings the record carries, only
+ *          AUDIO_VOICE_MODE_INTERP, otherwise the record is rejected.
+ *          arg0: an interpolation selector, AUDIO_VOICE_INTERP_MODE_INHERIT
+ *          to _CUBIC (0 to 3), arg1 must be 0; otherwise the record is
+ *          rejected and the voice keeps its setting. It takes effect on
+ *          the voice at its frame (see "Interpolation").
+ *   ENVELOPE  reserved op number of a later feature. The engine rejects it.
  *   CONFIG flags: the settings the record carries; at least one, and only
  *          known bits, else the record is rejected whole. The voice field
  *          is ignored. AUDIO_VOICE_CONFIG_RAMP: arg0 is the ramp length in
@@ -104,7 +118,11 @@
  *          arg1 is 0 (off, the default) or 1 (on), otherwise the record is
  *          rejected. A limiter-only record requires arg0 = 0; a ramp-only
  *          record keeps ignoring arg1. Combined settings validate before
- *          either changes. Same-stamp records apply in their supplied order.
+ *          either changes. AUDIO_VOICE_CONFIG_INTERP: arg0 is the session
+ *          default interpolation, AUDIO_VOICE_INTERP_MODE_NEAREST to _CUBIC
+ *          (1 to 3), arg1 must be 0, and the record names no other
+ *          setting; anything else rejects it. Same-stamp records apply in
+ *          their supplied order.
  *
  * Limiting. The optional static soft knee acts on the final sum after the
  * Q8.8 master. It is identity through magnitude 24576, then approximates
@@ -112,6 +130,39 @@
  * units. It is odd, monotonic and stays below either rail, including with
  * all voices and fade slots and the maximum master. No lookahead or state
  * between samples is used. Disabling it restores the original S16 clamp.
+ *
+ * Interpolation. Each voice reads its sample nearest, linear or with the
+ * 4-point Catmull-Rom cubic. The session default is AUDIO_VOICE_INTERP_*
+ * (nearest, or linear when the session was opened with the linear flag; a
+ * CONFIG record changes it). A voice follows the default until a MODE
+ * record gives it a selector of its own. A selector is a wire value:
+ * AUDIO_VOICE_INTERP_MODE_INHERIT (0, follow the default), _NEAREST,
+ * _LINEAR or _CUBIC. A MODE or CONFIG record takes effect at its frame:
+ * frames before it use the old setting, so the same-stamp order of the
+ * records decides what a frame reads. The setting of a voice stays across
+ * START, STOP and RESET, like its rate and volume. A fade slot freezes the
+ * interpolation the voice has at the restart (the default included) with
+ * its position, rate, geometry and gain: later MODE and CONFIG records
+ * never change a tail.
+ *   Nearest and linear are the arithmetic described under "Mixing" in
+ * audio_voice.c, unchanged. Cubic reads the frame before the position
+ * (the previous frame in play order), the frame at the position and the
+ * next two in play order, a, b, c and d, with t the 16-bit fraction as the
+ * linear blend takes it, and returns
+ *   b + (t * ((c - a) + t * ((2a - 5b + 4c - d) +
+ *                              t * (d - a + 3(b - c))))) / 2
+ * in 16-bit units, evaluated in fixed point with every product rounded
+ * (see cubic_interp() in audio_voice.c); 8-bit data is promoted by 8 bits
+ * first. The result lies within 1 unit of the real-valued curve and can be
+ * up to 25% outside the S16 range, so a cubic voice's side is scaled by its
+ * volume in 64 bits (or the vector equivalent) and the sums and the master
+ * keep a wider margin than the 32-bit bound of the other modes. The frames
+ * around the position follow the voice: in play order the next frame after
+ * the pass end is the loop start when there is a loop and the last frame
+ * again when there is none, and the frame before the loop start is the
+ * loop end once a pass has wrapped. Backward play counts in its own play
+ * order (the frame below the position is the next one) as the linear blend
+ * does.
  *
  * A voice number of 32 or more, or an unknown op, is rejected.
  * Every byte quantity (offsets and lengths of START and LOOP) is divided
@@ -166,8 +217,13 @@
 
 #define AUDIO_VOICE_CONFIG_RAMP  0x0001U
 #define AUDIO_VOICE_CONFIG_LIMITER 0x0002U
+#define AUDIO_VOICE_CONFIG_INTERP  0x0004U
 #define AUDIO_VOICE_CONFIG_KNOWN \
-	(AUDIO_VOICE_CONFIG_RAMP | AUDIO_VOICE_CONFIG_LIMITER)
+	(AUDIO_VOICE_CONFIG_RAMP | AUDIO_VOICE_CONFIG_LIMITER | \
+	 AUDIO_VOICE_CONFIG_INTERP)
+
+#define AUDIO_VOICE_MODE_INTERP  0x0001U
+#define AUDIO_VOICE_MODE_KNOWN   AUDIO_VOICE_MODE_INTERP
 
 struct audio_voice_cmd {
 	uint32_t stamp; /* engine frame to apply at */
@@ -192,6 +248,8 @@ struct audio_voice {
 	uint8_t wide;       /* 16-bit samples */
 	uint8_t stereo;     /* interleaved left and right samples */
 	uint8_t stopping;   /* ramping to silence, then inactive */
+	uint8_t vinterp;    /* MODE interpolation: 0 inherit, else INTERP_MODE_* */
+	uint8_t looped;     /* a pass has wrapped into the loop (cubic taps) */
 	uint32_t base;      /* sample byte offset in the bank */
 	uint32_t len;       /* sample length in frames */
 	uint32_t pos;       /* frame index */
@@ -247,6 +305,7 @@ struct audio_voice_engine {
 	uint32_t chunk_fin;   /* frames already scaled into the output */
 	uint32_t chunk_off;   /* frame of the chunk the next record applies at */
 	int chunk_dirty;      /* the sums were cleared and may hold sound */
+	int chunk_cubic;      /* a cubic voice may have added to the sums */
 };
 
 /*

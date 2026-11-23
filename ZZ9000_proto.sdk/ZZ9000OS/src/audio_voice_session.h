@@ -110,7 +110,10 @@
  * The features this firmware advertises. CONFIG is the record the engine
  * handles. RAMP and LIMITER passed their card timing gates; the measured
  * loads and render times are recorded in sdk/docs/zz9k-voice.md, Hardware
- * measurements. Both stay off until a client sends a CONFIG record.
+ * measurements. Both stay off until a client sends a CONFIG record. The
+ * engine also accepts cubic interpolation, the MODE record and the CONFIG
+ * default interpolation; CUBIC and VOICE_INTERP stay unadvertised until
+ * they pass the same gate.
  */
 #define AUDIO_VOICE_FEATURES \
 	(AUDIO_VOICE_FEATURE_CONFIG | AUDIO_VOICE_FEATURE_RAMP | \

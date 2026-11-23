@@ -32,6 +32,7 @@ VOICE_SESSION_TARGET := $(BUILD_DIR)/audio_voice_session_test
 VOICE_BASELINE_TARGET := $(BUILD_DIR)/audio_voice_baseline_test
 VOICE_RAMP_TARGET := $(BUILD_DIR)/audio_voice_ramp_test
 VOICE_LIMITER_TARGET := $(BUILD_DIR)/audio_voice_limiter_test
+VOICE_CUBIC_TARGET := $(BUILD_DIR)/audio_voice_cubic_test
 VOICE_PARITY_TARGET := $(BUILD_DIR)/audio_voice_abi_parity_test
 TARGETS := $(CONVERT_TARGET) $(CONVERT_EXACT_TARGET) $(CAPTURE_TARGET) $(PROFILE_TARGET) \
 	$(PLAYBACK_TARGET) $(RATE_TARGET) $(PRECONVERT_TARGET) \
@@ -41,7 +42,8 @@ TARGETS := $(CONVERT_TARGET) $(CONVERT_EXACT_TARGET) $(CAPTURE_TARGET) $(PROFILE
 	$(RING_TARGET) $(BENCH_SMOKE_TARGET) $(STREAM_DECODE_TARGET) \
 	$(REDUCE_TARGET) $(VOICE_TARGET) $(VOICE_PT4_TARGET) \
 	$(VOICE_BASELINE_TARGET) \
-	$(VOICE_RAMP_TARGET) $(VOICE_LIMITER_TARGET) $(VOICE_PARITY_TARGET) \
+	$(VOICE_RAMP_TARGET) $(VOICE_LIMITER_TARGET) $(VOICE_CUBIC_TARGET) \
+	$(VOICE_PARITY_TARGET) \
 	$(VOICE_SESSION_TARGET)
 
 # mock/ shadows ff.h and xil_cache.h for the TUs (zz_config.c) whose
@@ -82,6 +84,7 @@ test: $(TARGETS)
 	$(VOICE_RAMP_TARGET)
 	$(VOICE_PARITY_TARGET)
 	$(VOICE_LIMITER_TARGET)
+	$(VOICE_CUBIC_TARGET)
 
 # U2 fabric compositor: the characterization golden (pump_golden.c, a
 # verbatim capture of the pre-fabric pump) drives the parity scenarios
@@ -340,6 +343,15 @@ $(VOICE_LIMITER_TARGET): audio_voice_limiter_test.c \
 	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ audio_voice_limiter_test.c \
 		$(SRC_DIR)/audio_voice.c
 
+
+# Per-voice interpolation and the cubic reader: real-arithmetic, unrolled
+# stream and frame-by-frame model references, records, tails, formats, the
+# overshoot at the largest gain and master, the limiter, split renders.
+$(VOICE_CUBIC_TARGET): audio_voice_cubic_test.c \
+	$(SRC_DIR)/audio_voice.c $(SRC_DIR)/audio_voice.h
+	@mkdir -p $(BUILD_DIR)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ audio_voice_cubic_test.c \
+		$(SRC_DIR)/audio_voice.c -lm
 # The voice constants of the SDK header and of the firmware headers agree.
 $(VOICE_PARITY_TARGET): audio_voice_abi_parity_test.c \
 	$(SRC_DIR)/audio_voice.h $(SRC_DIR)/audio_voice_session.h \
