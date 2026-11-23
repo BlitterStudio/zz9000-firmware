@@ -611,7 +611,12 @@ neither `READ` nor `WRITE`, `CREATE` or `TRUNCATE` without `WRITE`, or `EXCL`
 without `CREATE`. Create-or-replace is `CREATE | TRUNCATE`. Paths and names
 travel as NUL-terminated bytes in the 1 KiB scratch area of the service block.
 Reads and writes move through the data block, one request per chunk of at
-most 256 KiB.
+most 256 KiB. The firmware keeps the `READ` and `WRITE` bits of each open
+(`file_access` in the services state, one byte per id). `aar_file_write`
+through an id opened without `WRITE` and `aar_file_read` through an id opened
+without `READ` return `AAR_E_BADF` before any request is posted, and the
+count out is 0, also for a length of 0. A reused id number takes the flags of
+its new open.
 
 **Shared buffers.** `aar_shared_alloc` takes flags 0 and returns a block from
 the host-visible heap, rounded to the 4096-byte granule, with at most 64 live
