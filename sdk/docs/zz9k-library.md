@@ -118,8 +118,9 @@ never drives the board registers itself.
 The library is built from two parts that the SDK build links into one
 `build/aar.library`:
 
-- the portable core and the AmigaOS shell, `client/src/aar_core.c`,
-  `aar_shell.c` and `aar_probe.c` of the aar repository (MIT), pinned in
+- the portable core, the AmigaOS shell and the probe, `client/src/aar_core.c`,
+  `aar_shell.c` and `aar_probe.c`, and the shared image rules
+  `loader/aar_image.c`, all of the aar repository (MIT), pinned in
   `sdk/AAR_REF` (`sh scripts/fetch-aar.sh`);
 - the ZZ9000 platform layer, `sdk/amiga/src/aar_zz9000.[ch]` (GPL), which
   implements the platform interface `client/src/aar_plat.h` with the private

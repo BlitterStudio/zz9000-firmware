@@ -9,9 +9,10 @@ IMAGE="${IMAGE:-amigadev/crosstools:m68k-amigaos@sha256:9c81fcd973058fb37f1ca5b1
 REPO_ROOT="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
 
 # aar.library is built here from the aar checkout pinned in sdk/AAR_REF: the
-# portable core, the AmigaOS shell and the probe (client/src/aar_core.c,
-# aar_shell.c, aar_probe.c, MIT) linked with the ZZ9000 platform layer of this
-# tree (amiga/src/aar_zz9000.c, GPL), which includes the private wire
+# portable core, the AmigaOS shell, the probe and the shared image rules
+# (client/src/aar_core.c, aar_shell.c, aar_probe.c and loader/aar_image.c,
+# MIT) linked with the ZZ9000 platform layer of this tree
+# (amiga/src/aar_zz9000.c, GPL), which includes the private wire
 # zzapp_proto.h of the firmware tree. aar-run and libaarserve.a are built from
 # the same checkout (client/run, client/serve, MIT) and do not link the
 # platform layer. The pinned aar checkout comes from
@@ -24,6 +25,12 @@ fi
 for f in aar_core.c aar_shell.c aar_probe.c aar_plat.h; do
   if [ ! -f "$AAR_DIR/client/src/$f" ]; then
     echo "build-m68k-amigaos: $AAR_DIR/client/src/$f is missing; sdk/AAR_REF must name an aar commit with the client library" >&2
+    exit 1
+  fi
+done
+for f in aar_image.c aar_image.h; do
+  if [ ! -f "$AAR_DIR/loader/$f" ]; then
+    echo "build-m68k-amigaos: $AAR_DIR/loader/$f is missing; sdk/AAR_REF must name an aar commit with the shared image rules" >&2
     exit 1
   fi
 done
@@ -61,6 +68,7 @@ m68k-amigaos-gcc $STACKCFLAGS -c amiga/src/zz9k_library.c -o build/m68k/zz9k_lib
 for src in aar_core aar_shell aar_probe; do
   m68k-amigaos-gcc $STACKCFLAGS $AARFLAGS -c /aar/client/src/$src.c -o build/m68k/$src.o
 done
+m68k-amigaos-gcc $STACKCFLAGS $AARFLAGS -c /aar/loader/aar_image.c -o build/m68k/aar_image.o
 m68k-amigaos-gcc $STACKCFLAGS $AARFLAGS -c amiga/src/aar_zz9000.c -o build/m68k/aar_zz9000.o
 m68k-amigaos-gcc $STACKCFLAGS -c amiga/src/zz9k_library_resident.c -o build/m68k/zz9k_library_resident.o
 m68k-amigaos-gcc $CFLAGS -Itools -c tools/zz9k-fb-common.c -o build/m68k/zz9k-fb-common.o
@@ -97,6 +105,7 @@ m68k-amigaos-gcc -noixemul -nostartfiles -Os -s -Iinclude -Ihost/include -Iamiga
   -o build/mpega.library
 m68k-amigaos-gcc -noixemul -nostartfiles -Os -s \
   build/m68k/aar_shell.o build/m68k/aar_core.o build/m68k/aar_probe.o \
+  build/m68k/aar_image.o \
   build/m68k/aar_zz9000.o -o build/aar.library
 
 # aar-run, the reference launcher (client/run, MIT), and libaarserve.a, the
