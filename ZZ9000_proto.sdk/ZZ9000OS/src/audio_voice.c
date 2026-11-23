@@ -20,6 +20,16 @@
 #include "audio_voice.h"
 
 #include <string.h>
+#ifdef __ARM_NEON
+#include <arm_neon.h>
+#endif
+
+/* GCC's -O2 vectorizer turns the scalar kernels below into gathers that go
+ * through the stack and NEON to ARM register moves, which are slow on the
+ * A9; the NEON code in this file is written out. */
+#if defined(__arm__) && defined(__GNUC__) && !defined(__clang__)
+#pragma GCC optimize("no-tree-vectorize")
+#endif
 
 void audio_voice_init(struct audio_voice_engine *e, const uint8_t *bank,
                       uint32_t bank_len, uint32_t clock)
@@ -271,13 +281,17 @@ AV_INLINE int32_t be16s(const uint8_t *p)
 #endif
 }
 
-/* The two sides of the frame at q, in the units of the format (8-bit or
- * 16-bit); a mono frame feeds both sides. */
-AV_INLINE void fetch(const int wide, const int stereo, const uint8_t *q,
-                     int32_t *l, int32_t *r)
+/* The sides of the frame at q named by sides (bit 0 left, bit 1 right), in
+ * the units of the format (8-bit or 16-bit); a mono frame feeds both sides.
+ * The other value is left alone. */
+AV_INLINE void fetch(const int wide, const int stereo, const int sides,
+                     const uint8_t *q, int32_t *l, int32_t *r)
 {
 	if (wide) {
-		if (stereo) {
+		if (!stereo) {
+			*l = be16s(q);
+			*r = *l;
+		} else if (sides == 3) {
 #ifdef AV_FAST_READS
 			uint32_t w;
 
@@ -289,13 +303,19 @@ AV_INLINE void fetch(const int wide, const int stereo, const uint8_t *q,
 			*l = be16s(q);
 			*r = be16s(q + 2);
 #endif
-		} else {
+		} else if (sides == 1) {
 			*l = be16s(q);
-			*r = *l;
+		} else {
+			*r = be16s(q + 2);
 		}
-	} else {
+	} else if (!stereo) {
 		*l = (int8_t)q[0];
-		*r = stereo ? (int8_t)q[1] : *l;
+		*r = *l;
+	} else {
+		if (sides & 1)
+			*l = (int8_t)q[0];
+		if (sides & 2)
+			*r = (int8_t)q[1];
 	}
 }
 
@@ -315,55 +335,65 @@ AV_INLINE void fetch(const int wide, const int stereo, const uint8_t *q,
  * 8-bit data blends raw and shifts by 8 for the same reason.
  */
 AV_INLINE void kernel(const int wide, const int stereo, const int linear,
-                      const uint8_t *restrict p, int32_t x, const int32_t dx,
-                      const int32_t nbytes, uint32_t n, const int32_t vl,
-                      const int32_t vr, int32_t *restrict al,
-                      int32_t *restrict ar)
+                      const int sides, const uint8_t *restrict p, int32_t x,
+                      const int32_t dx, const int32_t nbytes, uint32_t n,
+                      const int32_t vl, const int32_t vr,
+                      int32_t *restrict al, int32_t *restrict ar)
 {
 	const int fs = wide + stereo; /* log2 of the frame size in bytes */
+	const int ish = wide ? 16 : 8;
 	uint32_t i;
 
 	for (i = 0; i < n; i++) {
 		const uint8_t *q = p + (x >> 16) * (1 << fs);
-		int32_t l, r;
+		int32_t l = 0, r = 0;
 
-		fetch(wide, stereo, q, &l, &r);
+		fetch(wide, stereo, sides, q, &l, &r);
 		if (linear) {
-			int32_t bl, br;
+			int32_t bl = 0, br = 0;
 			const int32_t fr = x & 0xFFFF;
 			const int32_t w0 = 65536 - fr;
 
-			fetch(wide, stereo, q + nbytes, &bl, &br);
-			l = (l * w0 + bl * fr) >> (wide ? 16 : 8);
-			r = stereo ? (r * w0 + br * fr) >> (wide ? 16 : 8) : l;
-			al[i] += (l * vl) >> 16;
-			ar[i] += (r * vr) >> 16;
+			fetch(wide, stereo, sides, q + nbytes, &bl, &br);
+			l = (l * w0 + bl * fr) >> ish;
+			r = stereo ? (r * w0 + br * fr) >> ish : l;
+			if (sides & 1)
+				al[i] += (l * vl) >> 16;
+			if (sides & 2)
+				ar[i] += (r * vr) >> 16;
 		} else {
-			al[i] += (l * vl) >> (wide ? 16 : 8);
-			ar[i] += (r * vr) >> (wide ? 16 : 8);
+			if (sides & 1)
+				al[i] += (l * vl) >> ish;
+			if (sides & 2)
+				ar[i] += (r * vr) >> ish;
 		}
 		x += dx;
 	}
 }
 
 AV_NOINLINE void run_kernel(const struct audio_voice *v, int linear,
-                       const uint8_t *p, int32_t x, int32_t dx,
-                       int32_t nbytes, uint32_t n, int32_t vl, int32_t vr,
-                       int32_t *al, int32_t *ar)
+                            int sides, const uint8_t *p, int32_t x,
+                            int32_t dx, int32_t nbytes, uint32_t n,
+                            int32_t vl, int32_t vr, int32_t *al, int32_t *ar)
 {
-#define AV_K(w, s, l) \
-	kernel(w, s, l, p, x, dx, nbytes, n, vl, vr, al, ar); break
+#define AV_KS(w, s, l) \
+	switch (sides) { \
+	case 1: kernel(w, s, l, 1, p, x, dx, nbytes, n, vl, vr, al, ar); break; \
+	case 2: kernel(w, s, l, 2, p, x, dx, nbytes, n, vl, vr, al, ar); break; \
+	default: kernel(w, s, l, 3, p, x, dx, nbytes, n, vl, vr, al, ar); break; \
+	} \
+	break
 	switch ((v->wide ? 4 : 0) | (v->stereo ? 2 : 0) | (linear ? 1 : 0)) {
-	case 0: AV_K(0, 0, 0);
-	case 1: AV_K(0, 0, 1);
-	case 2: AV_K(0, 1, 0);
-	case 3: AV_K(0, 1, 1);
-	case 4: AV_K(1, 0, 0);
-	case 5: AV_K(1, 0, 1);
-	case 6: AV_K(1, 1, 0);
-	default: AV_K(1, 1, 1);
+	case 0: AV_KS(0, 0, 0);
+	case 1: AV_KS(0, 0, 1);
+	case 2: AV_KS(0, 1, 0);
+	case 3: AV_KS(0, 1, 1);
+	case 4: AV_KS(1, 0, 0);
+	case 5: AV_KS(1, 0, 1);
+	case 6: AV_KS(1, 1, 0);
+	default: AV_KS(1, 1, 1);
 	}
-#undef AV_K
+#undef AV_KS
 }
 
 /* Frames of a linear voice that sit on the pass edge: the position does
@@ -371,8 +401,9 @@ AV_NOINLINE void run_kernel(const struct audio_voice *v, int linear,
  * start (or the frame itself) instead of the next frame. la/ra and lb/rb
  * are the sides of the frame and of its partner as read from the sample. */
 AV_NOINLINE void run_edge(const struct audio_voice *v, int32_t la, int32_t lb,
-                     int32_t ra, int32_t rb, int32_t x, int32_t dx, uint32_t n,
-                     int32_t vl, int32_t vr, int32_t *al, int32_t *ar)
+                          int32_t ra, int32_t rb, int32_t x, int32_t dx,
+                          uint32_t n, int32_t vl, int32_t vr, int32_t *al,
+                          int32_t *ar)
 {
 	const int ish = v->wide ? 16 : 8;
 	const int stereo = v->stereo;
@@ -480,13 +511,16 @@ static void pass_end(struct audio_voice *v, int below)
  * voice whose volumes are both zero adds exactly nothing to the sums and is
  * only advanced.
  */
-AV_NOINLINE void mix_voice(const uint8_t *bank, int linear, struct audio_voice *v,
-                      int32_t *al, int32_t *ar, uint32_t n)
+AV_NOINLINE void mix_voice(const uint8_t *bank, int linear,
+                           struct audio_voice *v, int32_t *al, int32_t *ar,
+                           uint32_t n)
 {
 	const uint32_t step = v->step;
 	const int32_t vl = (int32_t)v->vol_l;
 	const int32_t vr = (int32_t)v->vol_r;
 	const int audible = (v->vol_l | v->vol_r) != 0U;
+	/* Which sides get sound: a side at volume 0 adds exactly nothing. */
+	const int sides = (v->vol_l != 0U ? 1 : 0) | (v->vol_r != 0U ? 2 : 0);
 	uint32_t done = 0;
 
 	while (done < n && v->active) {
@@ -559,7 +593,7 @@ AV_NOINLINE void mix_voice(const uint8_t *bank, int linear, struct audio_voice *
 			const int32_t fb = (int32_t)1 << v->shift;
 
 			if (safe != 0U)
-				run_kernel(v, linear,
+				run_kernel(v, linear, sides,
 				           bank + v->base + ((size_t)v->pos << v->shift),
 				           (int32_t)v->frac, dx, back ? -fb : fb, safe, vl,
 				           vr, al + done, ar + done);
@@ -567,12 +601,10 @@ AV_NOINLINE void mix_voice(const uint8_t *bank, int linear, struct audio_voice *
 			if (safe < run) {
 				int32_t la, lb, ra, rb;
 
-				fetch(v->wide, v->stereo,
-				      bank + v->base + ((size_t)v->pos << v->shift), &la,
-				      &ra);
-				fetch(v->wide, v->stereo,
-				      bank + v->base + ((size_t)neighbour(v) << v->shift),
-				      &lb, &rb);
+				fetch(v->wide, v->stereo, 3, bank + v->base +
+				      ((size_t)v->pos << v->shift), &la, &ra);
+				fetch(v->wide, v->stereo, 3, bank + v->base +
+				      ((size_t)neighbour(v) << v->shift), &lb, &rb);
 				run_edge(v, la, lb, ra, rb, (int32_t)v->frac, dx, run - safe,
 				         vl, vr, al + done + safe, ar + done + safe);
 				below = step_state(v, run - safe);
@@ -588,22 +620,107 @@ AV_NOINLINE void mix_voice(const uint8_t *bank, int linear, struct audio_voice *
 
 /*
  * Scale the sums by the master and clamp to S16: x = (sum * master) >> 8 in
- * 64 bits, arithmetic shift, then saturate, per side of every frame.
+ * 64 bits, arithmetic shift, then saturate, per side of every frame. Two
+ * cases need no 64-bit product: at unity the shift undoes the scale, and for
+ * a master up to AV_MASTER_NARROW the product of a sum (at most 2^20 in
+ * magnitude) fits int32.
  */
-AV_NOINLINE void finish(const int32_t *l, const int32_t *r, int16_t *out,
-                   uint32_t n, uint32_t master)
+#define AV_MASTER_NARROW 2047U
+typedef char av_master_narrow_fits[
+	((int64_t)AUDIO_VOICE_MAX_VOICES * 32768 * AV_MASTER_NARROW <
+	 2147483648LL) ? 1 : -1];
+
+static int16_t clamp16(int64_t x)
+{
+	return (int16_t)(x > 32767 ? 32767 : x < -32768 ? -32768 : x);
+}
+
+static void finish_c(const int32_t *l, const int32_t *r, int16_t *out,
+                     uint32_t n, uint32_t master)
 {
 	uint32_t i;
 
-	for (i = 0; i < n; i++) {
-		int64_t xl = ((int64_t)l[i] * (int64_t)master) >> 8;
-		int64_t xr = ((int64_t)r[i] * (int64_t)master) >> 8;
-
-		out[2U * i] = (int16_t)(xl > 32767 ? 32767 : xl < -32768 ? -32768 : xl);
-		out[2U * i + 1U] =
-			(int16_t)(xr > 32767 ? 32767 : xr < -32768 ? -32768 : xr);
+	if (master == AUDIO_VOICE_MASTER_UNITY) {
+		for (i = 0; i < n; i++) {
+			out[2U * i] = clamp16(l[i]);
+			out[2U * i + 1U] = clamp16(r[i]);
+		}
+	} else if (master <= AV_MASTER_NARROW) {
+		for (i = 0; i < n; i++) {
+			out[2U * i] = clamp16((l[i] * (int32_t)master) >> 8);
+			out[2U * i + 1U] = clamp16((r[i] * (int32_t)master) >> 8);
+		}
+	} else {
+		for (i = 0; i < n; i++) {
+			out[2U * i] = clamp16(((int64_t)l[i] * (int64_t)master) >> 8);
+			out[2U * i + 1U] =
+				clamp16(((int64_t)r[i] * (int64_t)master) >> 8);
+		}
 	}
 }
+
+#ifdef __ARM_NEON
+/* Four sums at a time: the same arithmetic in vector form. vqmovn is the
+ * S16 clamp; the 64-bit case narrows with vshrn, whose result fits int32
+ * (at most 2^20 * 65535 / 256). The stores interleave left and right. */
+AV_NOINLINE void finish(const int32_t *l, const int32_t *r, int16_t *out,
+                        uint32_t n, uint32_t master)
+{
+	uint32_t i = 0;
+	int16x4x2_t o;
+
+	if (master == AUDIO_VOICE_MASTER_UNITY) {
+		for (; i + 4U <= n; i += 4U) {
+			o.val[0] = vqmovn_s32(vld1q_s32(l + i));
+			o.val[1] = vqmovn_s32(vld1q_s32(r + i));
+			vst2_s16(out + 2U * i, o);
+		}
+	} else if (master <= AV_MASTER_NARROW) {
+		const int32x4_t m = vdupq_n_s32((int32_t)master);
+
+		for (; i + 4U <= n; i += 4U) {
+			o.val[0] = vqmovn_s32(
+				vshrq_n_s32(vmulq_s32(vld1q_s32(l + i), m), 8));
+			o.val[1] = vqmovn_s32(
+				vshrq_n_s32(vmulq_s32(vld1q_s32(r + i), m), 8));
+			vst2_s16(out + 2U * i, o);
+		}
+	} else {
+		const int32x2_t m = vdup_n_s32((int32_t)master);
+
+		for (; i + 4U <= n; i += 4U) {
+			const int32x4_t a = vld1q_s32(l + i);
+			const int32x4_t b = vld1q_s32(r + i);
+
+			o.val[0] = vqmovn_s32(vcombine_s32(
+				vshrn_n_s64(vmull_s32(vget_low_s32(a), m), 8),
+				vshrn_n_s64(vmull_s32(vget_high_s32(a), m), 8)));
+			o.val[1] = vqmovn_s32(vcombine_s32(
+				vshrn_n_s64(vmull_s32(vget_low_s32(b), m), 8),
+				vshrn_n_s64(vmull_s32(vget_high_s32(b), m), 8)));
+			vst2_s16(out + 2U * i, o);
+		}
+	}
+	finish_c(l + i, r + i, out + 2U * i, n - i, master);
+}
+
+/* Zero fill with 32 bytes per iteration. */
+static void av_zero(void *p, size_t bytes)
+{
+	uint8_t *d = p;
+	const uint8x16_t z = vdupq_n_u8(0);
+
+	for (; bytes >= 32U; bytes -= 32U, d += 32) {
+		vst1q_u8(d, z);
+		vst1q_u8(d + 16, z);
+	}
+	if (bytes != 0U)
+		memset(d, 0, bytes);
+}
+#else
+#define finish finish_c
+#define av_zero(p, bytes) memset((p), 0, (bytes))
+#endif
 
 static void mix(struct audio_voice_engine *e, int16_t *out, uint32_t frames)
 {
@@ -621,8 +738,8 @@ static void mix(struct audio_voice_engine *e, int16_t *out, uint32_t frames)
 			if (!v->active || v->step == 0U)
 				continue;
 			if (!dirty && (v->vol_l | v->vol_r) != 0U) {
-				memset(e->mix_l, 0, n * sizeof(e->mix_l[0]));
-				memset(e->mix_r, 0, n * sizeof(e->mix_r[0]));
+				av_zero(e->mix_l, n * sizeof(e->mix_l[0]));
+				av_zero(e->mix_r, n * sizeof(e->mix_r[0]));
 				dirty = 1;
 			}
 			mix_voice(e->bank, linear, v, e->mix_l, e->mix_r, n);
@@ -630,7 +747,7 @@ static void mix(struct audio_voice_engine *e, int16_t *out, uint32_t frames)
 		if (dirty)
 			finish(e->mix_l, e->mix_r, out, n, e->master);
 		else
-			memset(out, 0, 2U * n * sizeof(out[0]));
+			av_zero(out, 2U * n * sizeof(out[0]));
 		out += 2U * n;
 		frames -= n;
 	}
