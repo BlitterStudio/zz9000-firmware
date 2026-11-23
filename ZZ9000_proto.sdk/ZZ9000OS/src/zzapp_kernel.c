@@ -619,10 +619,33 @@ int zzapp_kernel_apps_runnable(const zzapp_kernel_t *kernel)
 static void handoff_api_lock(zzapp_kernel_t *kernel);
 static void register_api_waiter(zzapp_kernel_t *kernel, uint32_t pid);
 
+/* A sleeper is due when the millisecond clock reached its deadline or, for a
+ * sleep with a microsecond deadline (aar_sleep_us), the microsecond clock did.
+ * The clock is read at most once per scan, and only when such a sleeper is
+ * there to compare. */
+static int sleeper_due(const zzapp_kernel_t *kernel, const zzapp_thread_t *thread,
+		       uint64_t *now_us, int *have_now)
+{
+	if (thread->state != ZZAPP_THREAD_SLEEPING)
+		return 0;
+	if (thread->sleep_deadline <= kernel->now)
+		return 1;
+	if (thread->sleep_deadline_us == 0U)
+		return 0;
+	if (!*have_now) {
+		*now_us = zzapp_kernel_now_us();
+		*have_now = 1;
+	}
+	return thread->sleep_deadline_us <= *now_us;
+}
+
 /* Wake the earliest due sleeper, then the next, until none is due. Ties on
  * the deadline go to the one that went to sleep first. */
 static void wake_due(zzapp_kernel_t *kernel)
 {
+	uint64_t now_us = 0U;
+	int have_now = 0;
+
 	for (;;) {
 		uint32_t i;
 		uint32_t found = ZZAPP_PID_NONE;
@@ -632,8 +655,7 @@ static void wake_due(zzapp_kernel_t *kernel)
 			uint32_t pid = kernel->run[i];
 			const zzapp_thread_t *thread = kernel_thread(kernel, pid);
 
-			if (thread->state == ZZAPP_THREAD_SLEEPING &&
-			    thread->sleep_deadline <= kernel->now &&
+			if (sleeper_due(kernel, thread, &now_us, &have_now) &&
 			    (thread->sleep_deadline < deadline ||
 			     (thread->sleep_deadline == deadline &&
 			      (found == ZZAPP_PID_NONE ||
@@ -1151,6 +1173,7 @@ int zzapp_kernel_wake(zzapp_kernel_t *kernel, uint32_t pid,
 	thread->state = ZZAPP_THREAD_RUNNABLE;
 	ACCT_WOKEN(kernel, thread);
 	thread->wake_reason = reason;
+	thread->sleep_deadline_us = 0U;
 	thread->quantum_left = ZZAPP_KERNEL_QUANTUM_MS;
 	thread->wake_sequence = ++kernel->wake_serial;
 	if (words->api_resume_waiting) {
@@ -1178,6 +1201,7 @@ int zzapp_kernel_sleep(zzapp_kernel_t *kernel, uint32_t pid,
 	thread->state = ZZAPP_THREAD_SLEEPING;
 	ACCT_BLOCK(kernel, thread, ZZAPP_KERNEL_PARK_SLEEP);
 	thread->sleep_deadline = deadline;
+	thread->sleep_deadline_us = 0U;
 	thread->wake_sequence = ++kernel->wake_serial;
 	thread->quantum_left = 0;
 	if (kernel->active == pid)
@@ -2049,9 +2073,36 @@ int zzapp_kernel_api_block(zzapp_kernel_t *kernel, uint32_t pid)
 	return rc;
 }
 
-int zzapp_kernel_api_sleep(zzapp_kernel_t *kernel, uint32_t pid, uint64_t sleep_ms)
+/* The kernel clock, in whole milliseconds, as of the microsecond reading
+ * `now_us`: the committed count plus the whole milliseconds of the clock
+ * since the slice began (the same difference of floored readings the tick
+ * adds). Unlike zzapp_kernel_now it counts an idle core as well, so a
+ * deadline set from it is always on the clock's own millisecond boundaries. */
+static uint64_t kernel_ms_at(const zzapp_kernel_t *kernel, uint64_t now_us)
+{
+	uint32_t elapsed_ms;
+	uint32_t elapsed_us;
+
+	slice_elapsed(kernel, now_us, &elapsed_ms, &elapsed_us);
+	return kernel->now + elapsed_ms;
+}
+
+/*
+ * The sleep lasts at least `sleep_us` of the microsecond clock and ends at the
+ * first look at that clock after it: the thread's microsecond deadline is
+ * `now_us + sleep_us`, and wake_due compares it to the clock, so whatever
+ * advances or polls the kernel wakes it within that look's latency of the
+ * deadline. The millisecond deadline stays as the tick-granular backstop. It
+ * is the first boundary at or after the microsecond deadline: the clock
+ * steps on the microsecond reading's millisecond boundaries, so a deadline of
+ * `now_ms + ceil(sleep_us / 1000)` would end the sleep early by the fraction
+ * of the millisecond already elapsed when it began. One clock reading, under
+ * the IRQ mask, gives the count, the fraction and the microsecond deadline.
+ */
+int zzapp_kernel_api_sleep(zzapp_kernel_t *kernel, uint32_t pid, uint64_t sleep_us)
 {
 	uint32_t irq_state;
+	uint64_t now_us;
 	uint64_t deadline;
 
 	if (!kernel_thread(kernel, pid))
@@ -2059,11 +2110,50 @@ int zzapp_kernel_api_sleep(zzapp_kernel_t *kernel, uint32_t pid, uint64_t sleep_
 	irq_state = smp_local_irq_save();
 	if (kernel->api_lock_owner == (int)pid)
 		release_api_lock(kernel);
-	deadline = zzapp_kernel_now(kernel) + sleep_ms;
-	if (zzapp_kernel_sleep(kernel, pid, deadline) == 0)
+	now_us = zzapp_kernel_now_us();
+	deadline = kernel_ms_at(kernel, now_us) +
+		   (sleep_us + now_us % 1000U + 999U) / 1000U;
+	if (zzapp_kernel_sleep(kernel, pid, deadline) == 0) {
+		kernel_thread(kernel, pid)->sleep_deadline_us = now_us + sleep_us;
 		kernel_words(kernel, pid)->api_resume_waiting = 1U;
+	}
 	smp_local_irq_restore(irq_state);
 	return 0;
+}
+
+/*
+ * Wakes the sleepers whose microsecond deadline has passed, for the system
+ * thread's loop (the timer tick does it through the advance). Returns 1 when
+ * a sleeper's deadline is within `horizon_us` of the clock, so the loop keeps
+ * looking at the clock instead of idling until the next tick.
+ */
+int zzapp_kernel_sleep_poll(zzapp_kernel_t *kernel, uint32_t horizon_us)
+{
+	uint32_t irq_state;
+	uint64_t now_us = 0U;
+	int have_now = 0;
+	int near = 0;
+	uint32_t i;
+
+	if (!kernel)
+		return 0;
+	irq_state = smp_local_irq_save();
+	wake_due(kernel);
+	for (i = 0U; i < kernel->run_count; i++) {
+		const zzapp_thread_t *thread = kernel_thread(kernel, kernel->run[i]);
+
+		if (thread->state != ZZAPP_THREAD_SLEEPING ||
+		    thread->sleep_deadline_us == 0U)
+			continue;
+		if (!have_now) {
+			now_us = zzapp_kernel_now_us();
+			have_now = 1;
+		}
+		if (thread->sleep_deadline_us <= now_us + horizon_us)
+			near = 1;
+	}
+	smp_local_irq_restore(irq_state);
+	return near;
 }
 
 static int surface_overlaps(uint32_t base_a, uint32_t bytes_a,

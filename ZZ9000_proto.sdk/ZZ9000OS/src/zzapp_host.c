@@ -1420,6 +1420,20 @@ finish:
 
 
 
+/* A stop request ends an app's parked sleep, the one parked wait the service
+ * pass does not own (the waits it registered end on stop there). The system
+ * thread runs on core 1 with the apps; the IRQ mask keeps the tick's own
+ * wake of the same sleeper from interleaving. The sleep returns, and
+ * aar_should_stop() is true by then. */
+static void wake_sleeper_for_stop(uint32_t slot)
+{
+    uint32_t irq = smp_local_irq_save();
+
+    if (zzapp_kernel_thread(&g_kernel, slot)->state == ZZAPP_THREAD_SLEEPING)
+        (void)zzapp_kernel_wake(&g_kernel, slot, ZZAPP_WAKE_CANCELLED);
+    smp_local_irq_restore(irq);
+}
+
 static void service_watch_slot(uint64_t now)
 {
     uint32_t slot = current_slot();
@@ -1437,6 +1451,7 @@ static void service_watch_slot(uint64_t now)
     if (coh->running && stop_requested()) {
         if (!host->stop_mark)
             host->stop_mark = now;
+        wake_sleeper_for_stop(slot);
         if (coh->reset_request ||
             ticks_to_us(now - host->stop_mark) >= ZZAPP_STOP_GRACE_US)
             request_stop(slot, ZZAPP_FAULT_FORCED, 0, 0, 0, 0, 0, 0);
@@ -1697,6 +1712,8 @@ void zzapp_host_yield_wait(void)
                                       scheduler_perf_stamp());
 #endif
     if (!host->api_parked) {
+        /* Park until the next millisecond of the kernel clock: one
+         * microsecond's deadline rounds up to that boundary. */
         (void)zzapp_kernel_api_sleep(&g_kernel, slot, 1U);
     } else {
         (void)zzapp_kernel_api_block(&g_kernel, slot);
@@ -1722,11 +1739,16 @@ void zzapp_host_yield_wait(void)
     }
 #endif
 }
+/* A stop request ends a parked sleep (spec 3.7): the core-1 system pass wakes
+ * the sleeper (service_watch_slot), and a sleep begun while a stop is already
+ * latched returns at once. Otherwise the call lasts at least `us`. */
 void zzapp_host_sleep(uint32_t us)
 {
     uint32_t slot = current_slot();
 
     if (zzapp_kernel_current_thread() < 0)
+        return;
+    if (__atomic_load_n(&host_slot(slot)->stop_requested, __ATOMIC_ACQUIRE))
         return;
     host_slot(slot)->api_parked = 1u;
 #if ZZAPP_PERF_COUNTERS && !defined(ZZAPP_HOST_TEST)
@@ -1734,8 +1756,7 @@ void zzapp_host_sleep(uint32_t us)
         zzapp_kernel_perf_service_end(&g_kernel, ZZAPP_PERF_SERVICE_SVC,
                                       scheduler_perf_stamp());
 #endif
-    (void)zzapp_kernel_api_sleep(&g_kernel, slot,
-        (uint64_t)((us + 999u) / 1000u));
+    (void)zzapp_kernel_api_sleep(&g_kernel, slot, us);
 #ifndef ZZAPP_HOST_TEST
     __asm__ __volatile__("svc 0" ::: "memory");
     api_lock_until_acquired(slot);

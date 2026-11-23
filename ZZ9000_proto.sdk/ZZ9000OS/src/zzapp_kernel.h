@@ -258,7 +258,11 @@ typedef struct {
 	uint32_t quantum_left;
 	uint64_t user_ticks;
 	uint64_t svc_ticks;
+	/* Millisecond of the kernel clock a sleep ends at (zzapp_kernel_sleep). */
 	uint64_t sleep_deadline;
+	/* Microsecond of zzapp_kernel_now_us() an aar_sleep_us ends at, or 0:
+	 * the sleeper wakes when the clock reaches it, never before. */
+	uint64_t sleep_deadline_us;
 	uint32_t wake_sequence;
 	uint32_t stack_high_water;
 	/* CPU share weight of the claim, 1..ZZAPP_WEIGHT_MAX; 0 counts as 1. */
@@ -406,8 +410,15 @@ zzapp_arm_frame_t *zzapp_kernel_switch_frame(zzapp_kernel_t *kernel,
  * call: returns the selected return frame. */
 zzapp_arm_frame_t *zzapp_kernel_svc_return(zzapp_arm_frame_t *frame);
 int zzapp_kernel_block(zzapp_kernel_t *kernel, uint32_t pid);
-/* Atomically release API lock, snapshot now, and enter SLEEPING under IRQ mask. */
-int zzapp_kernel_api_sleep(zzapp_kernel_t *kernel, uint32_t pid, uint64_t sleep_ms);
+/* Atomically release API lock, snapshot now, and enter SLEEPING under IRQ
+ * mask. The sleep lasts at least `sleep_us` microseconds of
+ * zzapp_kernel_now_us() and ends at the first look at the clock after that
+ * (the thread's sleep_deadline_us); the millisecond deadline is the first
+ * boundary at or after the reading plus `sleep_us`. */
+int zzapp_kernel_api_sleep(zzapp_kernel_t *kernel, uint32_t pid, uint64_t sleep_us);
+/* Wakes the sleepers past their microsecond deadline; 1 when one is due
+ * within `horizon_us`. For the system thread's loop. */
+int zzapp_kernel_sleep_poll(zzapp_kernel_t *kernel, uint32_t horizon_us);
 int zzapp_kernel_wake(zzapp_kernel_t *kernel, uint32_t pid,
 		zzapp_wake_reason_t reason);
 int zzapp_kernel_sleep(zzapp_kernel_t *kernel, uint32_t pid,

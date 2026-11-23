@@ -12,7 +12,8 @@ ZZAPP_TESTS += $(BUILD)/a/loader_smoke $(BUILD)/a/runtime_host_test \
 	$(BUILD)/a/core_api_test $(BUILD)/a/map_unmap_test \
 	$(BUILD)/a/svc_return_test $(BUILD)/a/page_flags_test \
 	$(BUILD)/a/msg_wait_stall_test $(BUILD)/a/retire_test \
-	$(BUILD)/a/loader_dynamic_test
+	$(BUILD)/a/loader_dynamic_test $(BUILD)/a/sleep_time_test \
+	$(BUILD)/a/sleep_stop_test
 
 $(BUILD)/a/zzapp_rec.o: $(FW)/zzapp_rec.c $(FW)/zzapp_rec.h $(FW)/zzapp_as.h | $(BUILD)
 	@mkdir -p $(dir $@)
@@ -128,3 +129,11 @@ endif
 $(BUILD)/a/aar_api_test: a/aar_api_test.c $(A_RUNTIME_OBJS) | $(BUILD)
 	@mkdir -p $(dir $@)
 	$(CC) $(ZZAPP_HARNESS_CFLAGS) -o $@ $< $(A_RUNTIME_OBJS)
+
+$(BUILD)/a/sleep_stop_test: a/sleep_stop_test.c $(A_RUNTIME_OBJS) $(BUILD)/a/zzapp_services.o | $(BUILD)
+	@mkdir -p $(dir $@)
+	$(CC) $(ZZAPP_HARNESS_CFLAGS) -o $@ $< $(A_RUNTIME_OBJS) $(BUILD)/a/zzapp_services.o
+
+$(BUILD)/a/sleep_time_test: a/sleep_time_test.c $(A_RUNTIME_OBJS) $(BUILD)/a/zzapp_services.o | $(BUILD)
+	@mkdir -p $(dir $@)
+	$(CC) $(ZZAPP_HARNESS_CFLAGS) -o $@ $< $(A_RUNTIME_OBJS) $(BUILD)/a/zzapp_services.o
