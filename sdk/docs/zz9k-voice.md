@@ -537,6 +537,17 @@ interpolation outside a qualification run only once the bits are set, and
 checks the `CONFIG` bit before it sends a default. A firmware without the
 records counts them as rejected and plays as before.
 
+Measured on the card (bench firmware, 32 stereo voices at `RATE=96000` with
+`CHURN GROUPS=32`, `RAMP=256`, `GAIN=65535`, `LIMITER`, 20 s, so the full fade
+pool is in use): a render period of 20 ms took 4208 us on average and 4559 us
+at most with cubic, against 2995 us and 3345 us with linear, and the run had no
+late or rejected record, no underrun and no drop. The cubic kernel reads the
+four taps of a frame with one load and transposes four frames at a time; its
+output is the same bit for bit as the scalar reference. This is the standalone
+gate only. The high-rate (`RATE=192000`), mono, limiter-off, `PERVOICE`,
+low-latency (`GROUPS=1 LOWLAT`) and default-gain runs are still to be measured,
+and the bits stay clear until they have passed.
+
 The builders in `zz9k/voice.h` are `zz9k_voice_build_mode_interp()` (voice,
 selector) and `zz9k_voice_build_config_interp()` (selector). The generic
 builders write any flags and arguments, which is how a test sends a record the
