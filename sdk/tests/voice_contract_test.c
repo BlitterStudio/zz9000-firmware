@@ -871,11 +871,13 @@ struct MockBuf {
   uint32_t flags;
   int live;
   int pinned;
+  uint16_t owner;
 };
 
 struct MockLog {
   uint16_t opcode;
   uint8_t payload[48];
+  uint16_t client;
 };
 
 struct MockSample {
@@ -905,6 +907,8 @@ static struct {
   uint16_t open_status;        /* status OPEN answers with */
   uint32_t grant_ring_override;/* 0 = honest ring_records */
   uint32_t session;
+  uint16_t session_owner;
+  uint32_t release_calls;
   uint32_t open_calls;
   int session_open;
   uint32_t fail_copy_at;       /* 1-based COPY that fails, 0 = none */
@@ -1061,10 +1065,25 @@ static uint32_t mock_req_word(const ZZ9KMailboxWireEntry *req, uint32_t index)
   return zz9k_get_be32(&req->payload[index * 4U]);
 }
 
+static uint16_t mock_req_client(const ZZ9KMailboxWireEntry *req)
+{
+  return (uint16_t)((zz9k_get_be16(req->flags) & ZZ9K_ENTRY_CLIENT_ID_MASK) >>
+                    ZZ9K_ENTRY_CLIENT_ID_SHIFT);
+}
+
+/* The firmware's voice_session_owned_by(): the session id of another client
+ * is no handle. */
+static int mock_owns_session(const ZZ9KMailboxWireEntry *req)
+{
+  return g_mock.session_open && mock_req_word(req, 0) == g_mock.session &&
+         g_mock.session_owner == mock_req_client(req);
+}
+
 static void mock_log(const ZZ9KMailboxWireEntry *req)
 {
   if (g_mock.log_count < MOCK_MAX_LOG) {
     g_mock.log[g_mock.log_count].opcode = zz9k_get_be16(req->opcode);
+    g_mock.log[g_mock.log_count].client = mock_req_client(req);
     memcpy(g_mock.log[g_mock.log_count].payload, (const void *)req->payload,
            48U);
     g_mock.log_count++;
@@ -1094,14 +1113,19 @@ static void mock_serve_open(const ZZ9KMailboxWireEntry *req)
     (void)mock_complete(req, g_mock.open_status, 0U);
     return;
   }
+  /* The firmware takes only buffers the opening client allocated. */
   if (!ring || !status || !staging || g_mock.session_open ||
       ring == status || ring == staging || status == staging ||
+      ring->owner != mock_req_client(req) ||
+      status->owner != mock_req_client(req) ||
+      staging->owner != mock_req_client(req) ||
       status->length < ZZ9K_VOICE_STATUS_BYTES || bank > MOCK_BANK_MAX) {
     (void)mock_complete(req, ZZ9K_STATUS_BAD_HANDLE, 0U);
     return;
   }
   ring->pinned = status->pinned = staging->pinned = 1;
   g_mock.session_open = 1;
+  g_mock.session_owner = mock_req_client(req);
   g_mock.session = 0xa5000000UL + g_mock.open_calls;
   g_mock.bank_bytes = bank;
   memset(g_mock.bank, 0, sizeof(g_mock.bank));
@@ -1149,7 +1173,7 @@ static void mock_serve_upload(const ZZ9KMailboxWireEntry *req)
   struct MockBuf *staging = NULL;
   uint32_t i;
 
-  if (!g_mock.session_open || mock_req_word(req, 0) != g_mock.session) {
+  if (!mock_owns_session(req)) {
     (void)mock_complete(req, ZZ9K_STATUS_BAD_HANDLE, 0U);
     return;
   }
@@ -1247,6 +1271,7 @@ static void mock_respond(void)
                   (b->board_offset - (uint32_t)ZZ9K_AMIGA_MEMORY_OFFSET);
     b->length = length;
     b->flags = flags;
+    b->owner = mock_req_client(req);
     b->live = 1;
     g_mock.last_alloc_flags[g_mock.buf_count - 1U] = flags;
     g_mock.next_offset += length;
@@ -1269,11 +1294,31 @@ static void mock_respond(void)
     (void)mock_complete(req, ZZ9K_STATUS_OK, 0U);
     break;
   }
+  case ZZ9K_OP_CLIENT_RELEASE: {
+    uint16_t client = mock_req_client(req);
+    uint32_t i;
+
+    g_mock.release_calls++;
+    if (client == 0U) {
+      (void)mock_complete(req, ZZ9K_STATUS_BAD_REQUEST, 0U);
+      break;
+    }
+    if (g_mock.session_open && g_mock.session_owner == client) {
+      mock_unpin();
+    }
+    for (i = 0U; i < g_mock.buf_count; i++) {
+      if (g_mock.bufs[i].live && g_mock.bufs[i].owner == client) {
+        g_mock.bufs[i].live = 0;
+      }
+    }
+    (void)mock_complete(req, ZZ9K_STATUS_OK, 0U);
+    break;
+  }
   case ZZ9K_OP_AUDIO_VOICE_OPEN:
     mock_serve_open(req);
     break;
   case ZZ9K_OP_AUDIO_VOICE_CLOSE:
-    if (!g_mock.session_open || mock_req_word(req, 0) != g_mock.session) {
+    if (!mock_owns_session(req)) {
       (void)mock_complete(req, ZZ9K_STATUS_BAD_HANDLE, 0U);
       break;
     }
@@ -1281,7 +1326,7 @@ static void mock_respond(void)
     (void)mock_complete(req, g_mock.close_status, 0U);
     break;
   case ZZ9K_OP_AUDIO_VOICE_RESET:
-    if (!g_mock.session_open || mock_req_word(req, 0) != g_mock.session) {
+    if (!mock_owns_session(req)) {
       (void)mock_complete(req, ZZ9K_STATUS_BAD_HANDLE, 0U);
       break;
     }
@@ -1918,6 +1963,150 @@ static void test_reset_and_close(void)
   mock_detach(ctx);
 }
 
+/* A mailbox call the way ZZ9KCall issues it: submit, then collect the
+ * completion. The mock answers between the two. */
+static int submit_and_collect(ZZ9KContext *ctx, ZZ9KRequest *request,
+                              ZZ9KMailboxEntry *reply)
+{
+  uint32_t request_id = 0U;
+  int status = zz9k_submit(ctx, request, &request_id);
+
+  if (status != ZZ9K_STATUS_QUEUED) {
+    return status;
+  }
+  mock_respond();
+  status = zz9k_poll(ctx, reply);
+  if (status != ZZ9K_STATUS_OK) {
+    return status;
+  }
+  return reply->status;
+}
+
+static int submit_define(ZZ9KContext *ctx, const ZZ9KVoiceSession *s)
+{
+  ZZ9KRequest request;
+  ZZ9KMailboxEntry reply;
+
+  memset(&reply, 0, sizeof(reply));
+  if (zz9k_request_audio_voice_upload(&request, s->grant.session,
+                                      ZZ9K_VOICE_UPLOAD_FLAG_DEFINE, 0U, 0U,
+                                      0U, 1U, 0U, 16U,
+                                      ZZ9K_VOICE_FORMAT_S16) !=
+      ZZ9K_STATUS_OK) {
+    return ZZ9K_STATUS_BAD_REQUEST;
+  }
+  return submit_and_collect(ctx, &request, &reply);
+}
+
+/* Every request a context sends, through zz9k_call or zz9k_submit, carries
+ * the context's client id: the Voice API calls own the session and its
+ * buffers under that id, so a ZZ9KCall-style submit on the same session is
+ * accepted. */
+static void test_client_id_on_voice_calls(void)
+{
+  ZZ9KContext *ctx = mock_attach(3U);
+  ZZ9KVoiceOpenDesc desc;
+  ZZ9KVoiceSession s;
+  uint32_t i;
+
+  CHECK(ctx != NULL);
+  if (!ctx) {
+    return;
+  }
+  CHECK(zz9k_set_client_id(ctx, 7U) == ZZ9K_STATUS_OK);
+  default_desc(&desc);
+  CHECK(zz9k_voice_open(ctx, &desc, &s) == ZZ9K_STATUS_OK);
+  CHECK(g_mock.buf_count == 3U);
+  for (i = 0U; i < g_mock.buf_count; i++) {
+    CHECK(g_mock.bufs[i].owner == 7U);
+  }
+  CHECK(g_mock.session_open == 1);
+  CHECK(g_mock.session_owner == 7U);
+  CHECK(g_mock.log_count == 1U);
+  CHECK(g_mock.log[0].opcode == ZZ9K_OP_AUDIO_VOICE_OPEN);
+  CHECK(g_mock.log[0].client == 7U);
+
+  /* A submit on the session the Voice API opened. */
+  CHECK(submit_define(ctx, &s) == ZZ9K_STATUS_OK);
+  CHECK(g_mock.defines == 1U);
+  /* And the Voice API on the same session after the submit. */
+  CHECK(zz9k_voice_reset(ctx, &s) == ZZ9K_STATUS_OK);
+  CHECK(zz9k_voice_close(ctx, &s) == ZZ9K_STATUS_OK);
+  CHECK(g_mock.session_open == 0);
+  CHECK(mock_live_buffers() == 0);
+  for (i = 0U; i < g_mock.log_count; i++) {
+    CHECK(g_mock.log[i].client == 7U);
+  }
+
+  /* Another client sees no handle in the session id. */
+  CHECK(zz9k_voice_open(ctx, &desc, &s) == ZZ9K_STATUS_OK);
+  CHECK(zz9k_set_client_id(ctx, 8U) == ZZ9K_STATUS_OK);
+  CHECK(submit_define(ctx, &s) == ZZ9K_STATUS_BAD_HANDLE);
+  CHECK(zz9k_set_client_id(ctx, 7U) == ZZ9K_STATUS_OK);
+  CHECK(zz9k_voice_close(ctx, &s) == ZZ9K_STATUS_OK);
+  mock_detach(ctx);
+}
+
+/* A context with no client id sends 0 on every path, as the AHI voice worker
+ * does, and its session is owned by client 0. */
+static void test_client_id_zero_unchanged(void)
+{
+  ZZ9KContext *ctx = mock_attach(3U);
+  ZZ9KVoiceOpenDesc desc;
+  ZZ9KVoiceSession s;
+  uint32_t i;
+
+  CHECK(ctx != NULL);
+  if (!ctx) {
+    return;
+  }
+  default_desc(&desc);
+  CHECK(zz9k_voice_open(ctx, &desc, &s) == ZZ9K_STATUS_OK);
+  CHECK(g_mock.session_owner == 0U);
+  CHECK(submit_define(ctx, &s) == ZZ9K_STATUS_OK);
+  CHECK(zz9k_voice_close(ctx, &s) == ZZ9K_STATUS_OK);
+  for (i = 0U; i < g_mock.log_count; i++) {
+    CHECK(g_mock.log[i].client == 0U);
+  }
+  mock_detach(ctx);
+}
+
+/* CLIENT_RELEASE for the opener's id ends its voice session and frees its
+ * buffers; another client's release leaves them alone. */
+static void test_client_release_closes_voice_session(void)
+{
+  ZZ9KContext *ctx = mock_attach(3U);
+  ZZ9KVoiceOpenDesc desc;
+  ZZ9KVoiceSession s;
+  ZZ9KRequest request;
+  ZZ9KMailboxEntry reply;
+
+  CHECK(ctx != NULL);
+  if (!ctx) {
+    return;
+  }
+  CHECK(zz9k_set_client_id(ctx, 9U) == ZZ9K_STATUS_OK);
+  default_desc(&desc);
+  CHECK(zz9k_voice_open(ctx, &desc, &s) == ZZ9K_STATUS_OK);
+  CHECK(g_mock.session_open == 1);
+
+  zz9k_request_init(&request, ZZ9K_OP_CLIENT_RELEASE);
+  CHECK(zz9k_set_client_id(ctx, 10U) == ZZ9K_STATUS_OK);
+  CHECK(zz9k_call(ctx, &request, &reply, ZZ9K_DEFAULT_TIMEOUT_TICKS) ==
+        ZZ9K_STATUS_OK);
+  CHECK(g_mock.session_open == 1);
+  CHECK(mock_live_buffers() == 3);
+
+  zz9k_request_init(&request, ZZ9K_OP_CLIENT_RELEASE);
+  CHECK(zz9k_set_client_id(ctx, 9U) == ZZ9K_STATUS_OK);
+  CHECK(zz9k_call(ctx, &request, &reply, ZZ9K_DEFAULT_TIMEOUT_TICKS) ==
+        ZZ9K_STATUS_OK);
+  CHECK(g_mock.release_calls == 2U);
+  CHECK(g_mock.session_open == 0);
+  CHECK(mock_live_buffers() == 0);
+  mock_detach(ctx);
+}
+
 int main(void)
 {
   g_window_size = 0x00400000UL;
@@ -1956,6 +2145,9 @@ int main(void)
   test_write_bounded_by_free_space();
   test_status_and_heartbeat();
   test_reset_and_close();
+  test_client_id_on_voice_calls();
+  test_client_id_zero_unchanged();
+  test_client_release_closes_voice_session();
 
   mock_window_free(g_window, g_window_size);
   if (g_failures) {

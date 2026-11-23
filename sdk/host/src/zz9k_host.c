@@ -4041,6 +4041,11 @@ static int zz9k_enqueue_request_locked(ZZ9KContext *ctx, ZZ9KRequest *request,
   }
 
   entry = request->entry;
+  /* The one place a request reaches the ring, so every entry point carries
+   * the context's client id: submit, call, the armed-IRQ wait and the
+   * allocations a voice open makes. */
+  entry.flags &= (uint16_t)~ZZ9K_ENTRY_CLIENT_ID_MASK;
+  entry.flags |= (uint16_t)(ctx->client_id << ZZ9K_ENTRY_CLIENT_ID_SHIFT);
   if (entry.request_id == 0) {
     entry.request_id = zz9k_context_next_request_id(ctx);
   }
@@ -4124,10 +4129,6 @@ int zz9k_submit(ZZ9KContext *ctx, ZZ9KRequest *request, uint32_t *request_id)
     return ZZ9K_STATUS_UNSUPPORTED;
 #endif
   }
-
-  request->entry.flags &= (uint16_t)~ZZ9K_ENTRY_CLIENT_ID_MASK;
-  request->entry.flags |= (uint16_t)(ctx->client_id <<
-                                     ZZ9K_ENTRY_CLIENT_ID_SHIFT);
 
   lock_status = zz9k_mailbox_lock(ctx);
   if (lock_status != ZZ9K_STATUS_OK) {
