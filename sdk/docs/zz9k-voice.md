@@ -530,23 +530,14 @@ within 1.64 of the curve, the volume's floor adding to the rounding.
   limiter off, a mix that overshoots past the rails clips there.
 
 Cubic costs more render time than linear, since it reads four frames for each
-output frame. The `CUBIC` and `VOICE_INTERP` bits stay clear until the card
-timing gate has passed with 32 voices and a full fade pool, as it did for
-ramps and the limiter. A client uses cubic, MODE and the default
-interpolation outside a qualification run only once the bits are set, and
-checks the `CONFIG` bit before it sends a default. A firmware without the
-records counts them as rejected and plays as before.
-
-Measured on the card (bench firmware, 32 stereo voices at `RATE=96000` with
-`CHURN GROUPS=32`, `RAMP=256`, `GAIN=65535`, `LIMITER`, 20 s, so the full fade
-pool is in use): a render period of 20 ms took 4208 us on average and 4559 us
-at most with cubic, against 2995 us and 3345 us with linear, and the run had no
-late or rejected record, no underrun and no drop. The cubic kernel reads the
-four taps of a frame with one load and transposes four frames at a time; its
-output is the same bit for bit as the scalar reference. This is the standalone
-gate only. The high-rate (`RATE=192000`), mono, limiter-off, `PERVOICE`,
-low-latency (`GROUPS=1 LOWLAT`) and default-gain runs are still to be measured,
-and the bits stay clear until they have passed.
+output frame. The `CUBIC` and `VOICE_INTERP` bits are set: the card timing
+gate passed with 32 voices and a full fade pool, as it did for ramps and the
+limiter, see [Cubic timing](#cubic-timing). The firmware plays nearest or
+linear unless a client asks for cubic with a `MODE` record or a default
+interpolation. A client checks the `CONFIG` bit before it sends a default and
+the `VOICE_INTERP` and `CUBIC` bits before it uses them outside a
+qualification run. A firmware without the records counts them as rejected and
+plays as before.
 
 The builders in `zz9k/voice.h` are `zz9k_voice_build_mode_interp()` (voice,
 selector) and `zz9k_voice_build_config_interp()` (selector). The generic
@@ -833,7 +824,8 @@ sends the record without relying on it. `LIMITER` says the same of the soft
 knee set with flag 2, see [Limiter](#limiter). `CUBIC` says the same of the
 cubic interpolation, and `VOICE_INTERP` of the `MODE` record and the `CONFIG`
 default interpolation, see [Interpolation](#interpolation). The firmware
-accepts all three before it advertises them, so that they can be qualified.
+advertises all of them once their card timing gates have passed; cubic
+reading is used only when a client asks for it.
 The other bits (`OVERSAMPLE`, `ENVELOPE`, `EVENTS`) belong to features that
 are not in the firmware yet and stay clear.
 
@@ -1110,6 +1102,53 @@ and 10 s with `LIMITER`, with the amplifier set very low, and heard no clear
 difference. The runs had 0 late records, 0 rejected records, 0 underruns and
 0 dropped records. This one comparison does not cover other material, levels
 or listening setups.
+
+### Cubic timing
+
+The cubic runs used a bench image built from the cubic source plus the
+mailbox timing instrument (bench base `ce51d576` with `5252e293`); it differs
+from the shipped firmware in the bench instrumentation, whose macros are off
+in the product build. The voice engine at that commit had the
+contiguous-load cubic kernel (`e33097bc`).
+The card was the same Zorro III A4000/68060, after a full power cycle, with
+the speakers off. Each run lasted 20 s and measured 1016 rendered periods of
+960 frames (20 ms), except the low-latency run, which measured 1006. Every
+run had 0 late records, 0 rejected records, 0 underruns and 0 dropped
+records.
+
+Every command below starts with
+`zz9k-voiceplay LOAD VOICES=32 SECONDS=20 RAMP=256 GAIN=65535 CHURN GROUPS=32 INTERP=cubic`
+unless the first column says otherwise.
+
+| Remaining arguments | Render average (us) | Render maximum (us) |
+| --- | ---: | ---: |
+| `STEREO RATE=96000 LIMITER` | 4207.81 | 4559.30 |
+| `STEREO RATE=96000 LIMITER` with `INTERP=linear` (the paired run, same image) | 2995.37 | 3344.68 |
+| `STEREO RATE=192000 LIMITER` (voices from 96000 to 192000 Hz) | 4180.91 | 4539.08 |
+| `STEREO RATE=96000` (limiter off) | 4120.48 | 4468.36 |
+| `RATE=96000 LIMITER` (mono) | 3220.97 | 3562.57 |
+| `STEREO RATE=96000 LIMITER GROUPS=1 LOWLAT` (lead 2880 frames) | 4213.79 | 4536.25 |
+| `STEREO RATE=96000 LIMITER PERVOICE` (a `MODE` record per voice) | 4205.30 | 4565.68 |
+| `STEREO RATE=22050 LIMITER`, `GAIN` omitted (default 2047) | 4190.71 | 4544.14 |
+| `STEREO RATE=96000 LIMITER`, `GAIN` omitted (default 2047) | 4137.71 | 4484.22 |
+| `STEREO RATE=96000 LIMITER RAMP=512` (half the restarts, 60419, so not the same work) | 4054.10 | 4392.78 |
+
+Before the change the same first load took 5570.12 us on average and 5918.96
+us at most with cubic, against 2987.77 and 3340.34 us with linear, over the
+budget. The kernel now reads the four taps of a frame with one load and
+transposes four frames at a time, and the left and right sides run
+together; the output is the same bit for bit as the scalar reference. A
+guard-page test (`test/audio/audio_voice_cubic_guard_test.c`) puts the sample
+bank against protected pages and checks that the final partial blocks of a
+run read nothing outside the four taps of a frame, for all four formats in
+both directions.
+
+The largest maximum, 4565.68 us, is below the 5000 us render budget, and the
+cubic runs cost about 1.2 ms over linear. The firmware advertises
+`ZZ9K_VOICE_FEATURE_CUBIC` and `ZZ9K_VOICE_FEATURE_VOICE_INTERP` (features
+word 0x8F) on this evidence. It covers the listed loads, not every command
+pattern. These are timing and cleanliness results only: nobody has listened
+to cubic output yet, and no claim is made about how it sounds.
 
 ### Low-latency sessions
 

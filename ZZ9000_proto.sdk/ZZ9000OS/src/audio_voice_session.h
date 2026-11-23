@@ -107,17 +107,17 @@
 #define AUDIO_VOICE_FEATURE_CONFIG       0x0080U
 
 /*
- * The features this firmware advertises. CONFIG is the record the engine
- * handles. RAMP and LIMITER passed their card timing gates; the measured
- * loads and render times are recorded in sdk/docs/zz9k-voice.md, Hardware
- * measurements. Both stay off until a client sends a CONFIG record. The
- * engine also accepts cubic interpolation, the MODE record and the CONFIG
- * default interpolation; CUBIC and VOICE_INTERP stay unadvertised until
- * they pass the same gate.
+ * The features this firmware advertises (0x8F). CONFIG is the record the
+ * engine handles. RAMP, LIMITER, CUBIC and VOICE_INTERP passed their card
+ * timing gates; the measured loads and render times are recorded in
+ * sdk/docs/zz9k-voice.md, Hardware measurements. RAMP and LIMITER stay off
+ * until a client sends a CONFIG record; cubic reading stays off until a
+ * client asks for it with a MODE record or a CONFIG default interpolation.
  */
 #define AUDIO_VOICE_FEATURES \
 	(AUDIO_VOICE_FEATURE_CONFIG | AUDIO_VOICE_FEATURE_RAMP | \
-	 AUDIO_VOICE_FEATURE_LIMITER)
+	 AUDIO_VOICE_FEATURE_LIMITER | AUDIO_VOICE_FEATURE_CUBIC | \
+	 AUDIO_VOICE_FEATURE_VOICE_INTERP)
 
 #define AUDIO_VOICE_STATE_CLOSED 0U
 #define AUDIO_VOICE_STATE_OPEN   1U /* open, no record yet */

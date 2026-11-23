@@ -116,10 +116,12 @@ equivalent) and, in a chunk that a cubic voice has added to, takes the
 32-bit master product for masters up to 511 instead of 1023; the limiter
 holds a sum beyond its last table node at that node. The nearest and linear
 arithmetic and its output are unchanged. The firmware accepts cubic, `MODE`
-and the default interpolation but does not advertise the `CUBIC` and
-`VOICE_INTERP` bits until the card timing gates have passed; the standalone
-gate (32 voices and a full fade pool, 4559 us at most per 20 ms period) has, the
-remaining ones have not. The contract is in
+and the default interpolation and advertises the `CUBIC` and `VOICE_INTERP`
+bits (features word 0x8F): 32 voices and a full fade pool rendered in at
+most 4566 us per 20 ms period across the load matrix in
+[zz9k-voice.md](../sdk/docs/zz9k-voice.md#cubic-timing), with no late or
+rejected record, underrun or drop. That is a timing result; the cubic output
+has not been listened to. The contract is in
 [zz9k-voice.md](../sdk/docs/zz9k-voice.md#interpolation).
 
 Closing a session detaches the slot, and a reset clears it. Both drop the

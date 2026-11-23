@@ -395,12 +395,9 @@ static void scenario_open(void)
 	      "open: status published as open with the session id",
 	      fmt("state=%u", st_state()));
 	check(st32(AUDIO_VOICE_STATUS_OFF_FEATURES) == AUDIO_VOICE_FEATURES &&
-	      (st32(AUDIO_VOICE_STATUS_OFF_FEATURES) &
-	       (AUDIO_VOICE_FEATURE_CONFIG | AUDIO_VOICE_FEATURE_RAMP |
-	        AUDIO_VOICE_FEATURE_LIMITER)) ==
-	      (AUDIO_VOICE_FEATURE_CONFIG | AUDIO_VOICE_FEATURE_RAMP |
-	       AUDIO_VOICE_FEATURE_LIMITER),
-	      "open: the status block advertises CONFIG, RAMP and LIMITER",
+	      st32(AUDIO_VOICE_STATUS_OFF_FEATURES) == 0x8FU,
+	      "open: the status block advertises CONFIG, RAMP, LIMITER, CUBIC "
+	      "and VOICE_INTERP (0x8F)",
 	      fmt("features=%x", st32(AUDIO_VOICE_STATUS_OFF_FEATURES)));
 	o = open_params(7680U, 4U, 0U);
 	check(audio_voice_session_open(&o, &second) == SDK_STATUS_BUSY,
@@ -2663,8 +2660,7 @@ static void scenario_limiter_order(void)
  * the voice or with the CONFIG default. Four bad records are counted and
  * change nothing: a selector out of range, a voice the grant does not have,
  * a default of 0 and a default with arg1. The features word stays as it
- * was: the engine accepts the records without advertising CUBIC and
- * VOICE_INTERP.
+ * was: CONFIG, RAMP, LIMITER, CUBIC and VOICE_INTERP, 0x8F.
  */
 static void scenario_interp_records(int use_config)
 {
@@ -2731,10 +2727,9 @@ static void scenario_interp_records(int use_config)
 	      "interp: the four bad records are counted, nothing else",
 	      fmt("rejected=%u late=%u dropped=%u", st_rejected(), st_late(),
 	      st_dropped()));
-	check((st32(AUDIO_VOICE_STATUS_OFF_FEATURES) &
-	       (AUDIO_VOICE_FEATURE_CUBIC | AUDIO_VOICE_FEATURE_VOICE_INTERP)) == 0U &&
+	check(st32(AUDIO_VOICE_STATUS_OFF_FEATURES) == 0x8FU &&
 	      st32(AUDIO_VOICE_STATUS_OFF_FEATURES) == AUDIO_VOICE_FEATURES,
-	      "interp: CUBIC and VOICE_INTERP are not advertised",
+	      "interp: the features word is unchanged by the records, 0x8F",
 	      fmt("features=%x", st32(AUDIO_VOICE_STATUS_OFF_FEATURES)));
 	check(audio_voice_session_close(g_grant.session) == SDK_STATUS_OK,
 	      "interp: close", "");
