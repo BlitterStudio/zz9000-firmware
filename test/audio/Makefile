@@ -33,6 +33,7 @@ VOICE_BASELINE_TARGET := $(BUILD_DIR)/audio_voice_baseline_test
 VOICE_RAMP_TARGET := $(BUILD_DIR)/audio_voice_ramp_test
 VOICE_LIMITER_TARGET := $(BUILD_DIR)/audio_voice_limiter_test
 VOICE_CUBIC_TARGET := $(BUILD_DIR)/audio_voice_cubic_test
+VOICE_CUBIC_GUARD_TARGET := $(BUILD_DIR)/audio_voice_cubic_guard_test
 VOICE_PARITY_TARGET := $(BUILD_DIR)/audio_voice_abi_parity_test
 TARGETS := $(CONVERT_TARGET) $(CONVERT_EXACT_TARGET) $(CAPTURE_TARGET) $(PROFILE_TARGET) \
 	$(PLAYBACK_TARGET) $(RATE_TARGET) $(PRECONVERT_TARGET) \
@@ -43,6 +44,7 @@ TARGETS := $(CONVERT_TARGET) $(CONVERT_EXACT_TARGET) $(CAPTURE_TARGET) $(PROFILE
 	$(REDUCE_TARGET) $(VOICE_TARGET) $(VOICE_PT4_TARGET) \
 	$(VOICE_BASELINE_TARGET) \
 	$(VOICE_RAMP_TARGET) $(VOICE_LIMITER_TARGET) $(VOICE_CUBIC_TARGET) \
+	$(VOICE_CUBIC_GUARD_TARGET) \
 	$(VOICE_PARITY_TARGET) \
 	$(VOICE_SESSION_TARGET)
 
@@ -85,6 +87,7 @@ test: $(TARGETS)
 	$(VOICE_PARITY_TARGET)
 	$(VOICE_LIMITER_TARGET)
 	$(VOICE_CUBIC_TARGET)
+	$(VOICE_CUBIC_GUARD_TARGET)
 
 # U2 fabric compositor: the characterization golden (pump_golden.c, a
 # verbatim capture of the pre-fabric pump) drives the parity scenarios
@@ -352,6 +355,16 @@ $(VOICE_CUBIC_TARGET): audio_voice_cubic_test.c \
 	@mkdir -p $(BUILD_DIR)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ audio_voice_cubic_test.c \
 		$(SRC_DIR)/audio_voice.c -lm
+
+# The cubic reader reads nothing outside the four taps of a frame it mixes:
+# the bank is a page between two protected pages and the sample is flush
+# with them, so any read of an unused lane is a fault (Linux only).
+$(VOICE_CUBIC_GUARD_TARGET): audio_voice_cubic_guard_test.c \
+	$(SRC_DIR)/audio_voice.c $(SRC_DIR)/audio_voice.h
+	@mkdir -p $(BUILD_DIR)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ audio_voice_cubic_guard_test.c \
+		$(SRC_DIR)/audio_voice.c
+
 # The voice constants of the SDK header and of the firmware headers agree.
 $(VOICE_PARITY_TARGET): audio_voice_abi_parity_test.c \
 	$(SRC_DIR)/audio_voice.h $(SRC_DIR)/audio_voice_session.h \
