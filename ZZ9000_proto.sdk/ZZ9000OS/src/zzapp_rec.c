@@ -229,6 +229,21 @@ zzapp_rec_state_t zzapp_rec_state(uint32_t pid)
 						   __ATOMIC_ACQUIRE);
 }
 
+uint32_t zzapp_rec_next_allocated(uint32_t from)
+{
+	uint32_t apps = ready ? layout.apps : 0U;
+	uint32_t pid;
+
+	for (pid = from; pid < apps; pid++) {
+		if (__atomic_load_n(&tab.state[pid], __ATOMIC_RELAXED) !=
+		    ZZAPP_REC_FREE) {
+			__atomic_thread_fence(__ATOMIC_ACQUIRE);
+			return pid;
+		}
+	}
+	return apps;
+}
+
 int zzapp_rec_set_state(zzapp_rec_t *rec, zzapp_rec_state_t state)
 {
 	uint32_t pid;

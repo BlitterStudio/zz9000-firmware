@@ -214,12 +214,47 @@ static void test_reset_with_held_shells(void)
     rt_assert_back(g_start);
 }
 
+/* The core 0 poll visits the allocated records and skips the free ones: a
+ * lost lease is found with free records before, between and after the live
+ * ones, and the claim between them is left alone. */
+static void test_poll_finds_a_lost_lease_among_free_records(void)
+{
+    uint32_t old_handle;
+    uint32_t n;
+
+    setup();
+    rt_claim(0U);
+    rt_claim(1U);
+    rt_claim(2U);
+    run_app(3U);
+    run_app(4U);
+    for (n = 1U; n < 5U; n++)
+        assert(rt_pid[n - 1U] < rt_pid[n]);
+    assert(rt_simple(0U, ZZAPP_OP_RELEASE) == SDK_STATUS_OK);
+    assert(rt_simple(2U, ZZAPP_OP_RELEASE) == SDK_STATUS_OK);
+    assert(zzapp_rec_state(rt_pid[0]) == ZZAPP_REC_FREE);
+    assert(zzapp_rec_state(rt_pid[2]) == ZZAPP_REC_FREE);
+    assert(zzapp_rec_state(rt_pid[1]) != ZZAPP_REC_FREE);
+    old_handle = rt_cl[3].handle;
+    lose_the_lease(3U, 4);
+    assert_quarantined(3U, old_handle);
+    assert(RT_STATE(4U) == AAR_STATE_RUNNING);
+    assert(RT_REASON(4U) == AAR_END_NONE);
+    assert(zzapp_rec_state(rt_pid[1]) != ZZAPP_REC_FREE);
+    assert(rt_simple(3U, ZZAPP_OP_STOP) == SDK_STATUS_BAD_HANDLE);
+    assert(rt_simple(1U, ZZAPP_OP_RELEASE) == SDK_STATUS_OK);
+    release_running(4U);
+    rt_settle(8U);
+    rt_assert_back(g_start);
+}
+
 int main(void)
 {
     test_stale_request_releases_a_lost_app();
     test_release_of_a_quarantined_handle();
     test_a_claim_that_never_loaded_is_quarantined();
     test_reset_with_held_shells();
+    test_poll_finds_a_lost_lease_among_free_records();
     puts("lost_client_test: ok");
     return 0;
 }

@@ -72,6 +72,17 @@ a bug and stops the core on an undefined instruction. The record's bytes stay
 readable after the free, so a record freed after a successful select is
 harmless to the rest of that visit.
 
+The core 0 poll runs on every main-loop pass, so with no app on the card its
+cost is the cost of the empty sweep. It finds the next record that is not
+`FREE` with `zzapp_rec_next_allocated`: one byte load for each `FREE` record,
+and one acquire barrier for the record it returns, so what the walk then reads
+of that record is ordered as after `zzapp_rec_state`. The sweep used to call
+`zzapp_rec_state` for every index, which is a call, two loads of the arena
+words and a data memory barrier each; with 231 records and no app the poll
+measured 7.8 us per pass. The poll still visits every allocated record on
+every pass, whatever its state (`CLAIMED`, `LIVE`, `RETIRING`, `RECLAIMED`),
+and still expires claims and ages the core 1 heartbeat with no app running.
+
 Every mailbox request except `QUERY`, `CLAIM` and `LIST` names its record by
 handle at byte 40 of the payload, and the lookup (`zzapp_rec_by_handle`)
 fails for a stale one. The wire has no slot and no window; see
