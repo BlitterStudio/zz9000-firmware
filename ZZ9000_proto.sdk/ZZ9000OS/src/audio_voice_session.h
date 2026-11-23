@@ -108,10 +108,11 @@
 
 /*
  * The features this firmware advertises. CONFIG is the record the engine
- * handles. RAMP stays out until the card gate has passed (U2: LOAD
- * VOICES=32 CHURN RAMP=256 inside the 5 ms budget); then it is ORed in here.
+ * handles. RAMP passed the U2 card gate; the measured loads and render
+ * times are recorded in sdk/docs/zz9k-voice.md, Hardware measurements.
  */
-#define AUDIO_VOICE_FEATURES (AUDIO_VOICE_FEATURE_CONFIG)
+#define AUDIO_VOICE_FEATURES \
+	(AUDIO_VOICE_FEATURE_CONFIG | AUDIO_VOICE_FEATURE_RAMP)
 
 #define AUDIO_VOICE_STATE_CLOSED 0U
 #define AUDIO_VOICE_STATE_OPEN   1U /* open, no record yet */

@@ -395,8 +395,10 @@ static void scenario_open(void)
 	      "open: status published as open with the session id",
 	      fmt("state=%u", st_state()));
 	check(st32(AUDIO_VOICE_STATUS_OFF_FEATURES) == AUDIO_VOICE_FEATURES &&
-	      (AUDIO_VOICE_FEATURES & AUDIO_VOICE_FEATURE_CONFIG) != 0U,
-	      "open: the status block carries the features word",
+	      (st32(AUDIO_VOICE_STATUS_OFF_FEATURES) &
+	       (AUDIO_VOICE_FEATURE_CONFIG | AUDIO_VOICE_FEATURE_RAMP)) ==
+	      (AUDIO_VOICE_FEATURE_CONFIG | AUDIO_VOICE_FEATURE_RAMP),
+	      "open: the status block advertises CONFIG and qualified RAMP",
 	      fmt("features=%x", st32(AUDIO_VOICE_STATUS_OFF_FEATURES)));
 	o = open_params(7680U, 4U, 0U);
 	check(audio_voice_session_open(&o, &second) == SDK_STATUS_BUSY,

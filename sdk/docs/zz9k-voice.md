@@ -821,6 +821,34 @@ and the status sampling, not from a measured DAC rate.
 
 Zorro II has not been tested. The flag stays clear there until it is.
 
+### Volume ramps
+
+The ramp qualification runs used the combined bench image `8b6cf96e`
+(`ramp-fw2`), with the voice renderer and the module-loader fixes, on the
+same Zorro III A4000/68060 card. Each run lasted 20 s and measured 1016
+rendered periods of 960 frames (20 ms). Every run had 0 late records,
+0 rejected records, 0 underruns and 0 dropped records.
+
+Every command below starts with `zz9k-voiceplay LOAD VOICES=32 CHURN`.
+Without `STEREO`, the sample is mono; without `LINEAR`, interpolation is
+nearest. RATE defaults to 22050 Hz.
+
+| Remaining arguments | Render average (us) | Render maximum (us) |
+| --- | ---: | ---: |
+| `RAMP=256 STEREO LINEAR` | 2853.80 | 3166.51 |
+| `RAMP=256 STEREO LINEAR RATE=96000` | 2861.20 | 3216.21 |
+| `RAMP=256` | 1351.51 | 1663.68 |
+| `RAMP=256 LINEAR` | 2109.18 | 2451.41 |
+| `RAMP=256 STEREO` | 1444.51 | 1786.70 |
+| `RAMP=256 GROUPS=1 STEREO LINEAR` | 2840.74 | 3179.44 |
+| `RAMP=512 STEREO LINEAR` | 2742.59 | 3082.29 |
+| `RAMP=0 STEREO LINEAR` (churn without ramps) | 1440.97 | 1748.10 |
+
+The largest render maximum in these loads was 3216.21 us, below the
+5000 us render budget. The firmware now advertises `ZZ9K_VOICE_FEATURE_RAMP`
+alongside `ZZ9K_VOICE_FEATURE_CONFIG`. These measurements cover the listed
+loads, not every command pattern or later feature combination.
+
 ### Low-latency sessions
 
 The same machine, with a low-latency session (lead floor 2880 frames). Each
