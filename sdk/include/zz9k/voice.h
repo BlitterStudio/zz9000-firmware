@@ -186,18 +186,36 @@ typedef struct ZZ9KVoiceRingHeader {
  * first-pass length (0 = to the sample end). LOOP: arg0/arg1 = loop
  * start/length. SET: flags select rate, volume and rate-in-Hz; arg0 = rate,
  * arg1 = (left << 16) | right. STOP silences the voice. MASTER: arg0 = Q8.8
- * gain. DIRECTION: flags bit 0 = backward. Stamps must not decrease. */
+ * gain. DIRECTION: flags bit 0 = backward. Stamps must not decrease.
+ *
+ * MODE and ENVELOPE are op numbers of later features; the firmware rejects
+ * them until it has them. CONFIG (ZZ9K_VOICE_FEATURE_CONFIG) carries
+ * session-wide settings: flags name the settings the record holds, the voice
+ * field is ignored. ZZ9K_VOICE_CONFIG_RAMP: arg0 = ramp length in frames,
+ * 0 to ZZ9K_VOICE_RAMP_MAX_FRAMES; with a length above 0, volume changes,
+ * starts, stops and restarts fade over that many frames instead of
+ * stepping, and a restart of a sounding voice lets the old sound fade out in
+ * one of ZZ9K_VOICE_FADE_SLOTS slots. A record with no flag, an unknown flag
+ * or an out-of-range value is rejected whole. */
 #define ZZ9K_VOICE_OP_START     1U
 #define ZZ9K_VOICE_OP_LOOP      2U
 #define ZZ9K_VOICE_OP_SET       3U
 #define ZZ9K_VOICE_OP_STOP      4U
 #define ZZ9K_VOICE_OP_MASTER    5U
 #define ZZ9K_VOICE_OP_DIRECTION 6U
+#define ZZ9K_VOICE_OP_MODE      7U
+#define ZZ9K_VOICE_OP_ENVELOPE  8U
+#define ZZ9K_VOICE_OP_CONFIG    9U
 
 #define ZZ9K_VOICE_SET_RATE     0x0001U
 #define ZZ9K_VOICE_SET_VOLUME   0x0002U
 #define ZZ9K_VOICE_SET_RATE_HZ  0x0004U /* rate is Hz, else a Paula period */
 #define ZZ9K_VOICE_DIR_BACKWARD 0x0001U
+
+#define ZZ9K_VOICE_CONFIG_RAMP  0x0001U
+
+#define ZZ9K_VOICE_RAMP_MAX_FRAMES 512U
+#define ZZ9K_VOICE_FADE_SLOTS      32U
 
 #define ZZ9K_VOICE_MASTER_UNITY 256U
 
@@ -252,6 +270,30 @@ typedef struct ZZ9KVoiceRecord {
 #define ZZ9K_VOICE_STATUS_POLL_GAP_OFFSET      36U /* u32 */
 #define ZZ9K_VOICE_JITTER_NONE                 0xFFFFFFFFU
 
+/* Extended status. The firmware writes the features word at open (and keeps
+ * it in every status write); a firmware without it leaves all four words
+ * zero, which reads as no features. A client checks a feature bit before it
+ * sends the records of that feature. active_mask, ends and
+ * output_delay_frames are reserved for the voice-ended reporting and the
+ * oversampling units and read 0 until then. */
+#define ZZ9K_VOICE_STATUS_FEATURES_OFFSET      40U /* u32 */
+#define ZZ9K_VOICE_STATUS_ACTIVE_MASK_OFFSET   44U /* u32 */
+#define ZZ9K_VOICE_STATUS_ENDS_OFFSET          48U /* u32 */
+#define ZZ9K_VOICE_STATUS_OUTPUT_DELAY_OFFSET  52U /* u16 */
+
+/* Feature bits of the features word. CONFIG is the CONFIG record itself;
+ * RAMP says that a ramp length set with it is qualified: the firmware has
+ * been measured with 32 voices and a full fade pool inside its render
+ * budget. The firmware sets a bit only for a feature it has. */
+#define ZZ9K_VOICE_FEATURE_RAMP         0x0001U
+#define ZZ9K_VOICE_FEATURE_LIMITER      0x0002U
+#define ZZ9K_VOICE_FEATURE_CUBIC        0x0004U
+#define ZZ9K_VOICE_FEATURE_VOICE_INTERP 0x0008U
+#define ZZ9K_VOICE_FEATURE_OVERSAMPLE   0x0010U
+#define ZZ9K_VOICE_FEATURE_ENVELOPE     0x0020U
+#define ZZ9K_VOICE_FEATURE_EVENTS       0x0040U
+#define ZZ9K_VOICE_FEATURE_CONFIG       0x0080U
+
 #define ZZ9K_VOICE_STATE_CLOSED 0U
 #define ZZ9K_VOICE_STATE_OPEN   1U /* open, no record yet */
 #define ZZ9K_VOICE_STATE_LIVE   2U
@@ -294,6 +336,16 @@ typedef struct ZZ9KVoiceJitter {
   uint32_t margin_min_us;   /* ZZ9K_VOICE_JITTER_NONE until the first period */
   uint32_t poll_gap_max_us; /* 0 on firmware without the telemetry */
 } ZZ9KVoiceJitter;
+
+/* Host-order extended status, read by zz9k_voice_ext_status_read(). Header
+ * only, like ZZ9KVoiceJitter: ZZ9KVoiceStatus and the library calls stay as
+ * they are. */
+typedef struct ZZ9KVoiceExtStatus {
+  uint32_t features;            /* ZZ9K_VOICE_FEATURE_*, 0 on old firmware */
+  uint32_t active_mask;         /* reserved: voices sounding, bit per voice */
+  uint32_t ends;                /* reserved: voices that ended by themselves */
+  uint16_t output_delay_frames; /* reserved: delay of the output stage */
+} ZZ9KVoiceExtStatus;
 
 /* ---- Host-facing descriptors ---- */
 
@@ -559,6 +611,20 @@ static inline void zz9k_voice_jitter_read(const volatile uint8_t *block,
       zz9k_voice_read32(block, ZZ9K_VOICE_STATUS_POLL_GAP_OFFSET);
 }
 
+/* Reads the extended status words with the same tear protection and cache
+ * rule. A firmware that does not write them leaves the words zero, which
+ * reads as no features. */
+static inline void zz9k_voice_ext_status_read(const volatile uint8_t *block,
+                                              ZZ9KVoiceExtStatus *ext)
+{
+  ext->features = zz9k_voice_read32(block, ZZ9K_VOICE_STATUS_FEATURES_OFFSET);
+  ext->active_mask =
+      zz9k_voice_read32(block, ZZ9K_VOICE_STATUS_ACTIVE_MASK_OFFSET);
+  ext->ends = zz9k_voice_read32(block, ZZ9K_VOICE_STATUS_ENDS_OFFSET);
+  ext->output_delay_frames =
+      zz9k_voice_load_be16(block + ZZ9K_VOICE_STATUS_OUTPUT_DELAY_OFFSET);
+}
+
 /* Encode and decode one record (big-endian wire form). */
 static inline void zz9k_voice_record_encode(ZZ9KVoiceRecordWire *wire,
                                             const ZZ9KVoiceRecord *record)
@@ -648,6 +714,26 @@ static inline void zz9k_voice_build_direction(ZZ9KVoiceRecord *record,
 {
   zz9k_voice_build_record(record, stamp, voice, ZZ9K_VOICE_OP_DIRECTION,
                           backward ? ZZ9K_VOICE_DIR_BACKWARD : 0U, 0U, 0U);
+}
+
+/* A CONFIG record carrying the settings named by flags (ZZ9K_VOICE_CONFIG_*);
+ * the voice field is 0. */
+static inline void zz9k_voice_build_config(ZZ9KVoiceRecord *record,
+                                           uint32_t stamp, uint16_t flags,
+                                           uint32_t arg0, uint32_t arg1)
+{
+  zz9k_voice_build_record(record, stamp, 0U, ZZ9K_VOICE_OP_CONFIG, flags, arg0,
+                          arg1);
+}
+
+/* Ramp length in frames, 0 (off) to ZZ9K_VOICE_RAMP_MAX_FRAMES. Check
+ * ZZ9K_VOICE_FEATURE_CONFIG first: firmware without CONFIG counts the record
+ * as rejected and keeps instant volume changes. */
+static inline void zz9k_voice_build_config_ramp(ZZ9KVoiceRecord *record,
+                                                uint32_t stamp,
+                                                uint32_t frames)
+{
+  zz9k_voice_build_config(record, stamp, ZZ9K_VOICE_CONFIG_RAMP, frames, 0U);
 }
 
 /* Copies up to count records into the ring behind the session's write

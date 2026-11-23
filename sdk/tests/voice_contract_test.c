@@ -137,6 +137,24 @@ static void test_layouts(void)
   CHECK(ZZ9K_VOICE_STATUS_SESSION_OFFSET == 28U);
   CHECK(ZZ9K_VOICE_STATUS_MARGIN_OFFSET == 32U);
   CHECK(ZZ9K_VOICE_STATUS_POLL_GAP_OFFSET == 36U);
+  CHECK(ZZ9K_VOICE_STATUS_FEATURES_OFFSET == 40U);
+  CHECK(ZZ9K_VOICE_STATUS_ACTIVE_MASK_OFFSET == 44U);
+  CHECK(ZZ9K_VOICE_STATUS_ENDS_OFFSET == 48U);
+  CHECK(ZZ9K_VOICE_STATUS_OUTPUT_DELAY_OFFSET == 52U);
+  /* the extended words sit in the reserved bytes of the wire struct */
+  CHECK(ZZ9K_VOICE_STATUS_OUTPUT_DELAY_OFFSET + 2U <=
+        ZZ9K_VOICE_STATUS_BYTES);
+  CHECK(ZZ9K_VOICE_FEATURE_RAMP == 0x01U && ZZ9K_VOICE_FEATURE_LIMITER == 0x02U &&
+        ZZ9K_VOICE_FEATURE_CUBIC == 0x04U &&
+        ZZ9K_VOICE_FEATURE_VOICE_INTERP == 0x08U &&
+        ZZ9K_VOICE_FEATURE_OVERSAMPLE == 0x10U &&
+        ZZ9K_VOICE_FEATURE_ENVELOPE == 0x20U &&
+        ZZ9K_VOICE_FEATURE_EVENTS == 0x40U &&
+        ZZ9K_VOICE_FEATURE_CONFIG == 0x80U);
+  CHECK(ZZ9K_VOICE_OP_MODE == 7U && ZZ9K_VOICE_OP_ENVELOPE == 8U &&
+        ZZ9K_VOICE_OP_CONFIG == 9U);
+  CHECK(ZZ9K_VOICE_CONFIG_RAMP == 1U && ZZ9K_VOICE_RAMP_MAX_FRAMES == 512U &&
+        ZZ9K_VOICE_FADE_SLOTS == 32U);
   CHECK(ZZ9K_VOICE_JITTER_NONE == 0xFFFFFFFFU);
 
   CHECK(ZZ9K_VOICE_OP_START == 1U && ZZ9K_VOICE_OP_LOOP == 2U &&
@@ -438,6 +456,14 @@ static void test_records(void)
   CHECK(r.op == ZZ9K_VOICE_OP_DIRECTION && r.flags == 1U);
   zz9k_voice_build_direction(&r, 9U, 2U, 0);
   CHECK(r.flags == 0U);
+  zz9k_voice_build_config_ramp(&r, 10U, 256U);
+  CHECK(r.stamp == 10U && r.voice == 0U && r.op == ZZ9K_VOICE_OP_CONFIG &&
+        r.flags == ZZ9K_VOICE_CONFIG_RAMP && r.arg0 == 256U && r.arg1 == 0U);
+  zz9k_voice_build_config(&r, 11U, 0x0003U, 5U, 6U);
+  CHECK(r.op == ZZ9K_VOICE_OP_CONFIG && r.flags == 3U && r.arg0 == 5U &&
+        r.arg1 == 6U);
+  zz9k_voice_record_encode(&w, &r);
+  CHECK(b[4] == 0U && b[5] == 9U && b[6] == 0x00 && b[7] == 0x03);
 }
 
 /* ---- Status reader ---- */
@@ -499,6 +525,41 @@ static void test_jitter_read(void)
                   ZZ9K_VOICE_JITTER_NONE);
   zz9k_voice_jitter_read(block, &j);
   CHECK(j.margin_min_us == ZZ9K_VOICE_JITTER_NONE);
+}
+
+static void test_ext_status_read(void)
+{
+  uint8_t block[ZZ9K_VOICE_STATUS_BYTES];
+  ZZ9KVoiceExtStatus x;
+  ZZ9KVoiceJitter j;
+  ZZ9KVoiceStatus s;
+
+  /* A block from firmware that predates the features word, or a zeroed one:
+   * every extended word reads 0, which means no features. */
+  memset(block, 0, sizeof(block));
+  memset(&x, 0xAA, sizeof(x));
+  zz9k_voice_ext_status_read(block, &x);
+  CHECK(x.features == 0U && x.active_mask == 0U && x.ends == 0U &&
+        x.output_delay_frames == 0U);
+
+  /* Each word at its offset, big-endian, and the older words untouched. */
+  put_status_word(block, 28, 0x55555555UL);
+  put_status_word(block, ZZ9K_VOICE_STATUS_POLL_GAP_OFFSET, 0x00067890UL);
+  put_status_word(block, ZZ9K_VOICE_STATUS_FEATURES_OFFSET, 0x00000081UL);
+  put_status_word(block, ZZ9K_VOICE_STATUS_ACTIVE_MASK_OFFSET, 0x80000001UL);
+  put_status_word(block, ZZ9K_VOICE_STATUS_ENDS_OFFSET, 0x01020304UL);
+  zz9k_put_be16(block + ZZ9K_VOICE_STATUS_OUTPUT_DELAY_OFFSET, 0x0123U);
+  zz9k_voice_ext_status_read(block, &x);
+  CHECK(x.features == 0x81UL);
+  CHECK((x.features & ZZ9K_VOICE_FEATURE_CONFIG) != 0U &&
+        (x.features & ZZ9K_VOICE_FEATURE_RAMP) != 0U &&
+        (x.features & ZZ9K_VOICE_FEATURE_CUBIC) == 0U);
+  CHECK(x.active_mask == 0x80000001UL);
+  CHECK(x.ends == 0x01020304UL);
+  CHECK(x.output_delay_frames == 0x0123U);
+  zz9k_voice_status_read(block, &s);
+  zz9k_voice_jitter_read(block, &j);
+  CHECK(s.session == 0x55555555UL && j.poll_gap_max_us == 0x00067890UL);
 }
 
 /* A scripted 16-bit source that returns a queued sequence, so a tear (the
@@ -2126,6 +2187,7 @@ int main(void)
   test_records();
   test_status_block_read();
   test_jitter_read();
+  test_ext_status_read();
   test_read32_tear();
   test_ring_math();
   test_stage_then_publish();

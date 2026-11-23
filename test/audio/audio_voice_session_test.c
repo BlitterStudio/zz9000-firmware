@@ -394,6 +394,10 @@ static void scenario_open(void)
 	      st32(AUDIO_VOICE_STATUS_OFF_SESSION) == g_grant.session,
 	      "open: status published as open with the session id",
 	      fmt("state=%u", st_state()));
+	check(st32(AUDIO_VOICE_STATUS_OFF_FEATURES) == AUDIO_VOICE_FEATURES &&
+	      (AUDIO_VOICE_FEATURES & AUDIO_VOICE_FEATURE_CONFIG) != 0U,
+	      "open: the status block carries the features word",
+	      fmt("features=%x", st32(AUDIO_VOICE_STATUS_OFF_FEATURES)));
 	o = open_params(7680U, 4U, 0U);
 	check(audio_voice_session_open(&o, &second) == SDK_STATUS_BUSY,
 	      "open: second open is busy", "");
@@ -967,11 +971,14 @@ static void scenario_jitter(void)
 		uint32_t w;
 		int clear = 1;
 
-		for (w = 40U; w < AUDIO_VOICE_STATUS_BYTES; w++)
+		for (w = 44U; w < AUDIO_VOICE_STATUS_BYTES; w++)
 			if (g_status[w] != 0U)
 				clear = 0;
-		check(clear, "jitter: the bytes after the two words stay zero",
-		      "");
+		check(clear, "status: the words after the features word stay zero "
+		      "(active mask, ends, output delay are reserved)", "");
+		check(st32(AUDIO_VOICE_STATUS_OFF_FEATURES) == AUDIO_VOICE_FEATURES,
+		      "status: the features word is kept in every status write",
+		      fmt("features=%x", st32(AUDIO_VOICE_STATUS_OFF_FEATURES)));
 	}
 
 	/* The poll stops for 3 periods: the gap shows it, the period the
@@ -2484,8 +2491,41 @@ static void scenario_reset_before_live(uint32_t flags)
 	      fmt("underruns=%u late=%u", st_underruns(), st_late()));
 }
 
+/*
+ * CONFIG names no voice, like MASTER: a voice number past the grant must not
+ * make the session drop it, and the engine's refusals (a ramp above 512
+ * frames) are counted in the status block's rejected word.
+ */
+static void scenario_config(void)
+{
+	fresh();
+	check(open_session(0U, 2U) == SDK_STATUS_OK, "config: open", "");
+	rec(0U, 200U, AUDIO_VOICE_OP_CONFIG, AUDIO_VOICE_CONFIG_RAMP, 256U, 0U);
+	rec(0U, 0U, AUDIO_VOICE_OP_MASTER, 0U, 256U, 0U);
+	publish();
+	run(6);
+	check(st_rejected() == 0U && st_dropped() == 0U &&
+	      st16(AUDIO_VOICE_STATUS_OFF_READ) == g_wc,
+	      "config: a CONFIG record with a voice past the grant is taken",
+	      fmt("rejected=%u dropped=%u", st_rejected(), st_dropped()));
+	rec(0U, 0U, AUDIO_VOICE_OP_CONFIG, AUDIO_VOICE_CONFIG_RAMP,
+	    AUDIO_VOICE_RAMP_MAX_FRAMES + 1U, 0U);
+	rec(0U, 0U, AUDIO_VOICE_OP_CONFIG, 0U, 100U, 0U);
+	rec(0U, 0U, AUDIO_VOICE_OP_CONFIG, AUDIO_VOICE_CONFIG_RAMP,
+	    AUDIO_VOICE_RAMP_MAX_FRAMES, 0U);
+	publish();
+	run(6);
+	check(st_rejected() == 2U,
+	      "config: a ramp above the limit and a CONFIG without settings are "
+	      "rejected, the longest ramp is not",
+	      fmt("rejected=%u", st_rejected()));
+	check(audio_voice_session_close(g_grant.session) == SDK_STATUS_OK,
+	      "config: close", "");
+}
+
 int main(void)
 {
+	scenario_config();
 	scenario_open();
 	scenario_open_refused();
 	scenario_ring_geometry();
