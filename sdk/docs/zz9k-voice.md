@@ -434,7 +434,8 @@ mixed output, see [Audio saturation ceilings](../../docs/audio-saturation-ceilin
 Discovery. The firmware advertises the `LIMITER` feature bit after the card
 timing gate in [Limiter timing](#limiter-timing). The bit says that the
 render time of the knee with 32 voices and a full fade pool is inside the
-budget. It does not say that the knee has been judged by ear. A client that
+budget; it says nothing about how the knee sounds, see the listening note
+under [Limiter timing](#limiter-timing). A client that
 uses the limiter checks the `CONFIG` and `LIMITER` bits first; firmware
 without `LIMITER` may still accept the record, as it accepted ramp records
 before `RAMP` was advertised, and that use is for testing only.
@@ -970,8 +971,14 @@ the largest maximum, 3336.83 us, is below the 5000 us render budget. The
 firmware advertises `ZZ9K_VOICE_FEATURE_LIMITER` on this evidence. It covers
 the listed loads only. `GAIN=65535` is a saturation test: the loads put the
 mix above full scale, which the voiceplay default of 65535 divided by the
-voice count never does. The runs record render time and counters; this
-document does not record how the knee sounds.
+voice count never does.
+
+Listening note. The maintainer listened to the load of
+`LOAD VOICES=32 STEREO LINEAR RATE=96000 RAMP=256 GAIN=65535`, 10 s without
+and 10 s with `LIMITER`, with the amplifier set very low, and heard no clear
+difference. The runs had 0 late records, 0 rejected records, 0 underruns and
+0 dropped records. This one comparison does not cover other material, levels
+or listening setups.
 
 ### Low-latency sessions
 
