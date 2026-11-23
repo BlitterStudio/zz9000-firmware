@@ -7,6 +7,9 @@
 #include "zzm_loader.h"
 #include "zzm_manifest.h"
 #include "zzm_registry.h"
+#ifdef ZZM_LOAD_BENCH
+#include "zzm_load_bench.h"
+#endif
 #include "zzm_runtime.h"
 #define ZZM_MODULE_MAX 8U
 #define ZZM_MODULE_COUNT ZZM_MODULE_MAX
@@ -1308,14 +1311,46 @@ void zzm_loader_boot_load(void)
      * FatFs payload reads are deferred to the first requesting service. */
 }
 
+#ifdef ZZM_LOAD_BENCH
+_Static_assert(ZZM_MODULE_MAX <= ZZM_LOAD_BENCH_MODULES,
+               "bench tables cover every module slot");
+
+/* The phase the next load step of this module will run, from the loader
+ * state before the step. */
+static uint32_t load_bench_phase(uint32_t index)
+{
+    uint32_t phase;
+
+    if (module_status[index].state != ZZM_STATE_LOADING)
+        return ZZM_LOAD_BENCH_OPEN;
+    phase = module_format[index] == ZZM_V3_FORMAT_VERSION ?
+        (uint32_t)v3_loads[index].phase : (uint32_t)v1_loads[index].phase;
+    return phase >= ZZM_LOAD_BENCH_FAIL ? ZZM_LOAD_BENCH_FAIL : phase;
+}
+#endif
+
 static int load_on_owner_locked(uint32_t module_id)
 {
     uint8_t visiting[ZZM_MODULE_COUNT] = { 0 };
     int index = module_index(module_id);
+#ifdef ZZM_LOAD_BENCH
+    uint32_t phase;
+    uint64_t t0;
+    int result;
+#endif
 
     if (index < 0)
         return ZZM_LOAD_FAILED;
+#ifdef ZZM_LOAD_BENCH
+    phase = load_bench_phase((uint32_t)index);
+    t0 = zzm_load_bench_now();
+    result = load_module((uint32_t)index, visiting);
+    zzm_load_bench_record((uint32_t)index, zzm_slots[index].name, phase,
+                          zzm_load_bench_now() - t0);
+    return result;
+#else
     return load_module((uint32_t)index, visiting);
+#endif
 }
 
 int zzm_loader_load_on_owner(uint32_t module_id)

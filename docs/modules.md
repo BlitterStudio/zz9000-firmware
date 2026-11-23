@@ -153,6 +153,26 @@ makes while the guard is held stays counted and is applied by the next
 main-loop poll that gets the guard. Retries of an in-progress begin are not
 logged; failures still are.
 
+Defining `ZZM_LOAD_BENCH` enables a firmware-only load instrument that times
+each load step on core 1 and keeps the longest step per module and phase. The
+core-0 main loop prints it at most once a second, only when a maximum changed
+and no voice session is open:
+
+```
+make -C ZZ9000_proto.sdk/ZZ9000OS EXTRA_CFLAGS='-DZZM_LOAD_BENCH'
+```
+
+```
+ZZM-BENCH mod=MPEG2 open=12us read=1480us bss=210us dflush=380us iflush=95us init=251340us fail=0us steps=57 t=123456ms
+```
+
+`open` is the first step (storage check, quota, file open, and for v1 images
+the dependency loads), `read` one 12 KiB read-and-hash chunk, `bss`, `dflush`
+and `iflush` one 64 KiB clear, data-cache flush or instruction-cache
+invalidate chunk, `init` the module's init call and `fail` the cleanup after a
+failed load. `steps` counts every step recorded for the module and `t` is
+milliseconds since boot.
+
 An accepted session takes a strong module reference. A pending host-owned
 callback or future job would also take a strong reference; a transient lookup
 does not. On session close, release the reference only after all of that
