@@ -12,8 +12,9 @@
  * context, and a context-less pass used to stop the core on its undefined
  * instruction (a card fault, code 4, in zzapp_worker_hook).
  *
- * The interleaving is placed exactly: zzapp_rec_state is wrapped, and the
- * Nth read of the record's state by the visiting core returns the live state
+ * The interleaving is placed exactly: zzapp_rec_state and
+ * zzapp_rec_next_allocated are wrapped, and the Nth read of the record's
+ * state by the visiting core returns the live state
  * it had and then lets the other core free the record, before the pass goes
  * on. N is swept over every read the pass makes. A pass that stops the core
  * aborts the test.
@@ -28,11 +29,14 @@
 #include <unistd.h>
 
 zzapp_rec_state_t __real_zzapp_rec_state(uint32_t pid);
+uint32_t __real_zzapp_rec_next_allocated(uint32_t from);
 
 /* One injection: the `target`th lock-free read of record `pid`'s state by
  * `core` (counting reads that find the record live) is followed by `action`.
- * A read under the slot-state lock cannot race a free, which needs the lock:
- * it is not counted, and the action could not take the lock either. */
+ * A read is a zzapp_rec_state() call or a record that zzapp_rec_next_allocated()
+ * hands to a walk. A read under the slot-state lock cannot race a free, which
+ * needs the lock: it is not counted, and the action could not take the lock
+ * either. */
 static struct {
     int armed;
     int busy;
@@ -44,20 +48,35 @@ static struct {
     void (*action)(void);
 } race;
 
-zzapp_rec_state_t __wrap_zzapp_rec_state(uint32_t pid)
+static void fire_on_live_read(uint32_t pid)
 {
-    zzapp_rec_state_t state = __real_zzapp_rec_state(pid);
-
     if (race.armed && !race.busy && pid == race.pid &&
-        defer_test_core == race.core && state != ZZAPP_REC_FREE &&
-        !g_slot_state_test_lock && ++race.seen == race.target) {
+        defer_test_core == race.core && !g_slot_state_test_lock &&
+        ++race.seen == race.target) {
         race.busy = 1;
         race.armed = 0;
         race.fired = 1;
         race.action();
         race.busy = 0;
     }
+}
+
+zzapp_rec_state_t __wrap_zzapp_rec_state(uint32_t pid)
+{
+    zzapp_rec_state_t state = __real_zzapp_rec_state(pid);
+
+    if (state != ZZAPP_REC_FREE)
+        fire_on_live_read(pid);
     return state;
+}
+
+uint32_t __wrap_zzapp_rec_next_allocated(uint32_t from)
+{
+    uint32_t pid = __real_zzapp_rec_next_allocated(from);
+
+    if (pid < zzapp_rec_capacity())
+        fire_on_live_read(pid);
+    return pid;
 }
 
 static void arm(int core, uint32_t pid, unsigned target, void (*action)(void))

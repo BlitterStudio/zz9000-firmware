@@ -72,6 +72,32 @@ a bug and stops the core on an undefined instruction. The record's bytes stay
 readable after the free, so a record freed after a successful select is
 harmless to the rest of that visit.
 
+The core 0 poll runs on every main-loop pass, so with no app on the card its
+cost is the cost of the empty sweep. It finds the next record that is not
+`FREE` with `zzapp_rec_next_allocated`: one byte load for each `FREE` record,
+and one acquire barrier for the record it returns, so what the walk then reads
+of that record is ordered as after `zzapp_rec_state`. The sweep used to call
+`zzapp_rec_state` for every index, which is a call, two loads of the arena
+words and a data memory barrier each. The poll still visits every allocated
+record on every pass, whatever its state (`CLAIMED`, `LIVE`, `RETIRING`,
+`RECLAIMED`), and still expires claims and ages the core 1 heartbeat with no
+app running.
+
+Measured on one card with 231 records, no app and the same bench build with
+and without this change (one boot of each, a 30 s ZZPlay clip, default task
+priorities, no audio underruns in either): the idle poll fell from 7.8 us to
+3.3 us per pass, the scheduler section from 8.5 us to 4.0 us and the
+main-loop pass from 12.7 us to 8.0 us. The mailbox request ring is still
+scanned on every 256th idle pass, as before, so the steady gap between scans
+fell from about 3.63 ms to 2.31 ms. ZZPlay's SDK write average fell from
+8593 us to 7697 us and its SDK retire average (the presentation and
+retirement path) from 3209 us to 2240 us. The core 1 write (308 us to 319 us)
+and decode (about 9.5 ms) times did not change. This removes part of the
+latency added since v2.9.1 and does not restore it. The SDK retire average
+was reported as about 0.7 ms on v2.9.1, but that comparison does not isolate
+the backend, so it does not say how much of the difference is left in the
+firmware or in fixed overhead.
+
 Every mailbox request except `QUERY`, `CLAIM` and `LIST` names its record by
 handle at byte 40 of the payload, and the lookup (`zzapp_rec_by_handle`)
 fails for a stale one. The wire has no slot and no window; see
