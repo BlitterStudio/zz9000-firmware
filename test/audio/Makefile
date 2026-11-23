@@ -47,7 +47,7 @@ TARGETS := $(CONVERT_TARGET) $(CONVERT_EXACT_TARGET) $(CAPTURE_TARGET) $(PROFILE
 # assert the exact invalidate/flush ranges; every other target keeps
 CPPFLAGS += -I$(MOCK_DIR) -I$(SRC_DIR) -Ihost_stubs
 
-.PHONY: test clean check-tables
+.PHONY: test clean check-tables speed
 
 test: $(TARGETS)
 	$(CONVERT_TARGET)
@@ -313,6 +313,19 @@ $(VOICE_BASELINE_TARGET): audio_voice_baseline_test.c \
 	@mkdir -p $(BUILD_DIR)
 	$(CC) $(CPPFLAGS) -Ibaseline $(CFLAGS) -o $@ audio_voice_baseline_test.c \
 		baseline/audio_voice_baseline.c $(SRC_DIR)/audio_voice.c
+
+# Host timing of the render path, baseline engine against the current one.
+# Not part of `make test`: run `make speed`.
+VOICE_SPEED_TARGET := $(BUILD_DIR)/audio_voice_speed
+$(VOICE_SPEED_TARGET): audio_voice_speed.c \
+	baseline/audio_voice_baseline.c baseline/audio_voice_baseline.h \
+	$(SRC_DIR)/audio_voice.c $(SRC_DIR)/audio_voice.h
+	@mkdir -p $(BUILD_DIR)
+	$(CC) $(CPPFLAGS) -Ibaseline $(CFLAGS) -o $@ audio_voice_speed.c \
+		baseline/audio_voice_baseline.c $(SRC_DIR)/audio_voice.c
+
+speed: $(VOICE_SPEED_TARGET)
+	$(VOICE_SPEED_TARGET)
 
 # Voice engine against libpt4 (the ProTracker 4.1 replayer, vendored under
 # sdk/tools/libpt4): voice events from zz9k-voice-pt4 must reproduce
