@@ -980,6 +980,12 @@ static int test_release_client_unbinds_audio(void)
 	if (sdk_media_session_release_client(17U, &close_session) != 0 ||
 	    close_session != mock_session)
 		return 4;
+	/* The release only unbinds: the owner stays recorded until the close
+	 * it asked for, so the mailbox's ownership test, which runs before
+	 * this call and again on every BUSY resubmit, never loses the owner
+	 * of a still-open session. */
+	if (!sdk_media_session_owned_by(mock_session, 17U))
+		return 9;
 	/* ...and the close it asked for now succeeds without any further
 	 * unbind call from the mailbox. */
 	if (sdk_media_session_close(close_session, 0U, &result) != SDK_STATUS_OK)
