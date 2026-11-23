@@ -2236,6 +2236,31 @@ static void test_load_start_stop_status(void)
     CHECK(CLOSE(h) == AAR_OK && heap.live == 0U);
 }
 
+/* Spec 3.2: a runtime carries at least ZZAPP_ARGV_MAX arguments of
+ * ZZAPP_ARGV_STR_MAX - 1 bytes each. The argv area holds all of them. */
+static void test_start_carries_the_advertised_argument_limits(void)
+{
+    AARHandle *h;
+    static uint8_t image[100];
+    static char text[ZZAPP_ARGV_MAX][ZZAPP_ARGV_STR_MAX];
+    const char *argv[ZZAPP_ARGV_MAX];
+    uint32_t i;
+
+    reset_all();
+    h = claim();
+    for (i = 0U; i < ZZAPP_ARGV_MAX; i++) {
+        memset(text[i], (int)('a' + i), ZZAPP_ARGV_STR_MAX - 1U);
+        text[i][ZZAPP_ARGV_STR_MAX - 1U] = '\0';
+        argv[i] = text[i];
+    }
+    CHECK(aar_core_load_memory(&core, h, image, sizeof(image)) == AAR_OK);
+    CHECK(aar_core_start(&core, h, argv, ZZAPP_ARGV_MAX) == AAR_OK);
+    CHECK(card.argc == ZZAPP_ARGV_MAX);
+    for (i = 0U; i < ZZAPP_ARGV_MAX && i < card.argc; i++)
+        CHECK(!strcmp(card.argv[i], text[i]));
+    CHECK(CLOSE(h) == AAR_OK && heap.live == 0U);
+}
+
 /* Every client capability the tags carry reaches LOAD_BEGIN as the platform's
  * own bit. */
 static void test_tags_reach_the_card(void)
@@ -3316,6 +3341,7 @@ int main(void)
     test_doorbell_two_tasks_one_claim();
     test_poll_reports_in_flight();
     test_load_start_stop_status();
+    test_start_carries_the_advertised_argument_limits();
     test_tags_reach_the_card();
     test_load_refused_and_unknown_caps();
     test_lease();

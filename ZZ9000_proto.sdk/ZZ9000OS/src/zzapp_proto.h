@@ -160,7 +160,7 @@
 
 #define ZZAPP_LOAD_STAGING_BYTES   0x00010000u /* 64 KiB, at buffer offset 0 */
 #define ZZAPP_LOAD_ARGV_OFF        ZZAPP_LOAD_STAGING_BYTES
-#define ZZAPP_LOAD_ARGV_BYTES      2048u
+#define ZZAPP_LOAD_ARGV_BYTES      4096u
 #define ZZAPP_LOAD_BUFFER_BYTES    0x00012000u /* 72 KiB */
 
 /* LOAD_CHUNK: the firmware reads `length` bytes at offset 0 of the load
@@ -276,6 +276,8 @@ _Static_assert((ZZAPP_LOAD_BUFFER_BYTES & 0x1fffu) == 0u,
 _Static_assert(ZZAPP_ARGV_STR_OFF < ZZAPP_LOAD_ARGV_BYTES, "argv header");
 _Static_assert(ZZAPP_ARGV_STR_OFF + ZZAPP_ARGV_STR_MAX <= ZZAPP_LOAD_ARGV_BYTES,
                "one max argv string");
+_Static_assert(ZZAPP_ARGV_STR_OFF + ZZAPP_ARGV_MAX * ZZAPP_ARGV_STR_MAX <=
+               ZZAPP_LOAD_ARGV_BYTES, "every max argv string");
 _Static_assert(ZZAPP_OP_LAST <= ZZAPP_OP_RANGE_HI, "operations in range");
 
 /* ---- Big-endian accessors ----------------------------------------------- */

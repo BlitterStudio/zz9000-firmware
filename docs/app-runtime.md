@@ -712,7 +712,7 @@ blocks of a claim are:
 | service | 48 KiB: 1 KiB scratch, 2 KiB palette (shadow and stage), 4 KiB console input, 8 KiB log, 32 KiB console output ring | first path, name, palette, console or log use | `RELEASE` |
 | data | 8 KiB steps up to 256 KiB | first file read or write | `RELEASE` (a growth replaces it, but not while a request still names it, below) |
 | audio ring | `0x80 + frames * 4` bytes, rounded to 8 KiB | `AAR_OP_AUDIO_OPEN` | the audio close, once it is answered, and exit on the card route. On the AHI route the client maps the ring, so a close that was not posted, not answered or answered with an error, an exit without a close and a quarantined claim keep it until `RELEASE` |
-| load buffer | 72 KiB: 64 KiB staging, 2 KiB argv area, rounded | `LOAD_BEGIN` | once `START` has copied argv, or at the end of the claim |
+| load buffer | 72 KiB: 64 KiB staging, 4 KiB argv area, rounded | `LOAD_BEGIN` | once `START` has copied argv, or at the end of the claim |
 
 A spin app with no services costs 16 KiB. A console app costs 64 KiB. A game
 that reads files costs up to 320 KiB plus its audio ring. A claim holds at
@@ -870,9 +870,10 @@ gives `TABLES`. A failed `LOAD_END` ends the claim: the frames, tables and
 staging go back and the state reads `IDLE`, with the reason in the reply (a
 4-byte `AAR_REASON_*`).
 
-`START` carries only `argc`. The argv area of the load buffer holds a `u32`
-argc, 16 offsets from the start of the load buffer, then the strings, each at
-most 128 bytes including the NUL. The firmware copies the strings into the
+`START` carries only `argc`. The argv area of the load buffer is 4 KiB and
+holds a `u32` argc, 16 offsets from the start of the load buffer, then the
+strings, each at most 128 bytes including the NUL, so 16 full arguments fit
+(`ZZAPP_LOAD_ARGV_BYTES`). The firmware copies the strings into the
 app's heap and builds its `argv` there, then frees the load buffer. `STOP`
 latches a stop with reason `FORCED` on the claim; the app sees `AAR_EV_STOP`.
 

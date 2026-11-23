@@ -91,6 +91,24 @@ static void argv_entry(const void *api_ptr, int argc, char **argv)
     assert(bytes != 0u);
     argv_started = 1;
 }
+
+static int full_argv_started;
+
+/* Sixteen arguments of 127 bytes: the limits QUERY advertises. */
+static void full_argv_entry(const void *api_ptr, int argc, char **argv)
+{
+    int i;
+
+    (void)api_ptr;
+    assert(argc == (int)ZZAPP_ARGV_MAX);
+    for (i = 0; i < argc; i++) {
+        assert(strlen(argv[i]) == ZZAPP_ARGV_STR_MAX - 1u);
+        assert(argv[i][0] == (char)('a' + i));
+        assert(argv[i][ZZAPP_ARGV_STR_MAX - 2u] == (char)('a' + i));
+    }
+    assert(argv[argc] == NULL);
+    full_argv_started = 1;
+}
 static int rejected_started;
 
 static void rejected_entry(const void *api_ptr, int argc, char **argv)
@@ -344,6 +362,31 @@ static void set_argv(const char *text, uint32_t bytes)
                    ZZAPP_ARGV_OFFS_OFF, ZZAPP_LOAD_ARGV_OFF + ZZAPP_ARGV_STR_OFF);
     memcpy((uint8_t *)load.ptr + ZZAPP_LOAD_ARGV_OFF + ZZAPP_ARGV_STR_OFF,
            text, bytes);
+}
+
+/* START's argv area with ZZAPP_ARGV_MAX strings of ZZAPP_ARGV_STR_MAX - 1
+ * bytes, laid out back to back after the offset table. */
+static void set_argv_full(void)
+{
+    zzapp_rec_t *rec = zzapp_rec_by_pid(0U);
+    zzapp_xport_buf_t load;
+    uint8_t *area;
+    uint32_t i;
+
+    assert(rec != NULL);
+    (void)zzapp_xport_block_free(rec, ZZAPP_XPORT_BLOCK_LOAD);
+    assert(zzapp_xport_block_alloc(rec, ZZAPP_XPORT_BLOCK_LOAD,
+                                   ZZAPP_LOAD_BUFFER_BYTES, &load) == AAR_OK);
+    area = (uint8_t *)load.ptr;
+    for (i = 0U; i < ZZAPP_ARGV_MAX; i++) {
+        uint32_t off = ZZAPP_LOAD_ARGV_OFF + ZZAPP_ARGV_STR_OFF +
+                       i * ZZAPP_ARGV_STR_MAX;
+
+        zzapp_put_be32(area + ZZAPP_LOAD_ARGV_OFF + ZZAPP_ARGV_OFFS_OFF +
+                       4u * i, off);
+        memset(area + off, (int)('a' + i), ZZAPP_ARGV_STR_MAX - 1u);
+        area[off + ZZAPP_ARGV_STR_MAX - 1u] = '\0';
+    }
 }
 
 static int load_end(uint8_t image[IMAGE_BYTES])
@@ -1217,6 +1260,17 @@ int main(void)
     start_pending = 1;
     zzapp_worker_hook();
     assert(argv_started);
+
+    zzapp_boot_init();
+    make_image(image);
+    assert(load_end(image) == AAR_OK);
+    set_argv_full();
+    start_argc = ZZAPP_ARGV_MAX;
+    full_argv_started = 0;
+    zzapp_test_set_entry(full_argv_entry);
+    start_pending = 1;
+    zzapp_worker_hook();
+    assert(full_argv_started);
 
     /* The record of the first app was retired at its exit: the next app
      * claims a new one. */
