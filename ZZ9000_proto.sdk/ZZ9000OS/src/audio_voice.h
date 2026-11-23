@@ -100,7 +100,18 @@
  *          known bits, else the record is rejected whole. The voice field
  *          is ignored. AUDIO_VOICE_CONFIG_RAMP: arg0 is the ramp length in
  *          frames, 0 (off, the default) to AUDIO_VOICE_RAMP_MAX_FRAMES; a
- *          longer one rejects the record. arg1 is reserved.
+ *          longer one rejects the record. AUDIO_VOICE_CONFIG_LIMITER:
+ *          arg1 is 0 (off, the default) or 1 (on), otherwise the record is
+ *          rejected. A limiter-only record requires arg0 = 0; a ramp-only
+ *          record keeps ignoring arg1. Combined settings validate before
+ *          either changes. Same-stamp records apply in their supplied order.
+ *
+ * Limiting. The optional static soft knee acts on the final sum after the
+ * Q8.8 master. It is identity through magnitude 24576, then approximates
+ * sign(x) * (24576 + 8191*d/(8191+d)), d = abs(x)-24576, within 2 S16
+ * units. It is odd, monotonic and stays below either rail, including with
+ * all voices and fade slots and the maximum master. No lookahead or state
+ * between samples is used. Disabling it restores the original S16 clamp.
  *
  * A voice number of 32 or more, or an unknown op, is rejected.
  * Every byte quantity (offsets and lengths of START and LOOP) is divided
@@ -133,9 +144,9 @@
  * A fade slot is a frozen copy: later LOOP, DIRECTION, SET and STOP
  * records for the voice number never touch it, and a STOP does not end
  * earlier tails. A voice that reaches its pass end stops at once, as
- * without ramping. With R 0 none of this applies and the output is
- * identical to an engine without CONFIG; a ramp already running when R
- * becomes 0 runs out, but new records act at once.
+ * without ramping. With R 0 and the limiter off, the output is identical
+ * to an engine without CONFIG. A ramp already running when R becomes 0
+ * runs out, but new records act at once.
  */
 #define AUDIO_VOICE_OP_START     1U
 #define AUDIO_VOICE_OP_LOOP      2U
@@ -154,7 +165,9 @@
 #define AUDIO_VOICE_RATE_HZ    0x0004U
 
 #define AUDIO_VOICE_CONFIG_RAMP  0x0001U
-#define AUDIO_VOICE_CONFIG_KNOWN AUDIO_VOICE_CONFIG_RAMP
+#define AUDIO_VOICE_CONFIG_LIMITER 0x0002U
+#define AUDIO_VOICE_CONFIG_KNOWN \
+	(AUDIO_VOICE_CONFIG_RAMP | AUDIO_VOICE_CONFIG_LIMITER)
 
 struct audio_voice_cmd {
 	uint32_t stamp; /* engine frame to apply at */
@@ -214,6 +227,7 @@ struct audio_voice_engine {
 	uint32_t late;       /* commands applied after their frame */
 	uint32_t rejected;   /* commands refused */
 	uint32_t ramp_frames; /* CONFIG ramp length, 0 = off */
+	uint32_t limiter;    /* CONFIG static soft knee, 0 = off */
 	uint32_t fade_seq;   /* age counter of the fade slots */
 	struct audio_voice voice[AUDIO_VOICE_MAX_VOICES];
 	/* Sounds handed over by a restart (see "Ramping"): voices in the
@@ -246,7 +260,7 @@ void audio_voice_init(struct audio_voice_engine *e, const uint8_t *bank,
 
 /*
  * Silence every voice and every fade slot at once; samples, master, the
- * ramp setting and counters are kept.
+ * CONFIG settings and counters are kept.
  */
 void audio_voice_silence(struct audio_voice_engine *e);
 
