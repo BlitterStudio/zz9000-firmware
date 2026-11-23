@@ -778,7 +778,13 @@ static uint32_t gen_cmds(uint32_t frame, uint32_t frames, uint32_t r,
 			uint32_t id = rnd(nsamp);
 			uint32_t stamp = frame + rnd(40);
 
-			g_cmds[n++] = SETHZ(stamp, v, pick_hz(), pick_vol(), pick_vol());
+			{
+				const uint32_t hz = pick_hz();
+				const uint32_t vol_l = pick_vol();
+				const uint32_t vol_r = pick_vol();
+
+				g_cmds[n++] = SETHZ(stamp, v, hz, vol_l, vol_r);
+			}
 			if (with_mode && rnd(3) == 0)
 				g_cmds[n++] = MODE(stamp, v, rnd(4));
 			g_cmds[n++] = mk(stamp, v, AUDIO_VOICE_OP_START, id,
@@ -789,7 +795,12 @@ static uint32_t gen_cmds(uint32_t frame, uint32_t frames, uint32_t r,
 				                 rnd(smp_len[id] + 1));
 		}
 		if (with_mode && rnd(2))
-			g_cmds[n++] = CFGINT(frame + rnd(40), 1 + rnd(3));
+		{
+			const uint32_t when = rnd(40);
+			const uint32_t sel = 1 + rnd(3);
+
+			g_cmds[n++] = CFGINT(frame + when, sel);
+		}
 	}
 	for (i = 0; i < extra && n < 1000; i++) {
 		struct audio_voice_cmd *c = &g_cmds[n++];
@@ -797,7 +808,13 @@ static uint32_t gen_cmds(uint32_t frame, uint32_t frames, uint32_t r,
 		uint32_t id = rnd(nsamp);
 
 		memset(c, 0, sizeof(*c));
-		c->stamp = frame + rnd(frames + 1) - (rnd(20) == 0 && frame ? 1 : 0);
+		{
+			/* the draws are made in this order, not left to the compiler */
+			const uint32_t when = rnd(frames + 1);
+			const uint32_t early = rnd(20) == 0 && frame ? 1U : 0U;
+
+			c->stamp = frame + when - early;
+		}
 		c->voice = (uint8_t)(rnd(30) ? rnd(nvoices) : rnd(40));
 		if (pick < (storm ? 50 : 22)) {
 			c->op = AUDIO_VOICE_OP_START;
@@ -809,7 +826,10 @@ static uint32_t gen_cmds(uint32_t frame, uint32_t frames, uint32_t r,
 			c->flags = 1 + rnd(7);
 			c->arg0 = c->flags & AUDIO_VOICE_RATE_HZ ? pick_hz() :
 			          rnd(3) ? 124 + rnd(900) : rnd(10);
-			c->arg1 = (pick_vol() << 16) | pick_vol();
+			const uint32_t vol_l = pick_vol();
+			const uint32_t vol_r = pick_vol();
+
+			c->arg1 = (vol_l << 16) | vol_r;
 		} else if (pick < 58) {
 			c->op = AUDIO_VOICE_OP_STOP;
 		} else if (pick < 68) {
@@ -1567,10 +1587,9 @@ static void test_overshoot(void)
 /* The limiter on with 32 voices and 32 tails of an overshooting sample at
  * the largest and some other masters, in both signs: the output against the
  * reference curve of the sum the model computes in 64 bits (within 2, as for
- * the other modes) and never at a rail. A sum of 64 contributors at the
- * full overshoot would reach 2^29 after the largest master, the end of the
- * table; the ramps keep a restart's tail and new sound complementary, so
- * the test reaches 32 voices' worth. */
+ * the other modes) and never at a rail. A ramp keeps a restart's tail and
+ * the new sound complementary, so this reaches about 32 voices' worth;
+ * test_limiter_64() reaches 64 full contributions. */
 static void test_limiter_cubic(void)
 {
 	static struct audio_voice_engine e;
@@ -1642,6 +1661,105 @@ static void test_limiter_cubic(void)
 	      (long long)peak);
 	printf("  limiter: cubic sums up to %lld after the master (the old "
 	       "bound of the other modes is 536854528)\n", (long long)peak);
+}
+
+/*
+ * 32 voices and 32 tails, all at full gain and in phase on the full
+ * overshoot, with the limiter on and the largest master: the case of 64 full
+ * cubic contributions. The ramp is 512 frames while the voices rise and then
+ * run at full gain; at one stamp every voice restarts (32 tails at full
+ * gain, fading over 512 frames), the ramp is set to 0 and the volume is set
+ * again, which takes effect at once, so the new sounds are at full gain
+ * while the tails still are too. The sum after the master then goes beyond
+ * 2^29, the end of the limiter table, up to the 64 * 40961 * 65535 / 256
+ * the static assertions in audio_voice.c bound. The output stays within 2 of
+ * the reference curve of the model's 64-bit sum and inside the rails.
+ */
+static void test_limiter_64(void)
+{
+	static struct audio_voice_engine e;
+	static struct rmodel m;
+	static int16_t o[2 * 800], om[2 * 800];
+	static int64_t xl[800], xr[800];
+	uint32_t sign, v, k;
+	int64_t peak = 0;
+
+	for (sign = 0; sign < 2; sign++) {
+		const int hi = sign ? -32768 : 32767, lo = sign ? 32767 : -32768;
+		const int pat[4] = { lo, hi, hi, lo };
+		struct audio_voice_cmd c[400], cm[400];
+		uint32_t n = 0, nm = 0;
+		double worst = 0;
+
+		for (v = 0; v < 4; v++)
+			put16(g_bank + 2 * v, pat[v]);
+		audio_voice_init(&e, g_bank, 8, AUDIO_VOICE_CLOCK_PAL);
+		audio_voice_sample_set(&e, 0, 0, 8, AUDIO_VOICE_FMT_S16);
+		r_init(&m, g_bank, 8, AUDIO_VOICE_CLOCK_PAL);
+		r_sample_set(&m, 0, 0, 8, AUDIO_VOICE_FMT_S16);
+		e.interp = m.interp = INTERP_C;
+		c[n++] = mk(0, 0, AUDIO_VOICE_OP_MASTER, 0, 0xFFFF, 0);
+		c[n++] = mk(0, 0, AUDIO_VOICE_OP_CONFIG,
+		            AUDIO_VOICE_CONFIG_RAMP | AUDIO_VOICE_CONFIG_LIMITER,
+		            512, 1);
+		cm[nm++] = c[0];
+		cm[nm++] = CFGRAMP(0, 512);
+		for (v = 0; v < 32; v++) {
+			c[n++] = SETHZ(0, v, 24000, 65535, 65535);
+			c[n++] = mk(0, v, AUDIO_VOICE_OP_START, 0, 0, 0);
+			c[n++] = mk(0, v, AUDIO_VOICE_OP_LOOP, 0, 0, 8);
+		}
+		for (v = 0; v < 32; v++) {
+			c[n++] = mk(600, v, AUDIO_VOICE_OP_START, 0, 0, 0);
+			c[n++] = mk(600, v, AUDIO_VOICE_OP_LOOP, 0, 0, 8);
+		}
+		c[n++] = mk(600, 0, AUDIO_VOICE_OP_CONFIG,
+		            AUDIO_VOICE_CONFIG_RAMP | AUDIO_VOICE_CONFIG_LIMITER,
+		            0, 1);
+		for (v = 0; v < 32; v++)
+			c[n++] = SETHZ(600, v, 24000, 65535, 65535);
+		memcpy(cm + nm, c + 2, 96 * sizeof(c[0]));
+		nm += 96;
+		for (v = 0; v < 32; v++) {
+			cm[nm++] = c[98 + 2 * v];
+			cm[nm++] = c[99 + 2 * v];
+		}
+		cm[nm++] = CFGRAMP(600, 0);
+		for (v = 0; v < 32; v++)
+			cm[nm++] = SETHZ(600, v, 24000, 65535, 65535);
+		audio_voice_render(&e, o, 800, c, n);
+		g_rec_l = xl;
+		g_rec_r = xr;
+		g_rec_cap = 800;
+		r_render(&m, om, 800, cm, nm);
+		g_rec_l = g_rec_r = NULL;
+		for (k = 0; k < 800; k++) {
+			const long double wl = limiter_curve((long double)xl[k]);
+			const long double cl = wl > 32766.0L ? 32766.0L :
+			                       wl < -32766.0L ? -32766.0L : wl;
+			const double d = fabs((double)(o[2 * k] - cl));
+
+			if (d > worst)
+				worst = d;
+			if (llabs((long long)xl[k]) > peak)
+				peak = llabs((long long)xl[k]);
+			CHECK(o[2 * k] <= 32766 && o[2 * k] >= -32766 &&
+			      o[2 * k + 1] <= 32766 && o[2 * k + 1] >= -32766,
+			      "limiter 64 sign %u frame %u: %d at a rail", sign, k,
+			      o[2 * k]);
+		}
+		CHECK(worst <= 2.0, "limiter 64 sign %u: %.2f from the reference "
+		      "curve", sign, worst);
+	}
+	CHECK(peak > (int64_t)1 << 29,
+	      "limiter 64: the sum does not pass the table end (peak %lld)",
+	      (long long)peak);
+	CHECK(peak <= (int64_t)64 * 40961 * 65535 / 256,
+	      "limiter 64: the sum is beyond the static bound (peak %lld)",
+	      (long long)peak);
+	printf("  limiter: 64 full cubic contributions reach %lld after the "
+	       "master (table end %lld, static bound %lld)\n", (long long)peak,
+	       (long long)1 << 29, (long long)64 * 40961 * 65535 / 256);
 }
 
 /* The sum after the master of a run, per frame, from the model: the
@@ -2082,6 +2200,7 @@ int main(void)
 	test_formats();
 	test_overshoot();
 	test_limiter_cubic();
+	test_limiter_64();
 	test_limiter_curve();
 	test_records();
 	test_tails();
