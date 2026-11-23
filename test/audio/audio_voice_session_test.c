@@ -396,9 +396,11 @@ static void scenario_open(void)
 	      fmt("state=%u", st_state()));
 	check(st32(AUDIO_VOICE_STATUS_OFF_FEATURES) == AUDIO_VOICE_FEATURES &&
 	      (st32(AUDIO_VOICE_STATUS_OFF_FEATURES) &
-	       (AUDIO_VOICE_FEATURE_CONFIG | AUDIO_VOICE_FEATURE_RAMP)) ==
-	      (AUDIO_VOICE_FEATURE_CONFIG | AUDIO_VOICE_FEATURE_RAMP),
-	      "open: the status block advertises CONFIG and qualified RAMP",
+	       (AUDIO_VOICE_FEATURE_CONFIG | AUDIO_VOICE_FEATURE_RAMP |
+	        AUDIO_VOICE_FEATURE_LIMITER)) ==
+	      (AUDIO_VOICE_FEATURE_CONFIG | AUDIO_VOICE_FEATURE_RAMP |
+	       AUDIO_VOICE_FEATURE_LIMITER),
+	      "open: the status block advertises CONFIG, RAMP and LIMITER",
 	      fmt("features=%x", st32(AUDIO_VOICE_STATUS_OFF_FEATURES)));
 	o = open_params(7680U, 4U, 0U);
 	check(audio_voice_session_open(&o, &second) == SDK_STATUS_BUSY,

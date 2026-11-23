@@ -295,7 +295,7 @@ typedef struct ZZ9KVoiceRecord {
  * RAMP says that a ramp length set with it is qualified: the firmware has
  * been measured with 32 voices and a full fade pool inside its render
  * budget. LIMITER says the same of the soft knee set with
- * ZZ9K_VOICE_CONFIG_LIMITER. A firmware may accept the CONFIG setting
+ * ZZ9K_VOICE_CONFIG_LIMITER. A firmware may accept a CONFIG setting
  * before it advertises the bit, so that the setting can be qualified; a
  * client uses the setting outside a qualification run only once the bit is
  * set. The firmware sets a bit only for a feature it has. */
@@ -757,7 +757,7 @@ static inline void zz9k_voice_build_config_ramp(ZZ9KVoiceRecord *record,
 /* The static soft knee, on (nonzero) or off (0), with arg0 = 0 as a
  * limiter-only record requires. The ramp length is not touched. Check
  * ZZ9K_VOICE_FEATURE_CONFIG first, and ZZ9K_VOICE_FEATURE_LIMITER before
- * relying on the knee outside a qualification run. */
+ * relying on the knee on firmware that may predate it. */
 static inline void zz9k_voice_build_config_limiter(ZZ9KVoiceRecord *record,
                                                    uint32_t stamp,
                                                    int enabled)

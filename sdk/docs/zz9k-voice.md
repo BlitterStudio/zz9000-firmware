@@ -431,13 +431,13 @@ gain or the per-voice volumes, and it is not the ADAU1701 limiter or the
 calibrated saturation ceilings of the audio path, which still apply to the
 mixed output, see [Audio saturation ceilings](../../docs/audio-saturation-ceiling.md).
 
-Qualification boundary. The `LIMITER` feature bit stays clear in production
-firmware. The firmware still accepts CONFIG records with flag 2, as it
-accepted ramp records before `RAMP` was advertised, so that the knee can be
-tested on a card. Until the bit is set, a client uses the limiter only for
-such testing, and the engine's render time and sound with it on are not
-qualified. A client that ships the limiter checks the `CONFIG` and `LIMITER`
-bits first. This document records no hardware measurement of the limiter.
+Discovery. The firmware advertises the `LIMITER` feature bit after the card
+timing gate in [Limiter timing](#limiter-timing). The bit says that the
+render time of the knee with 32 voices and a full fade pool is inside the
+budget. It does not say that the knee has been judged by ear. A client that
+uses the limiter checks the `CONFIG` and `LIMITER` bits first; firmware
+without `LIMITER` may still accept the record, as it accepted ramp records
+before `RAMP` was advertised, and that use is for testing only.
 
 ### The ring
 
@@ -715,8 +715,8 @@ that feature. It reads 0 on firmware that predates it. `CONFIG` says the
 been measured on the card with 32 voices and a full fade pool inside the
 render budget; until the bit is set, a client that wants ramps for testing
 sends the record without relying on it. `LIMITER` says the same of the soft
-knee set with flag 2; production firmware leaves it clear, see
-[Limiter](#limiter). The other bits (`CUBIC`, `VOICE_INTERP`, `OVERSAMPLE`,
+knee set with flag 2, see [Limiter](#limiter). The other bits (`CUBIC`,
+`VOICE_INTERP`, `OVERSAMPLE`,
 `ENVELOPE`, `EVENTS`) belong to features that are not in the firmware yet and
 stay clear.
 
@@ -945,6 +945,33 @@ The largest render maximum in these loads was 3216.21 us, below the
 5000 us render budget. The firmware now advertises `ZZ9K_VOICE_FEATURE_RAMP`
 alongside `ZZ9K_VOICE_FEATURE_CONFIG`. These measurements cover the listed
 loads, not every command pattern or later feature combination.
+
+### Limiter timing
+
+The limiter runs used a combined bench image built from the limiter source
+(`52ee4096`) plus the mailbox timing instrument (`027b163a`); the image
+(`f3fdbf3b`) differs from the limiter source only in bench macros. The card
+was the same Zorro III A4000/68060. The speakers were off. Each run lasted
+20 s and measured 1016 rendered periods of 960 frames (20 ms), except the
+low-latency run, which measured 1006. Every run had 0 late records,
+0 rejected records, 0 underruns and 0 dropped records.
+
+Every command below starts with
+`zz9k-voiceplay LOAD VOICES=32 SECONDS=20 STEREO LINEAR RATE=96000 RAMP=256 GAIN=65535`.
+
+| Remaining arguments | Render average (us) | Render maximum (us) |
+| --- | ---: | ---: |
+| `CHURN GROUPS=32 LIMITER` | 2977.79 | 3336.83 |
+| `CHURN GROUPS=32` (limiter off) | 2902.56 | 3254.21 |
+| `CHURN GROUPS=1 LIMITER LOWLAT` (lead 2880 frames) | 2979.80 | 3335.18 |
+
+The limiter added about 75 us to the average and 83 us to the maximum, and
+the largest maximum, 3336.83 us, is below the 5000 us render budget. The
+firmware advertises `ZZ9K_VOICE_FEATURE_LIMITER` on this evidence. It covers
+the listed loads only. `GAIN=65535` is a saturation test: the loads put the
+mix above full scale, which the voiceplay default of 65535 divided by the
+voice count never does. The runs record render time and counters; this
+document does not record how the knee sounds.
 
 ### Low-latency sessions
 

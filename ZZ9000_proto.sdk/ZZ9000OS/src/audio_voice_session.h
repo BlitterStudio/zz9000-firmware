@@ -108,12 +108,13 @@
 
 /*
  * The features this firmware advertises. CONFIG is the record the engine
- * handles. RAMP passed the U2 card gate; the measured loads and render
- * times are recorded in sdk/docs/zz9k-voice.md, Hardware measurements.
- * LIMITER is implemented but stays unadvertised until its card timing gate.
+ * handles. RAMP and LIMITER passed their card timing gates; the measured
+ * loads and render times are recorded in sdk/docs/zz9k-voice.md, Hardware
+ * measurements. Both stay off until a client sends a CONFIG record.
  */
 #define AUDIO_VOICE_FEATURES \
-	(AUDIO_VOICE_FEATURE_CONFIG | AUDIO_VOICE_FEATURE_RAMP)
+	(AUDIO_VOICE_FEATURE_CONFIG | AUDIO_VOICE_FEATURE_RAMP | \
+	 AUDIO_VOICE_FEATURE_LIMITER)
 
 #define AUDIO_VOICE_STATE_CLOSED 0U
 #define AUDIO_VOICE_STATE_OPEN   1U /* open, no record yet */

@@ -84,9 +84,11 @@ clamp: samples up to 24576 in magnitude pass unchanged and louder ones are
 bent toward the rails, never reaching them. The knee keeps no state, so the
 result does not depend on how the render splits its periods, and records
 with one stamp apply in ring order, so a `CONFIG` record ahead of the notes
-at the lead stamp takes effect before the first note. The `LIMITER` feature
-bit stays clear in production firmware until the knee is qualified; the
-voice slot accepts the record before that so a bench build can test it. The
+at the lead stamp takes effect before the first note. The firmware advertises
+the `LIMITER` feature bit after the card timing gate in
+[zz9k-voice.md](../sdk/docs/zz9k-voice.md#limiter-timing); the knee is off
+until a client switches it on, and firmware without the bit still accepts the
+record when a bench build is under test. The
 curve and the client contract are in
 [zz9k-voice.md](../sdk/docs/zz9k-voice.md#limiter), and the relation to the
 saturation ceilings is in
