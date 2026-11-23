@@ -33,6 +33,8 @@
 #define AUDIO_VOICE_MIN_PERIOD  5U
 #define AUDIO_VOICE_MASTER_UNITY 256U
 #define AUDIO_VOICE_MASTER_MAX   0xFFFFU
+/* Frames mixed per chunk; a longer render call is mixed in chunks. */
+#define AUDIO_VOICE_MIX_FRAMES   960U
 
 #define AUDIO_VOICE_CLOCK_PAL  3546895U
 #define AUDIO_VOICE_CLOCK_NTSC 3579545U
@@ -153,6 +155,9 @@ struct audio_voice_engine {
 	uint32_t rejected;   /* commands refused */
 	struct audio_voice voice[AUDIO_VOICE_MAX_VOICES];
 	struct audio_voice_sample sample[AUDIO_VOICE_MAX_SAMPLES];
+	/* Scratch of audio_voice_render(), no state: the int32 sum of the
+	 * voices per side (left, right), for one chunk of frames. */
+	int32_t mix[2][AUDIO_VOICE_MIX_FRAMES];
 };
 
 /*
