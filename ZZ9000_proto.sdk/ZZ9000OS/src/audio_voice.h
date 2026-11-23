@@ -36,6 +36,9 @@
 /* Longest ramp, and the fade slots that hold the tails of restarted voices. */
 #define AUDIO_VOICE_RAMP_MAX_FRAMES 512U
 #define AUDIO_VOICE_FADE_SLOTS      32U
+/* Mixed frames of history the 2x decimator keeps per side: a window reaches
+ * this many frames before the pair it ends on (its taps - 2). */
+#define AUDIO_VOICE_DEC_HISTORY     57U
 /* Frames mixed per chunk; a longer render call is mixed in chunks. */
 #define AUDIO_VOICE_MIX_FRAMES   960U
 
@@ -121,8 +124,12 @@
  *          either changes. AUDIO_VOICE_CONFIG_INTERP: arg0 is the session
  *          default interpolation, AUDIO_VOICE_INTERP_MODE_NEAREST to _CUBIC
  *          (1 to 3), arg1 must be 0, and the record names no other
- *          setting; anything else rejects it. Same-stamp records apply in
- *          their supplied order.
+ *          setting; anything else rejects it. AUDIO_VOICE_CONFIG_OVERSAMPLE:
+ *          arg0 is AUDIO_VOICE_OVERSAMPLE_OFF (1, the default) or
+ *          AUDIO_VOICE_OVERSAMPLE_2X (2), arg1 must be 0, and the record
+ *          names no other setting; anything else rejects it whole (see
+ *          "Oversampling"). Same-stamp records apply in their supplied
+ *          order.
  *
  * Limiting. The optional static soft knee acts on the final sum after the
  * Q8.8 master. It is identity through magnitude 24576, then approximates
@@ -130,6 +137,55 @@
  * units. It is odd, monotonic and stays below either rail, including with
  * all voices and fade slots and the maximum master. No lookahead or state
  * between samples is used. Disabling it restores the original S16 clamp.
+ *
+ * Oversampling. With AUDIO_VOICE_OVERSAMPLE_2X the voices are mixed at
+ * 96 kHz ("mixed frames") and decimated to 48 kHz. Stamps, the frame
+ * counter, the horizon, the late count and every record stay in 48 kHz
+ * frames. Mixed frame 2F is at the time of output frame F and 2F+1 half a
+ * frame later; a record applies at mixed frame 2F. A voice moves by
+ * floor(step / 2) per mixed frame, which is (hz << 16) / 96000 rounded down
+ * for a rate in Hz (a step of 1, a rate below 1.5 Hz, rounds to no
+ * movement; the step as set stays in `rate`). Ramp lengths and the lifetime
+ * of a fade slot are the same time in mixed frames: a ramp of R frames takes
+ * 2R, each with its own gain.
+ *   The voices' sides are summed in 32 bits per mixed frame and scaled by
+ * the Q8.8 master in 64 bits per stretch between MASTER records, as without
+ * oversampling but over the 96 kHz sum and with no clamp. Only then the
+ * decimator runs: the 59-tap half-band FIR of audio_reduce_table.h (Q30,
+ * rounded half up) on the 32-bit values with a 64-bit accumulator, one
+ * output per two mixed frames, the same phase as audio_reduce_run(): output
+ * frame k is
+ *      y[k] = sum over j = 0..58 of h[j] * x[2k - 57 + j]
+ * for the mixed frames x, zero before the first, with the centre tap h[29]
+ * on x[2k - 28] = x[2(k - 14)], the first mixed frame of output frame k - 14.
+ * So the sound is delayed by AUDIO_VOICE_OVERSAMPLE_DELAY_FRAMES = 14 whole
+ * output frames (audio_voice_output_delay(), published as output_delay_frames
+ * of the status block): a single mixed frame 2F that is not zero appears
+ * alone at output frame F + 14 (the other even taps are zero). The group
+ * delay of 29 mixed frames is 14.5 output frames from the newest input, and
+ * the odd mixed frame 2F + 1 reaches output frames F to F + 29 through the
+ * odd taps. A record is not delayed itself and the filter is no pure delay:
+ * a sound that starts, stops or changes level at frame F reaches the output
+ * through the filter's step response, over frames F to F + 28 (the taps
+ * reach 29 mixed frames either way), centred 14 frames later; no output
+ * frame before F is touched. After the decimator come the limiter or the
+ * clamp to S16, once, on the 48 kHz output: a LIMITER record therefore acts
+ * on the output frames from its stamp on, not on the delayed sound. The
+ * filter removes what a voice plays above 24 kHz (a voice stepping over
+ * 48 kHz per second, or the harmonics of one) instead of letting it fold
+ * into the audible band as without oversampling.
+ *   A record that changes the setting is accepted only while no voice and no
+ * fade slot is sounding (active, with a rate, and with a volume or a ramp
+ * that is not over); otherwise it is rejected and nothing changes. A record
+ * of the value in force is accepted and changes nothing. A change cuts the
+ * chunk at the record's frame, sets the steps of the voices for the new
+ * unit and zeroes the decimator's history: switching on filters from a
+ * zero past, and switching off drops whatever the filter still holds of
+ * the last sound (at most 29 output frames of its tail). RESET zeroes the
+ * history too, and the setting stays. The history lives in the engine and
+ * persists across render calls: any split of a render gives the same output
+ * as one render, and a stretch of silence runs the filter until its history
+ * is zero before the output is written without it.
  *
  * Interpolation. Each voice reads its sample nearest, linear or with the
  * 4-point Catmull-Rom cubic. The session default is AUDIO_VOICE_INTERP_*
@@ -218,9 +274,18 @@
 #define AUDIO_VOICE_CONFIG_RAMP  0x0001U
 #define AUDIO_VOICE_CONFIG_LIMITER 0x0002U
 #define AUDIO_VOICE_CONFIG_INTERP  0x0004U
+#define AUDIO_VOICE_CONFIG_OVERSAMPLE 0x0008U
 #define AUDIO_VOICE_CONFIG_KNOWN \
 	(AUDIO_VOICE_CONFIG_RAMP | AUDIO_VOICE_CONFIG_LIMITER | \
-	 AUDIO_VOICE_CONFIG_INTERP)
+	 AUDIO_VOICE_CONFIG_INTERP | AUDIO_VOICE_CONFIG_OVERSAMPLE)
+
+/* The factors of a CONFIG OVERSAMPLE record (arg0): the default, and 2x. */
+#define AUDIO_VOICE_OVERSAMPLE_OFF 1U
+#define AUDIO_VOICE_OVERSAMPLE_2X  2U
+
+/* Output frames the decimator of 2x oversampling delays the sound by, the
+ * value of audio_voice_output_delay(): (AUDIO_REDUCE_TAPS - 1) / 4. */
+#define AUDIO_VOICE_OVERSAMPLE_DELAY_FRAMES 14U
 
 #define AUDIO_VOICE_MODE_INTERP  0x0001U
 #define AUDIO_VOICE_MODE_KNOWN   AUDIO_VOICE_MODE_INTERP
@@ -257,7 +322,9 @@ struct audio_voice {
 	uint32_t end;       /* current pass end, in frames */
 	uint32_t loopstart; /* frames; lower bound of backward play */
 	uint32_t looplen;   /* frames, 0 = no loop */
-	uint32_t step;      /* 16.16 samples per output frame, 0 = no rate */
+	uint32_t step;      /* 16.16 samples per mixed frame, 0 = no rate */
+	uint32_t rate;      /* step at 48 kHz: the rate as set, whatever the
+	                     * oversampling (step is rate >> oversample) */
 	uint32_t vol_l;     /* volume target */
 	uint32_t vol_r;
 	/* Ramp state, used only while ramp_left is not 0: the gain of each
@@ -286,6 +353,13 @@ struct audio_voice_engine {
 	uint32_t rejected;   /* commands refused */
 	uint32_t ramp_frames; /* CONFIG ramp length, 0 = off */
 	uint32_t limiter;    /* CONFIG static soft knee, 0 = off */
+	uint32_t oversample; /* CONFIG 2x oversampling: 0 = off, 1 = on */
+	/* The decimator of oversampling (see "Oversampling"): the last
+	 * AUDIO_VOICE_DEC_HISTORY mixed frames per side before the frame being
+	 * finished, and how many of the most recent mixed frames are known to
+	 * be silent (at least AUDIO_VOICE_DEC_HISTORY: the history is zero). */
+	uint32_t dec_quiet;
+	int32_t dec_hist[2][AUDIO_VOICE_DEC_HISTORY];
 	uint32_t fade_seq;   /* age counter of the fade slots */
 	struct audio_voice voice[AUDIO_VOICE_MAX_VOICES];
 	/* Sounds handed over by a restart (see "Ramping"): voices in the
@@ -300,8 +374,10 @@ struct audio_voice_engine {
 	int32_t mix[2][AUDIO_VOICE_MIX_FRAMES];
 	int32_t smp[2][AUDIO_VOICE_MIX_FRAMES];
 	int16_t *chunk_out;
-	uint32_t chunk_n;     /* frames of the chunk */
-	uint32_t chunk_abs;   /* engine frame of its first frame */
+	uint32_t chunk_n;     /* mixed frames of the chunk: the unit of the sums,
+	                       * of chunk_off and of the voices' cur and die. One
+	                       * per output frame, two when oversampling. */
+	uint32_t chunk_abs;   /* mixed-frame index of its first frame */
 	uint32_t chunk_fin;   /* frames already scaled into the output */
 	uint32_t chunk_off;   /* frame of the chunk the next record applies at */
 	int chunk_dirty;      /* the sums were cleared and may hold sound */
@@ -318,10 +394,18 @@ void audio_voice_init(struct audio_voice_engine *e, const uint8_t *bank,
                       uint32_t bank_len, uint32_t clock);
 
 /*
- * Silence every voice and every fade slot at once; samples, master, the
- * CONFIG settings and counters are kept.
+ * Silence every voice and every fade slot at once and clear the history of
+ * the oversampling decimator (nothing of the sound that was cut rings on);
+ * samples, master, the CONFIG settings and counters are kept.
  */
 void audio_voice_silence(struct audio_voice_engine *e);
+
+/*
+ * Output frames the sound is late by at the engine's current setting: 0, or
+ * AUDIO_VOICE_OVERSAMPLE_DELAY_FRAMES with 2x oversampling on. A client
+ * reads it from the status block (output_delay_frames).
+ */
+uint32_t audio_voice_output_delay(const struct audio_voice_engine *e);
 
 /*
  * Define (or redefine) sample id. Returns 0, or -1 when the id is out of

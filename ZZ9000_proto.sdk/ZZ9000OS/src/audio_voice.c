@@ -18,6 +18,7 @@
  */
 
 #include "audio_voice.h"
+#include "audio_reduce_table.h"
 
 #include <string.h>
 #if defined(__ARM_FEATURE_DSP)
@@ -43,6 +44,7 @@ void audio_voice_init(struct audio_voice_engine *e, const uint8_t *bank,
 	e->clock = clock;
 	e->interp = AUDIO_VOICE_INTERP_NEAREST;
 	e->master = AUDIO_VOICE_MASTER_UNITY;
+	e->dec_quiet = AUDIO_VOICE_DEC_HISTORY;
 }
 
 void audio_voice_silence(struct audio_voice_engine *e)
@@ -59,6 +61,9 @@ void audio_voice_silence(struct audio_voice_engine *e)
 		e->fade[i].ramp_left = 0;
 		e->fade[i].stopping = 0;
 	}
+	/* The decimator holds nothing of the sound that was cut. */
+	memset(e->dec_hist, 0, sizeof(e->dec_hist));
+	e->dec_quiet = AUDIO_VOICE_DEC_HISTORY;
 }
 
 int audio_voice_sample_set(struct audio_voice_engine *e, uint32_t id,
@@ -93,6 +98,11 @@ int audio_voice_position(const struct audio_voice_engine *e, uint32_t voice,
 	return e->voice[voice].active;
 }
 
+uint32_t audio_voice_output_delay(const struct audio_voice_engine *e)
+{
+	return e->oversample ? AUDIO_VOICE_OVERSAMPLE_DELAY_FRAMES : 0U;
+}
+
 static void set_rate(struct audio_voice_engine *e, struct audio_voice *v,
                      uint32_t flags, uint32_t rate)
 {
@@ -109,7 +119,8 @@ static void set_rate(struct audio_voice_engine *e, struct audio_voice *v,
 		return;
 	if (hz > AUDIO_VOICE_MAX_HZ)
 		hz = AUDIO_VOICE_MAX_HZ;
-	v->step = (uint32_t)(((uint64_t)hz << 16) / AUDIO_VOICE_OUT_HZ);
+	v->rate = (uint32_t)(((uint64_t)hz << 16) / AUDIO_VOICE_OUT_HZ);
+	v->step = v->rate >> e->oversample;
 }
 
 /* Byte-to-frame shift of a sample format: a frame is 1, 2, 2 or 4 bytes
@@ -197,6 +208,12 @@ static int32_t q8(uint32_t volume)
 	return (int32_t)(volume << 8);
 }
 
+/* The ramp length in mixed frames (two per output frame when oversampling). */
+static uint32_t ramp_len(const struct audio_voice_engine *e)
+{
+	return e->ramp_frames << e->oversample;
+}
+
 /* The gains a voice has at this frame. */
 static void gains_now(const struct audio_voice *v, int32_t *l, int32_t *r)
 {
@@ -235,6 +252,7 @@ static void master_change(struct audio_voice_engine *e, uint32_t off,
 static void limiter_change(struct audio_voice_engine *e, uint32_t off,
                            uint32_t enabled);
 static void sync_all(struct audio_voice_engine *e, uint32_t to);
+static void end_chunk(struct audio_voice_engine *e);
 static void mix_voice_cubic(struct audio_voice_engine *e,
                             struct audio_voice *v, uint32_t start,
                             uint32_t n);
@@ -309,7 +327,7 @@ static void fade_out(struct audio_voice_engine *e, struct audio_voice *v)
 	 * the session default or the voice's setting becomes later. */
 	slot->vinterp = (uint8_t)(voice_interp(e, v) + 1U);
 	if (!v->stopping) {
-		ramp_to(slot, gl, gr, 0, 0, e->ramp_frames);
+		ramp_to(slot, gl, gr, 0, 0, ramp_len(e));
 		slot->stopping = 1;
 	}
 	ends = frames_to_end(slot);
@@ -330,16 +348,96 @@ static void stop_ramped(struct audio_voice_engine *e, struct audio_voice *v)
 		v->ramp_left = 0;
 		return;
 	}
-	ramp_to(v, gl, gr, 0, 0, e->ramp_frames);
+	ramp_to(v, gl, gr, 0, 0, ramp_len(e));
 	v->stopping = 1;
 }
 
-static void apply_config(struct audio_voice_engine *e,
-                         const struct audio_voice_cmd *c)
+/* Whether a voice or a fade slot makes sound or is about to: active, with a
+ * rate, and with a volume or a ramp that is not over. */
+static int is_sounding(const struct audio_voice *v)
+{
+	return v->active && v->step != 0U &&
+	       ((v->vol_l | v->vol_r) != 0U || v->ramp_left != 0U);
+}
+
+/* Change the voice's unit of time: a mixed frame is half an output frame
+ * with oversampling. Only for a voice that is silent. The step follows from
+ * the rate as set, and a ramp that is still pending (a voice without a
+ * rate) keeps its end gain and its length in time. */
+static void retime(struct audio_voice *v, uint32_t oversample)
+{
+	v->step = v->rate >> oversample;
+	if (v->ramp_left == 0U)
+		return;
+	if (oversample) {
+		v->ramp_left <<= 1;
+		v->inc_l /= 2;
+		v->inc_r /= 2;
+	} else {
+		v->ramp_left = (v->ramp_left + 1U) >> 1;
+		v->inc_l *= 2;
+		v->inc_r *= 2;
+	}
+}
+
+/*
+ * CONFIG OVERSAMPLE (see "Oversampling" in audio_voice.h). The record is
+ * validated whole. A change needs silence: no voice and no fade slot sounding.
+ * It then ends the chunk at this frame, so that the unit of the chunks
+ * changes between two of them; returns 1 for that, and the caller starts the
+ * next chunk at the record's frame.
+ */
+static int set_oversample(struct audio_voice_engine *e,
+                          const struct audio_voice_cmd *c)
+{
+	uint32_t k, on;
+
+	if (c->flags != AUDIO_VOICE_CONFIG_OVERSAMPLE || c->arg1 != 0U ||
+	    (c->arg0 != AUDIO_VOICE_OVERSAMPLE_OFF &&
+	     c->arg0 != AUDIO_VOICE_OVERSAMPLE_2X)) {
+		e->rejected++;
+		return 0;
+	}
+	on = c->arg0 == AUDIO_VOICE_OVERSAMPLE_2X ? 1U : 0U;
+	if (on == e->oversample)
+		return 0;
+	sync_all(e, e->chunk_off);
+	for (k = 0; k < AUDIO_VOICE_MAX_VOICES; k++) {
+		if (is_sounding(&e->voice[k])) {
+			e->rejected++;
+			return 0;
+		}
+	}
+	for (k = 0; k < AUDIO_VOICE_FADE_SLOTS; k++) {
+		if (is_sounding(&e->fade[k])) {
+			e->rejected++;
+			return 0;
+		}
+	}
+	/* Everything before this frame is mixed and finished in the old unit. */
+	e->chunk_n = e->chunk_off;
+	end_chunk(e);
+	e->oversample = on;
+	for (k = 0; k < AUDIO_VOICE_MAX_VOICES; k++)
+		retime(&e->voice[k], on);
+	for (k = 0; k < AUDIO_VOICE_FADE_SLOTS; k++) {
+		/* A silent tail is over; its end is a time in the old unit. */
+		e->fade[k].active = 0;
+		e->fade[k].ramp_left = 0;
+		e->fade[k].stopping = 0;
+		retime(&e->fade[k], on);
+	}
+	memset(e->dec_hist, 0, sizeof(e->dec_hist));
+	e->dec_quiet = AUDIO_VOICE_DEC_HISTORY;
+	return 1;
+}
+
+static int apply_config(struct audio_voice_engine *e,
+                        const struct audio_voice_cmd *c)
 {
 	if (c->flags == 0U || (c->flags & ~AUDIO_VOICE_CONFIG_KNOWN) != 0U) {
 		e->rejected++;
-		return;
+		return 0;
 	}
 	if ((c->flags & AUDIO_VOICE_CONFIG_INTERP) != 0U) {
 		/* The default interpolation is a record of its own. Voices that
@@ -348,45 +446,50 @@ static void apply_config(struct audio_voice_engine *e,
 		    c->arg0 < AUDIO_VOICE_INTERP_MODE_NEAREST ||
 		    c->arg0 > AUDIO_VOICE_INTERP_MODE_CUBIC || c->arg1 != 0U) {
 			e->rejected++;
-			return;
+			return 0;
 		}
 		sync_all(e, e->chunk_off);
 		e->interp = c->arg0 - AUDIO_VOICE_INTERP_MODE_NEAREST;
-		return;
+		return 0;
 	}
+	if ((c->flags & AUDIO_VOICE_CONFIG_OVERSAMPLE) != 0U)
+		return set_oversample(e, c);
 	if (((c->flags & AUDIO_VOICE_CONFIG_RAMP) != 0U &&
 	     c->arg0 > AUDIO_VOICE_RAMP_MAX_FRAMES) ||
 	    ((c->flags & AUDIO_VOICE_CONFIG_LIMITER) != 0U &&
 	     (c->arg1 > 1U ||
 	      ((c->flags & AUDIO_VOICE_CONFIG_RAMP) == 0U && c->arg0 != 0U)))) {
 		e->rejected++;
-		return;
+		return 0;
 	}
 	if ((c->flags & AUDIO_VOICE_CONFIG_RAMP) != 0U)
 		e->ramp_frames = c->arg0;
 	if ((c->flags & AUDIO_VOICE_CONFIG_LIMITER) != 0U)
 		limiter_change(e, e->chunk_off, c->arg1);
+	return 0;
 }
 
-static void apply(struct audio_voice_engine *e,
-                  const struct audio_voice_cmd *c)
+/* Apply one record at the frame chunk_off of the chunk. Returns 1 when the
+ * record ended the chunk there (CONFIG OVERSAMPLE): the caller then starts a
+ * new chunk at the record's frame. */
+static int apply(struct audio_voice_engine *e,
+                 const struct audio_voice_cmd *c)
 {
 	const uint32_t off = e->chunk_off;
 	struct audio_voice *v;
-	const uint32_t ramp = e->ramp_frames;
+	const uint32_t ramp = ramp_len(e);
 
 	if (c->op == AUDIO_VOICE_OP_MASTER) {
 		master_change(e, off, c->arg0 > AUDIO_VOICE_MASTER_MAX ?
 		              AUDIO_VOICE_MASTER_MAX : c->arg0);
-		return;
+		return 0;
 	}
 	if (c->op == AUDIO_VOICE_OP_CONFIG) {
-		apply_config(e, c);
-		return;
+		return apply_config(e, c);
 	}
 	if (c->voice >= AUDIO_VOICE_MAX_VOICES) {
 		e->rejected++;
-		return;
+		return 0;
 	}
 	v = &e->voice[c->voice];
 	/* The record acts on the voice as it is at its frame. */
@@ -444,6 +547,7 @@ static void apply(struct audio_voice_engine *e,
 		e->rejected++;
 		break;
 	}
+	return 0;
 }
 
 /*
@@ -2471,6 +2575,224 @@ static void av_zero(void *p, size_t bytes)
 #endif
 
 /*
+ * ---- Oversampled output ----
+ *
+ * With CONFIG OVERSAMPLE the chunk's sums hold two mixed frames per output
+ * frame (see "Oversampling" in audio_voice.h). Finishing a stretch of them
+ * scales the sums by the master in place, in 64 bits and without a clamp,
+ * and decimates by two with the half-band FIR of audio_reduce_table.h on
+ * the 32-bit values with a 64-bit accumulator: the largest tap sum, 1.77 *
+ * 2^30, times a 32-bit sum bounded by 2^30 (see the master bounds above)
+ * stays below 2^61. Output k takes the window of 59 mixed frames whose
+ * newest is the second of its pair, so the centre tap is on the first frame
+ * of the pair 14 frames earlier. Only then does the limiter or the clamp
+ * make S16, once.
+ *
+ * A stretch always begins and ends on a pair: records apply at a pair's
+ * first frame and a chunk holds whole pairs. The history is the 57 mixed
+ * frames before the stretch (a window reaches 57 frames before its pair).
+ * When the sums were never touched the input is zero, and with a zero
+ * history so is the output, which is then written without the filter.
+ */
+typedef char av_dec_history_fits[
+	(AUDIO_VOICE_DEC_HISTORY == AUDIO_REDUCE_TAPS - 2U) ? 1 : -1];
+typedef char av_dec_delay_fits[
+	(AUDIO_VOICE_OVERSAMPLE_DELAY_FRAMES == (AUDIO_REDUCE_TAPS - 1U) / 4U) ?
+	1 : -1];
+typedef char av_dec_chunk_even[(AUDIO_VOICE_MIX_FRAMES % 2U == 0U) ? 1 : -1];
+
+/* The sum of two taps' inputs stays inside int32: a wide sum after the
+ * master is at most the cubic bound of av_cubic_sum_after_master_fits. */
+typedef char av_dec_pair_fits[
+	((((int64_t)(AUDIO_VOICE_MAX_VOICES + AUDIO_VOICE_FADE_SLOTS) *
+	   AV_CUBIC_PEAK * AUDIO_VOICE_MASTER_MAX) >> 8) * 2 < 2147483648LL) ?
+	1 : -1];
+
+AV_INLINE int32_t dec_sat(int64_t v)
+{
+	return (int32_t)(v > 2147483647LL ? 2147483647LL :
+	                 v < -2147483647LL ? -2147483647LL : v);
+}
+
+/*
+ * Output j of one side: the window of 59 sums whose newest is frame 2j + 1
+ * of x, the frames before the start of x taken from the history h. Rounded
+ * half up like audio_reduce_run().
+ */
+AV_INLINE int32_t dec_value(const int32_t *x, const int32_t *h, uint32_t j)
+{
+	const uint32_t hist = AUDIO_VOICE_DEC_HISTORY;
+	const uint32_t centre = (AUDIO_REDUCE_TAPS - 1U) / 2U;
+	int32_t win[AUDIO_REDUCE_TAPS];
+	const int32_t *w;
+	int64_t acc;
+	uint32_t i;
+
+	if (2U * j >= hist) {
+		w = x + (2U * j - hist);
+	} else {
+		for (i = 0; i < AUDIO_REDUCE_TAPS; i++) {
+			/* index into x of window slot i, negative before it */
+			const int32_t idx = (int32_t)(2U * j + i) - (int32_t)hist;
+
+			win[i] = idx < 0 ? h[(int32_t)hist + idx] : x[idx];
+		}
+		w = win;
+	}
+	acc = (int64_t)AUDIO_REDUCE_CENTRE * w[centre];
+	for (i = 0U; i < AUDIO_REDUCE_SIDES; i++)
+		acc += (int64_t)audio_reduce_side[i] *
+		       (w[centre - (2U * i + 1U)] + w[centre + (2U * i + 1U)]);
+	return dec_sat((acc + ((int64_t)1 << (AUDIO_REDUCE_Q - 1))) >>
+	               AUDIO_REDUCE_Q);
+}
+
+#ifdef __ARM_NEON
+/*
+ * Outputs j .. j + 3 of one side, all four windows inside x (j >= 29 and
+ * 2j + 7 below the end). The even frames of x are the centre taps and the
+ * odd frames the side taps, so with the two kinds split by vld2 the four
+ * windows are four consecutive lanes: output j takes the centre at even
+ * frame j - 14 and the side pair at odd frames j - 14 + i and j - 15 - i.
+ */
+AV_INLINE void dec_block4(const int32_t *x, uint32_t j, int32_t *res)
+{
+	const int32_t *const p = x + 2U * (j - 14U);
+	const int32x4_t centre = vld2q_s32(p).val[0];
+	int64x2_t lo = vmull_n_s32(vget_low_s32(centre), AUDIO_REDUCE_CENTRE);
+	int64x2_t hi = vmull_n_s32(vget_high_s32(centre), AUDIO_REDUCE_CENTRE);
+	uint32_t i;
+
+	for (i = 0U; i < AUDIO_REDUCE_SIDES; i++) {
+		const int32x4_t a = vld2q_s32(p + 2U * i).val[1];
+		const int32x4_t b = vld2q_s32(p - 2U * (i + 1U)).val[1];
+		const int32x4_t s = vaddq_s32(a, b);
+
+		lo = vmlal_n_s32(lo, vget_low_s32(s), audio_reduce_side[i]);
+		hi = vmlal_n_s32(hi, vget_high_s32(s), audio_reduce_side[i]);
+	}
+	vst1q_s32(res, vcombine_s32(vqrshrn_n_s64(lo, AUDIO_REDUCE_Q),
+	                            vqrshrn_n_s64(hi, AUDIO_REDUCE_Q)));
+}
+#endif
+
+/* Scale n sums in place by the master, as finish() does before its clamp. */
+AV_NOINLINE void scale_wide(int32_t *x, uint32_t n, uint32_t master,
+                            uint32_t narrow)
+{
+	uint32_t i;
+
+	if (master == AUDIO_VOICE_MASTER_UNITY)
+		return;
+	if (master <= narrow) {
+		for (i = 0; i < n; i++)
+			x[i] = (x[i] * (int32_t)master) >> 8;
+	} else {
+		for (i = 0; i < n; i++)
+			x[i] = (int32_t)(((int64_t)x[i] * (int64_t)master) >> 8);
+	}
+}
+
+/* The final stage on one filter output. */
+AV_INLINE int16_t dec_out(int32_t v, int limited)
+{
+	return limited ? limit_sample(v) : clamp16(v);
+}
+
+/* Decimate the n sums (n even) of both sides that follow their histories
+ * into n / 2 interleaved stereo frames at out. */
+AV_NOINLINE void dec_run(const int32_t *xl, const int32_t *xr,
+                         const int32_t *hl, const int32_t *hr, uint32_t n,
+                         int16_t *out, int limited)
+{
+	const uint32_t outs = n / 2U;
+	/* the first output whose window lies inside x */
+	const uint32_t inside = AUDIO_VOICE_DEC_HISTORY / 2U + 1U;
+	uint32_t j = 0;
+
+	for (; j < outs && j < inside; j++) {
+		out[2U * j] = dec_out(dec_value(xl, hl, j), limited);
+		out[2U * j + 1U] = dec_out(dec_value(xr, hr, j), limited);
+	}
+#ifdef __ARM_NEON
+	for (; j + 4U <= outs; j += 4U) {
+		int32_t l[4], r[4];
+
+		dec_block4(xl, j, l);
+		dec_block4(xr, j, r);
+		if (!limited) {
+			int16x4x2_t o;
+
+			o.val[0] = vqmovn_s32(vld1q_s32(l));
+			o.val[1] = vqmovn_s32(vld1q_s32(r));
+			vst2_s16(out + 2U * j, o);
+		} else {
+			uint32_t k;
+
+			for (k = 0; k < 4U; k++) {
+				out[2U * (j + k)] = limit_sample(l[k]);
+				out[2U * (j + k) + 1U] = limit_sample(r[k]);
+			}
+		}
+	}
+#endif
+	for (; j < outs; j++) {
+		out[2U * j] = dec_out(dec_value(xl, hl, j), limited);
+		out[2U * j + 1U] = dec_out(dec_value(xr, hr, j), limited);
+	}
+}
+
+/* The last AUDIO_VOICE_DEC_HISTORY mixed frames of the history and the n
+ * (even) sums x that follow it. */
+static void dec_keep(int32_t *h, const int32_t *x, uint32_t n)
+{
+	const uint32_t hist = AUDIO_VOICE_DEC_HISTORY;
+
+	if (n >= hist) {
+		memcpy(h, x + (n - hist), hist * sizeof(h[0]));
+	} else {
+		memmove(h, h + n, (hist - n) * sizeof(h[0]));
+		memcpy(h + (hist - n), x, n * sizeof(h[0]));
+	}
+}
+
+/* finish_range() of an oversampled chunk: from chunk_fin to `to`, both in
+ * mixed frames and even. */
+static void finish_range_os(struct audio_voice_engine *e, uint32_t to)
+{
+	const uint32_t from = e->chunk_fin;
+	const uint32_t n = to - from;
+	int16_t *const o = e->chunk_out + from;
+	const uint32_t hist = AUDIO_VOICE_DEC_HISTORY;
+
+	e->chunk_fin = to;
+	if (n == 0U)
+		return;
+	if (!e->chunk_dirty) {
+		if (e->dec_quiet >= hist) {
+			av_zero(o, n * sizeof(o[0]));
+			return;
+		}
+		av_zero(e->mix[0] + from, n * sizeof(e->mix[0][0]));
+		av_zero(e->mix[1] + from, n * sizeof(e->mix[1][0]));
+		e->dec_quiet += n;
+		if (e->dec_quiet > hist)
+			e->dec_quiet = hist;
+	} else {
+		const uint32_t narrow = e->chunk_cubic ? AV_MASTER_NARROW_CUBIC :
+		                                         AV_MASTER_NARROW;
+
+		scale_wide(e->mix[0] + from, n, e->master, narrow);
+		scale_wide(e->mix[1] + from, n, e->master, narrow);
+		e->dec_quiet = 0;
+	}
+	dec_run(e->mix[0] + from, e->mix[1] + from, e->dec_hist[0],
+	        e->dec_hist[1], n, o, e->limiter != 0U);
+	dec_keep(e->dec_hist[0], e->mix[0] + from, n);
+	dec_keep(e->dec_hist[1], e->mix[1] + from, n);
+}
+
+/*
  * ---- Rendering a chunk ----
  *
  * A render call is cut into chunks of up to AUDIO_VOICE_MIX_FRAMES frames,
@@ -2542,11 +2864,22 @@ static void sync_all(struct audio_voice_engine *e, uint32_t to)
 		sync_voice(e, &e->fade[k], to);
 }
 
+/* The output frames of the chunk. */
+static uint32_t chunk_frames(const struct audio_voice_engine *e)
+{
+	return e->chunk_n >> e->oversample;
+}
+
 /* Scale the sums of the frames from chunk_fin to `to` by the master into the
  * output; all voices must be mixed to `to`. */
 static void finish_range(struct audio_voice_engine *e, uint32_t to)
 {
 	const uint32_t from = e->chunk_fin;
+
+	if (e->oversample) {
+		finish_range_os(e, to);
+		return;
+	}
 
 	if (to > from) {
 		int16_t *o = e->chunk_out + 2U * from;
@@ -2589,11 +2922,11 @@ static void limiter_change(struct audio_voice_engine *e, uint32_t off,
 static void begin_chunk(struct audio_voice_engine *e, int16_t *out,
                         uint32_t base, uint32_t frames)
 {
-	const uint32_t left = frames - base;
+	const uint32_t left = (frames - base) << e->oversample;
 
 	e->chunk_n = left < AUDIO_VOICE_MIX_FRAMES ? left : AUDIO_VOICE_MIX_FRAMES;
 	e->chunk_out = out + 2U * base;
-	e->chunk_abs = e->frame + base;
+	e->chunk_abs = (e->frame + base) << e->oversample;
 	e->chunk_fin = 0;
 	e->chunk_dirty = 0;
 	e->chunk_cubic = 0;
@@ -2636,18 +2969,22 @@ size_t audio_voice_render(struct audio_voice_engine *e, int16_t *out,
 		/* A record out of order applies at the frame reached so far. */
 		if ((uint32_t)rel > at)
 			at = (uint32_t)rel;
-		while (at >= base + e->chunk_n) {
+		while (at >= base + chunk_frames(e)) {
 			end_chunk(e);
-			base += e->chunk_n;
+			base += chunk_frames(e);
 			begin_chunk(e, out, base, frames);
 		}
-		e->chunk_off = at - base;
-		apply(e, &cmds[used]);
+		e->chunk_off = (at - base) << e->oversample;
+		if (apply(e, &cmds[used])) {
+			/* CONFIG OVERSAMPLE ended the chunk at this record. */
+			base = at;
+			begin_chunk(e, out, base, frames);
+		}
 		used++;
 	}
 	for (;;) {
 		end_chunk(e);
-		base += e->chunk_n;
+		base += chunk_frames(e);
 		if (base >= frames)
 			break;
 		begin_chunk(e, out, base, frames);

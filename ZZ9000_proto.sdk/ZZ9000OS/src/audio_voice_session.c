@@ -261,6 +261,8 @@ static void publish_status(void)
 	wr32(block + AUDIO_VOICE_STATUS_OFF_POLL_GAP,
 	     ticks_to_us(g_s.poll_gap_max_ticks));
 	wr32(block + AUDIO_VOICE_STATUS_OFF_FEATURES, AUDIO_VOICE_FEATURES);
+	wr16(block + AUDIO_VOICE_STATUS_OFF_OUTPUT_DELAY,
+	     (uint16_t)audio_voice_output_delay(&g_engine));
 	if (g_s.shadow_valid && memcmp(g_s.shadow, block, sizeof(block)) == 0)
 		return;
 	memcpy(g_s.res.status, block, sizeof(block));
