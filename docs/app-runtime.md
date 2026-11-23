@@ -294,9 +294,13 @@ before it parks, so a message that lands in that gap is found by the next
 service pass. A queued message ends the wait before a pending stop does. Like
 every declared wait it keeps the record out of the 30-second stall and
 10-second stuck-call watchdogs. Input events go into a 64-entry event ring of
-the record when the pump runs; the ring drops the newest event and counts it
-when full, and the client counts events it could not post in
-`AAR_CB_EVENTS_DROPPED`. The runtime keeps at least 64 events.
+the record when the pump runs. When the ring is full, mouse motion is merged
+into one pending event (`dx` and `dy` summed while the buttons stay the same)
+that goes into the ring, ahead of anything newer, as soon as the app takes an
+event. A key, a click or a button change that finds the ring full is dropped
+and counted in the record's own `events_dropped`, and the client counts events
+it could not post in `AAR_CB_EVENTS_DROPPED`. The runtime keeps at least 64
+events.
 
 Core 0 does not wait for core 1. It publishes work and raises doorbell SGI 15
 only when `service_pending` changes from zero to one. Core 1 drains a bounded
