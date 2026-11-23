@@ -260,6 +260,7 @@ static void publish_status(void)
 	     ticks_to_us(g_s.margin_min_ticks));
 	wr32(block + AUDIO_VOICE_STATUS_OFF_POLL_GAP,
 	     ticks_to_us(g_s.poll_gap_max_ticks));
+	wr32(block + AUDIO_VOICE_STATUS_OFF_FEATURES, AUDIO_VOICE_FEATURES);
 	if (g_s.shadow_valid && memcmp(g_s.shadow, block, sizeof(block)) == 0)
 		return;
 	memcpy(g_s.res.status, block, sizeof(block));
@@ -350,8 +351,9 @@ static void decode_record(const volatile uint8_t *p)
 	cmd.flags = rd16(p + 6);
 	cmd.arg0 = rd32(p + 8);
 	cmd.arg1 = rd32(p + 12);
-	/* The grant limits the voices; master gain names no voice. */
-	if (cmd.op != AUDIO_VOICE_OP_MASTER && cmd.voice >= g_s.voices) {
+	/* The grant limits the voices; master gain and CONFIG name no voice. */
+	if (cmd.op != AUDIO_VOICE_OP_MASTER && cmd.op != AUDIO_VOICE_OP_CONFIG &&
+	    cmd.voice >= g_s.voices) {
 		g_s.extra_rejected++;
 		return;
 	}

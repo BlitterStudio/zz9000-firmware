@@ -86,6 +86,34 @@
 #define AUDIO_VOICE_STATUS_OFF_POLL_GAP 36U /* u32 */
 #define AUDIO_VOICE_STATUS_MARGIN_NONE  0xFFFFFFFFU
 
+/*
+ * Extended status. FEATURES is the features word, written in every status
+ * write; the SDK reads it as ZZ9KVoiceExtStatus. ACTIVE_MASK, ENDS and
+ * OUTPUT_DELAY are reserved for later units and stay zero.
+ */
+#define AUDIO_VOICE_STATUS_OFF_FEATURES     40U /* u32 */
+#define AUDIO_VOICE_STATUS_OFF_ACTIVE_MASK  44U /* u32 */
+#define AUDIO_VOICE_STATUS_OFF_ENDS         48U /* u32 */
+#define AUDIO_VOICE_STATUS_OFF_OUTPUT_DELAY 52U /* u16 */
+
+/* Feature bits, as ZZ9K_VOICE_FEATURE_* in the SDK's zz9k/voice.h. */
+#define AUDIO_VOICE_FEATURE_RAMP         0x0001U
+#define AUDIO_VOICE_FEATURE_LIMITER      0x0002U
+#define AUDIO_VOICE_FEATURE_CUBIC        0x0004U
+#define AUDIO_VOICE_FEATURE_VOICE_INTERP 0x0008U
+#define AUDIO_VOICE_FEATURE_OVERSAMPLE   0x0010U
+#define AUDIO_VOICE_FEATURE_ENVELOPE     0x0020U
+#define AUDIO_VOICE_FEATURE_EVENTS       0x0040U
+#define AUDIO_VOICE_FEATURE_CONFIG       0x0080U
+
+/*
+ * The features this firmware advertises. CONFIG is the record the engine
+ * handles. RAMP passed the U2 card gate; the measured loads and render
+ * times are recorded in sdk/docs/zz9k-voice.md, Hardware measurements.
+ */
+#define AUDIO_VOICE_FEATURES \
+	(AUDIO_VOICE_FEATURE_CONFIG | AUDIO_VOICE_FEATURE_RAMP)
+
 #define AUDIO_VOICE_STATE_CLOSED 0U
 #define AUDIO_VOICE_STATE_OPEN   1U /* open, no record yet */
 #define AUDIO_VOICE_STATE_LIVE   2U
