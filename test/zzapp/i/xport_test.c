@@ -1092,7 +1092,8 @@ static void test_event_ring(void)
     }
     CHECK(zzapp_xport_pump(rec) == 63);
     CHECK(zzapp_xport_event_pending(rec) == 63U);
-    /* The ring holds 64: one more fits, the next ones are dropped and counted. */
+    /* The ring holds 64: one more fits, the next ones are dropped and counted,
+     * except the mouse motion among them, which waits. */
     for (i = 63U; i < 70U; i++) {
         memset(&ev, 0, sizeof(ev));
         ev.type = (uint16_t)(1U + i % 7U);
@@ -1105,7 +1106,7 @@ static void test_event_ring(void)
     }
     CHECK(zzapp_xport_pump(rec) == 7);
     CHECK(zzapp_xport_event_pending(rec) == 64U);
-    CHECK(zzapp_xport_stats(rec)->events_dropped == 6U);
+    CHECK(zzapp_xport_stats(rec)->events_dropped == 5U);
     CHECK(zzapp_xport_cq_pending(rec) == 0);     /* a dropped event is still consumed */
     for (i = 0U; i < 64U; i++) {            /* the oldest 64, in order, intact */
         CHECK(zzapp_xport_take_event(rec, &got) == 1);
@@ -1113,6 +1114,12 @@ static void test_event_ring(void)
         CHECK(got.dx == (int16_t)(i - 30) && got.dy == (int16_t)(-(int)i));
         CHECK(got.buttons == (uint16_t)(i * 3U) && got.time_ms == 1000U + i);
     }
+    /* The mouse event (index 65) that found the ring full waited and went in
+     * behind the others; the other five were dropped. */
+    CHECK(zzapp_xport_take_event(rec, &got) == 1);
+    CHECK(got.type == AAR_EV_MOUSE && got.code == 0x40U + 65U);
+    CHECK(got.dx == 35 && got.dy == -65 && got.buttons == 195U &&
+          got.time_ms == 1065U);
     CHECK(zzapp_xport_take_event(rec, &got) == 0);
     /* The free-running event counters pass 2^32 without trouble. */
     rec->xport.ev_head = rec->xport.ev_tail = 0xFFFFFFFEU;

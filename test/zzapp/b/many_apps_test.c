@@ -145,8 +145,11 @@ static void refusal(int tables)
     rt_claim(0); consume_tables = tables;
     rt_pass_hook = table_hook;
     assert(rt_load(0, tables ? 1 : 2) == SDK_STATUS_NO_MEMORY);
-    /* The refusal is the reply of the failing op: the reason alone. */
-    assert(rt_last_reply_len == ZZAPP_REFUSAL_REPLY_BYTES);
+    /* The refusal is the reply of the failing op: the reason, then the
+     * AAR_E_NOMEM code. */
+    assert(rt_last_reply_len == ZZAPP_REFUSAL_CODE_REPLY_BYTES);
+    assert(zzapp_get_be32(rt_last_reply + ZZAPP_REFUSAL_CODE) ==
+           (uint32_t)-AAR_E_NOMEM);
     assert(zzapp_get_be32(rt_last_reply + ZZAPP_REFUSAL_REASON) ==
            (tables ? AAR_REASON_TABLES : AAR_REASON_MEMORY));
     assert(!consume_tables);

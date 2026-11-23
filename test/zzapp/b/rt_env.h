@@ -56,7 +56,7 @@ static void rt_image(uint8_t image[RT_IMAGE_BYTES], uint32_t heap_mib)
     memcpy(image, "\177ELF\1\1\1", 7);
     rt_put16(image + 16, 3); rt_put16(image + 18, 40);
     rt_put32(image + 24, RT_LOAD_OFF); rt_put32(image + 28, 52);
-    rt_put32(image + 32, 0x180); rt_put32(image + 36, 0x400);
+    rt_put32(image + 32, 0x180); rt_put32(image + 36, 0x05000400);
     rt_put16(image + 40, 52); rt_put16(image + 42, 32);
     rt_put16(image + 44, 2); rt_put16(image + 46, 40); rt_put16(image + 48, 1);
     ph = image + 52;

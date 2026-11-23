@@ -112,6 +112,7 @@ struct aar_gl;
 int zzapp_loader_begin(void);
 int zzapp_loader_chunk(uint32_t file_off, const void *src, uint32_t len);
 int zzapp_loader_end(void);
+uint32_t zzapp_loader_card(void);
 int zzapp_loader_abort(void);
 int zzapp_loader_set_generation(uint32_t generation);
 int zzapp_loader_alloc_back(uint32_t bytes, uint32_t *addr_out);
@@ -294,6 +295,8 @@ int zzapp_svc_display_open(uint32_t w, uint32_t h, uint32_t format,
 int zzapp_svc_display_flip(uint32_t surface_id);
 int zzapp_svc_display_flip_async(uint32_t surface_id);
 int zzapp_display_flip_idle(void);
+/* The id of the app's open display, 0 without one. */
+uint32_t zzapp_display_id(void);
 int zzapp_svc_display_refresh(struct aar_surface *out);
 int zzapp_svc_display_set_palette(uint32_t surface_id, uint32_t first,
                                   uint32_t count, const uint32_t *rgb);

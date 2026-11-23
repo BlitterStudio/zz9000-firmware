@@ -1007,6 +1007,11 @@ __attribute__((weak)) int zzapp_loader_end(void)
 		AAR_E_NOSYS;
 }
 
+__attribute__((weak)) uint32_t zzapp_loader_card(void)
+{
+	return 0U;
+}
+
 __attribute__((weak)) int zzapp_loader_abort(void)
 {
 	service_test_loader_abort_count++;
@@ -1064,15 +1069,21 @@ uint32_t zzapp_services_state(void)
 }
 
 /* The stop latched on the record (by the host: STOP, RELEASE, lease, cancel)
- * or asked for by the client in its control block word. */
+ * or asked for by the client in its control block word. A word seen by a
+ * wait that ends on it is latched on the record too, so aar_should_stop()
+ * reads true as soon as the wait returns, without waiting for the tick. */
 static int stop_requested_rec(zzapp_rec_t *rec)
 {
 	if (!rec)
 		return 0;
 	if (__atomic_load_n(&rec->host.stop_requested, __ATOMIC_ACQUIRE) != 0U)
 		return 1;
-	return zzapp_xport_live(rec) &&
-	       zzapp_xport_cb_read_client(rec, AAR_CB_STOP_REQUEST) != 0U;
+	if (zzapp_xport_live(rec) &&
+	    zzapp_xport_cb_read_client(rec, AAR_CB_STOP_REQUEST) != 0U) {
+		zzapp_host_latch_stop(rec->hdr.pid);
+		return 1;
+	}
+	return 0;
 }
 
 int zzapp_services_stop_requested(void)
@@ -2230,6 +2241,9 @@ int zzapp_svc_event_poll(aar_event *out, uint32_t max, uint32_t *out_n)
 	*out_n = 0U;
 	if (max != 0U && !out)
 		return AAR_E_INVAL;
+	/* The client's stop word is a request: latch it so its event is queued
+	 * now and not at the next tick. */
+	(void)stop_requested_rec(rec);
 	if (n < max && zzapp_host_take_stop_event &&
 	    zzapp_host_take_stop_event(slot)) {
 		memset(&out[n], 0, sizeof(out[n]));
@@ -2253,8 +2267,10 @@ int zzapp_svc_event_poll(aar_event *out, uint32_t max, uint32_t *out_n)
 	}
 	while (n < max && zzapp_xport_take_event(rec, &out[n]) == 1) {
 		/* The client's own stop event is the delivery of the request;
-		 * a second one for the same request is dropped. */
-		if (out[n].type == AAR_EV_STOP &&
+		 * a second one for the same request is dropped. A stop event
+		 * with no stop requested delivers nothing: the real request
+		 * still gets its event. */
+		if (out[n].type == AAR_EV_STOP && stop_requested_rec(rec) &&
 		    zzapp_host_note_stop_event_delivered &&
 		    zzapp_host_note_stop_event_delivered(slot))
 			continue;
@@ -2862,6 +2878,13 @@ int zzapp_display_layout(uint32_t *layout)
 		return AAR_E_INVAL;
 	*layout = current_runtime()->display_layout;
 	return AAR_OK;
+}
+
+uint32_t zzapp_display_id(void)
+{
+	struct zzapp_service_runtime *state = current_runtime();
+
+	return state->display_bound ? state->display_id : 0U;
 }
 
 static uint32_t display_alias(uint32_t physical)
@@ -3562,6 +3585,23 @@ static uint64_t audio_produced_frames(uint32_t write_frame, uint64_t staged_byte
 	return staged_frames + (uint32_t)(write_frame - (uint32_t)staged_frames);
 }
 
+/* The runtime counts a played underrun in the ring header (spec 8.4): the
+ * word at AAR_AUDIO_RING_UNDERRUNS, the runtime's own, beside read_frame. The
+ * ring is normal write-back shareable memory that the client reads through
+ * the ACP, so a plain store is enough (docs/app-runtime.md, host-visible
+ * memory). The caller holds the slot-state lock; the ring is little-endian. */
+_Static_assert(AAR_AUDIO_RING_UNDERRUNS == AAR_AUDIO_RING_READ_FRAME + 4U,
+	       "the underrun word follows read_frame");
+static void audio_note_underrun(struct zzapp_service_runtime *state)
+{
+	volatile uint32_t *word;
+
+	if (!state->audio_read_frame)
+		return;
+	word = state->audio_read_frame + 1;
+	*word = *word + 1U;
+}
+
 #ifndef ZZAPP_HOST_TEST
 static uint32_t runtime_pid(const struct zzapp_service_runtime *state)
 {
@@ -3710,18 +3750,18 @@ void audio_fabric_starvation_event(uint32_t producer_slot)
 
 static void app_audio_underrun_for(uint32_t producer_slot)
 {
-#if ZZAPP_PERF_COUNTERS
 	struct zzapp_service_runtime *state;
 
 	slot_state_lock_acquire();
 	state = audio_runtime(producer_slot);
-	if (state)
+	if (state) {
+		audio_note_underrun(state);
+#if ZZAPP_PERF_COUNTERS
 		zzapp_kernel_perf_audio(zzapp_runtime_kernel(),
 					runtime_pid(state), 0U, 0U, 1U);
-	slot_state_lock_release();
-#else
-	(void)producer_slot;
 #endif
+	}
+	slot_state_lock_release();
 }
 
 static void app_audio_underrun_mailbox(void)
@@ -4546,13 +4586,24 @@ static int finish_deferred(zzapp_rec_t *rec, int rc, uint32_t publish_state)
 	defer->status = zz_to_sdk(rc);
 	if (rc != AAR_OK) {
 		defer->reply_len = 0U;
-		/* A refused load names the reason alone (ZZAPP_REFUSAL_REASON). */
-		if ((defer->opcode == ZZAPP_OP_LOAD_BEGIN ||
-		     defer->opcode == ZZAPP_OP_LOAD_END) &&
-		    rec->claim.refusal_reason != AAR_REASON_NONE) {
-			zzapp_put_be32(defer->reply + ZZAPP_REFUSAL_REASON,
-				       rec->claim.refusal_reason);
-			defer->reply_len = ZZAPP_REFUSAL_REPLY_BYTES;
+		/* A refused load names the reason and, for the codes the status
+		 * cannot tell apart, the AAR_E_* code (ZZAPP_REFUSAL_CODE). */
+		if (defer->opcode == ZZAPP_OP_LOAD_BEGIN ||
+		    defer->opcode == ZZAPP_OP_LOAD_END) {
+			uint32_t code = (rc == AAR_E_INVAL || rc == AAR_E_NOMEM ||
+					 rc == AAR_E_PROFILE || rc == AAR_E_NOGROUP)
+				? (uint32_t)-rc : 0U;
+
+			if (rec->claim.refusal_reason != AAR_REASON_NONE || code) {
+				zzapp_put_be32(defer->reply + ZZAPP_REFUSAL_REASON,
+					       rec->claim.refusal_reason);
+				defer->reply_len = ZZAPP_REFUSAL_REPLY_BYTES;
+			}
+			if (code) {
+				zzapp_put_be32(defer->reply + ZZAPP_REFUSAL_CODE,
+					       code);
+				defer->reply_len = ZZAPP_REFUSAL_CODE_REPLY_BYTES;
+			}
 		}
 	}
 	if (publish_state == ZZAPP_ST_LOADING)
@@ -4702,6 +4753,11 @@ static void run_deferred(zzapp_rec_t *rec)
 			reject_reason = "note profile is not A32";
 		else if (rc == AAR_E_NOGROUP)
 			reject_reason = "note requires a group this runtime lacks";
+		if (rc == AAR_OK)
+			/* The card address of image offset 0, which fault_pc less
+			 * load_base is relative to. */
+			zzapp_xport_cb_put64(rec, AAR_CB_LOAD_BASE_HI,
+					     zzapp_loader_card());
 		/* A failed LOAD_END ends the claim: the loader dropped its
 		 * frames and staging, and the record goes through retire. */
 		if (rc != AAR_OK)
@@ -5180,6 +5236,12 @@ static void stop_record(zzapp_rec_t *rec)
 			return;
 		}
 	}
+	/* RUNNING reads STOPPING from the stop request on (spec 5.1); the
+	 * teardown ends in IDLE. */
+	if (rec->claim.state == ZZAPP_ST_RUNNING) {
+		rec->claim.state = ZZAPP_ST_STOPPING;
+		cb_publish_state(rec, ZZAPP_ST_STOPPING);
+	}
 	zzapp_host_latch_stop(pid);
 	slot_state_lock_release();
 }
@@ -5495,5 +5557,11 @@ uint32_t zzapp_services_test_audio_request(void)
 uint32_t zzapp_services_test_audio_detach_count(void)
 {
 	return test_runtime()->audio_detach_count;
+}
+
+/* The fabric's underrun callback only exists on the card. */
+void zzapp_services_test_audio_underrun(void)
+{
+	audio_note_underrun(test_runtime());
 }
 #endif

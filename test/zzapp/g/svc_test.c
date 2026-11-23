@@ -1057,6 +1057,64 @@ static void test_gl_span_fallback_reference(void)
     teardown_dispatch();
 }
 
+/* A client-array pointer is validated when the array is drawn, not when it is
+ * set: a bad pointer reaches the module, the draw is refused with
+ * AAR_E_FAULT and glGetError says GL_INVALID_VALUE once. */
+static void test_gl_bad_array_pointer_fails_at_draw(void)
+{
+    zzapp_svc_frame_t frame;
+    uint32_t extra_va;
+    unsigned bad = 0U;
+
+#define ARRAY_CHECK(expr) do { checks++; if (!(expr)) { failures++; bad++; \
+    printf("FAIL %s:%d: %s\n", __FILE__, __LINE__, #expr); } } while (0)
+    setup_dispatch();
+    if (!user_page) {
+        teardown_dispatch();
+        return;
+    }
+    dispatch(api_slot(offsetof(aar_api, gl_bind)), &frame, (uint32_t[9]){ 1U });
+    dispatch(ZZAPP_SVC_GL_FIRST + gl_slot(offsetof(aar_gl, VertexPointer)),
+             &frame, (uint32_t[9]){ 3U, 0x1406U, 0U, 0x10U });
+    ARRAY_CHECK(vertex_pointer_calls == 1U);
+    dispatch(ZZAPP_SVC_GL_FIRST + gl_slot(offsetof(aar_gl, EnableClientState)),
+             &frame, (uint32_t[9]){ 0x8074U });
+    dispatch(ZZAPP_SVC_GL_FIRST + gl_slot(offsetof(aar_gl, GetError)),
+             &frame, (uint32_t[9]){ 0U });
+    ARRAY_CHECK(frame.r[0] == 0U);             /* setting it is no error */
+    dispatch(ZZAPP_SVC_GL_FIRST + gl_slot(offsetof(aar_gl, DrawArrays)),
+             &frame, (uint32_t[9]){ 4U, 0U, 3U });
+    ARRAY_CHECK(draw_arrays_calls == 0U);
+    ARRAY_CHECK(frame.r[0] == (uint32_t)AAR_E_FAULT);
+    dispatch(ZZAPP_SVC_GL_FIRST + gl_slot(offsetof(aar_gl, GetError)),
+             &frame, (uint32_t[9]){ 0U });
+    ARRAY_CHECK(frame.r[0] == 0x0501U);        /* GL_INVALID_VALUE */
+    dispatch(ZZAPP_SVC_GL_FIRST + gl_slot(offsetof(aar_gl, GetError)),
+             &frame, (uint32_t[9]){ 0U });
+    ARRAY_CHECK(frame.r[0] == 0U);             /* read once */
+
+    /* A range that starts in mapped memory and runs past its end: the first
+     * vertex is drawn, the second is not. */
+    ARRAY_CHECK(zzapp_as_alias_map(&proc.as, 0x02001000U, 4096U, 1,
+                                   &extra_va) == AAR_OK);
+    dispatch(ZZAPP_SVC_GL_FIRST + gl_slot(offsetof(aar_gl, VertexPointer)),
+             &frame, (uint32_t[9]){ 3U, 0x1406U, 0U, extra_va + 4096U - 12U });
+    dispatch(ZZAPP_SVC_GL_FIRST + gl_slot(offsetof(aar_gl, DrawArrays)),
+             &frame, (uint32_t[9]){ 4U, 0U, 1U });
+    ARRAY_CHECK(draw_arrays_calls == 1U);
+    dispatch(ZZAPP_SVC_GL_FIRST + gl_slot(offsetof(aar_gl, DrawArrays)),
+             &frame, (uint32_t[9]){ 4U, 0U, 2U });
+    ARRAY_CHECK(draw_arrays_calls == 1U);
+    ARRAY_CHECK(frame.r[0] == (uint32_t)AAR_E_FAULT);
+    dispatch(ZZAPP_SVC_GL_FIRST + gl_slot(offsetof(aar_gl, GetError)),
+             &frame, (uint32_t[9]){ 0U });
+    ARRAY_CHECK(frame.r[0] == 0x0501U);
+    ARRAY_CHECK(zzapp_as_alias_unmap(&proc.as, extra_va, 4096U) == AAR_OK);
+    printf("svc_test: bad array pointer: %u failures\n", bad);
+#undef ARRAY_CHECK
+    teardown_dispatch();
+}
+
 static void test_gl_lock_calls_stay_kernel_side(void)
 {
     zzapp_svc_frame_t frame;
@@ -1993,6 +2051,7 @@ int main(void)
     test_pointer_checks();
     test_large_and_section_pointer_checks();
     test_gl_span_validation();
+    test_gl_bad_array_pointer_fails_at_draw();
     test_gl_span_fallback_reference();
     test_gl_lock_calls_stay_kernel_side();
     test_descriptors_cover_callable_slots();

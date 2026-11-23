@@ -130,7 +130,7 @@ static void make_image(uint8_t image[IMAGE_BYTES], uint32_t heap_mib)
     put16(image + 18, 40);                /* EM_ARM */
     put32(image + 24, LOAD_OFF);
     put32(image + 28, PHOFF);
-    put32(image + 36, 0x400);             /* hard-float */
+    put32(image + 36, 0x05000400);       /* EABI 5, hard-float */
     put16(image + 40, 52);
     put16(image + 42, 32);
     put16(image + 44, 3);

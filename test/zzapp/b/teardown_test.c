@@ -84,6 +84,11 @@ static void app_entry(const aar_api *api)
     case TEARDOWN_STOP:
         /* The client asks, and the app does not leave: forced after grace. */
         assert(rt_simple(1U, ZZAPP_OP_STOP) == SDK_STATUS_OK);
+        /* STOPPING from the request on, with no end reason until the
+         * teardown: a client may leave on the reason, not on the state
+         * (the serving loop waits for the forced end). */
+        assert(RT_STATE(1U) == AAR_STATE_STOPPING);
+        assert(RT_REASON(1U) == AAR_END_NONE);
         zzapp_host_tick_at(1U);
         zzapp_host_tick_at(ZZAPP_STOP_GRACE_US + 1U);
         break;

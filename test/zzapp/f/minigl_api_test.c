@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
 #include <assert.h>
 #include <stdint.h>
+#include <stdio.h>
 #include <string.h>
 
 #include "aar/app.h"
@@ -41,6 +42,14 @@ static uint32_t g_render_pixel;
 static uint32_t g_present_pixel;
 static int g_flips;
 static uint32_t g_bind_flags;
+static uint32_t g_display_id;
+
+/* The id of the app's open display, 0 without one. */
+uint32_t zzapp_display_id(void)
+{
+    return g_display_id;
+}
+
 static unsigned g_telemetry_resets;
 static unsigned g_telemetry_swaps;
 static unsigned g_telemetry_reports;
@@ -233,14 +242,18 @@ int main(void)
     reset_module();
     api = zzapp_api_table();
 
+    g_display_id = 7u;
+
     assert(zzapp_minigl_bind(7u, &gl) == AAR_E_NOSYS);
     assert(gl == NULL);
+    g_display_id = 7u;
     assert(api->gl_bind(7u) == NULL);
     assert(g_acquires == 2);
     assert(g_releases == 0);
 
     g_available = 1;
     g_ops.version++;
+    g_display_id = 7u;
     assert(api->gl_bind(7u) == NULL);
     assert(g_acquires == 3);
     assert(g_releases == 1);
@@ -249,6 +262,7 @@ int main(void)
 
     zzapp_kernel_set_current_thread(0);
     g_available = 1;
+    g_display_id = 41u;
     gl = api->gl_bind(41u);
     assert(gl == &g_gl);
     assert(g_binds == 1);
@@ -281,16 +295,45 @@ int main(void)
     ext = (const aar_ext_zz9000 *)api->ext(AAR_PLATFORM_ZZ9000,
                                            AAR_EXT_ZZ9000_MAIN);
     assert(ext != NULL && AAR_EXT_ZZ9000_COVERS(ext, gl_bind_flags));
+    g_display_id = 42u;
     gl = ext->gl_bind_flags(42u, AAR_ZZ9000_GL_BIND_DIRECT_PRESENT);
     assert(gl == &g_gl);
     assert(g_bind_flags == AAR_ZZ9000_GL_BIND_DIRECT_PRESENT);
     api->gl_unbind();
+
+    /* Only the app's open display can be bound. Another id, an id that names
+     * nothing and 0 are refused with no table, no module context and no GL
+     * slot taken, so the right id binds next, not BUSY. */
+    {
+        int binds = g_binds, acquires = g_acquires;
+        unsigned bad = 0u;
+
+#define BIND_CHECK(expr) do { if (!(expr)) { bad++; printf("bind: %s\n", #expr); } } while (0)
+        g_display_id = 5u;
+        gl = &g_gl;
+        zzapp_api_enter();
+        BIND_CHECK(zzapp_minigl_bind(6u, &gl) == AAR_E_INVAL && gl == NULL);
+        gl = &g_gl;
+        BIND_CHECK(zzapp_minigl_bind(0xFFFFFFFFu, &gl) == AAR_E_INVAL && gl == NULL);
+        BIND_CHECK(zzapp_minigl_bind(0u, &gl) == AAR_E_INVAL && gl == NULL);
+        zzapp_api_leave();
+        BIND_CHECK(api->gl_bind(6u) == NULL);
+        BIND_CHECK(ext->gl_bind_flags(6u, 0u) == NULL);
+        BIND_CHECK(g_binds == binds && g_acquires == acquires);
+        BIND_CHECK(api->gl_bind(5u) == &g_gl);
+        BIND_CHECK(g_binds == binds + 1 && g_surface_id == 5u);
+        api->gl_unbind();
+#undef BIND_CHECK
+        printf("minigl_api: bind: %u failures\n", bad);
+        assert(bad == 0u);
+    }
 
     card = 0;
     assert(zzapp_loader_begin() == AAR_OK);
     card = zzapp_test_arena_card();
     assert(card != 0u);
     zzapp_test_mark_running();
+    g_display_id = 99u;
     assert(api->gl_bind(99u) == &g_gl);
     assert(g_ops.open_68k(&g_context, NULL, &card) == AAR_OK);
     assert(g_68k_open);
@@ -300,12 +343,13 @@ int main(void)
     assert(g_reclaim_generation != 0u);
     assert(g_68k_closes == 0);
     assert(g_68k_open);
-    assert(g_releases == 4);
+    assert(g_releases == 5);
 
     zzapp_boot_init();
     reset_module();
     g_available = 1;
     zzapp_test_mark_running();
+    g_display_id = 100u;
     assert(api->gl_bind(100u) == &g_gl);
     zzapp_on_amiga_reset();
     zzapp_worker_hook();
@@ -320,6 +364,7 @@ int main(void)
     reset_module();
     g_available = 1;
     zzapp_test_mark_running();
+    g_display_id = 101u;
     assert(api->gl_bind(101u) == &g_gl);
     assert(g_reclaims == 0);
     zzapp_minigl_forget();

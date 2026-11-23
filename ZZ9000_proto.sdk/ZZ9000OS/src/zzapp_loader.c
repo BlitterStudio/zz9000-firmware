@@ -32,8 +32,10 @@
 #define PF_X                   1u
 #define PF_W                   2u
 #define PF_R                   4u
-#define SHT_NOTE               7u
 #define R_ARM_RELATIVE         23u
+#define EF_ARM_EABIMASK        0xff000000u
+#define EF_ARM_EABI_VER5       0x05000000u
+#define EF_ARM_ABI_FLOAT_SOFT  0x200u
 #define EF_ARM_ABI_FLOAT_HARD  0x400u
 #define DT_NULL                0
 #define DT_NEEDED              1
@@ -45,6 +47,9 @@
 #define DT_REL                 17
 #define DT_RELSZ               18
 #define DT_RELENT              19
+#define DT_RELRSZ              35
+#define DT_RELR                36
+#define DT_RELRENT             37
 #define LOADER_REL_BYTES       8u
 #define LOADER_RELA_BYTES      12u
 /* Kind of a saved relocation, stored with it. */
@@ -1185,9 +1190,8 @@ static int note_scan(const uint8_t *note, uint32_t nlen, struct load_image *img,
     return AAR_OK;
 }
 
-static int find_note(struct load_image *img, const uint8_t *eh, uint16_t phnum,
-                     uint16_t phentsize, uint32_t phoff, uint16_t shnum,
-                     uint16_t shentsize, uint32_t shoff)
+static int find_note(struct load_image *img, uint16_t phnum,
+                     uint16_t phentsize, uint32_t phoff)
 {
     uint32_t found = 0u;
     uint16_t i;
@@ -1207,23 +1211,7 @@ static int find_note(struct load_image *img, const uint8_t *eh, uint16_t phnum,
         if (rc != AAR_OK)
             return rc;
     }
-    if (found == 0u && shoff && shnum) {
-        for (i = 0; i < shnum; i++) {
-            const uint8_t *sh = g_mem + shoff + (uint32_t)i * shentsize;
-            uint32_t type = rd32(sh + 4u);
-            uint32_t off = rd32(sh + 16u);
-            uint32_t size = rd32(sh + 20u);
-
-            (void)eh;
-            if (type != SHT_NOTE)
-                continue;
-            if (!range_ok(off, size, g_file_end))
-                return AAR_E_INVAL;
-            rc = note_scan(g_mem + off, size, img, &found);
-            if (rc != AAR_OK)
-                return rc;
-        }
-    }
+    /* No SHT_NOTE fallback: spec 2.2.7 puts the note in a PT_NOTE segment. */
     return found == 1u ? AAR_OK : AAR_E_INVAL;
 }
 
@@ -1292,6 +1280,11 @@ static int parse_dynamic(struct load_image *img, uint32_t off, uint32_t filesz)
         case DT_RELAENT:
             relaent = value;
             break;
+        case DT_RELR:
+        case DT_RELRSZ:
+        case DT_RELRENT:
+            /* Spec 2.2.5: packed relative relocations are refused in v1. */
+            return AAR_E_INVAL;
         default:
             break;
         }
@@ -1347,7 +1340,10 @@ static int parse_elf(struct load_image *img)
         return AAR_E_INVAL;
     if (rd16(eh + 16u) != ET_DYN || rd16(eh + 18u) != EM_ARM)
         return AAR_E_INVAL;
-    if ((rd32(eh + 36u) & EF_ARM_ABI_FLOAT_HARD) == 0u)
+    /* Spec 2.2.2: EABI version 5, hard float. */
+    if ((rd32(eh + 36u) & EF_ARM_EABIMASK) != EF_ARM_EABI_VER5 ||
+        (rd32(eh + 36u) & EF_ARM_ABI_FLOAT_HARD) == 0u ||
+        (rd32(eh + 36u) & EF_ARM_ABI_FLOAT_SOFT) != 0u)
         return AAR_E_INVAL;
     phoff = rd32(eh + 28u);
     shoff = rd32(eh + 32u);
@@ -1365,7 +1361,7 @@ static int parse_elf(struct load_image *img)
     if (shnum && !range_ok(shoff, (uint32_t)shnum * shentsize, g_file_end))
         return AAR_E_INVAL;
 
-    rc = find_note(img, eh, phnum, phentsize, phoff, shnum, shentsize, shoff);
+    rc = find_note(img, phnum, phentsize, phoff);
     if (rc != AAR_OK)
         return rc;
 
@@ -1449,6 +1445,18 @@ static int parse_elf(struct load_image *img)
     }
     img->entry = rd32(eh + 24u);
     if (img->entry >= ZZAPP_MEM_PRIVATE_WINDOW_BYTES - img->stack_bytes)
+        return AAR_E_INVAL;
+    /* Spec 2.2.6: inside an executable segment, and A32 entries are even. */
+    if ((img->entry & 1u) != 0u)
+        return AAR_E_INVAL;
+    for (i = 0; i < img->nseg; i++) {
+        const struct load_seg *seg = &img->seg[i];
+
+        if ((seg->flags & PF_X) && img->entry >= seg->vaddr &&
+            img->entry - seg->vaddr < seg->memsz)
+            break;
+    }
+    if (i == img->nseg)
         return AAR_E_INVAL;
     return AAR_OK;
 }

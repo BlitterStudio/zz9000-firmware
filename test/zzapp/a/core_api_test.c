@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
 #include <assert.h>
 #include <stdint.h>
+#include <stdio.h>
 #include <string.h>
 
 #include "sdk_audio_flac.h"
@@ -391,6 +392,34 @@ int main(void)
     assert(audio_result.frames_written == 1152u);
     assert(audio_result.rate == 44100u && audio_result.channels == 2u);
     assert(api->audio_decode_close(audio_session) == AAR_OK);
+
+    /* Session 0 names no session. An empty slot has id 0, so an unchecked
+     * lookup matched it: image_close(0) reached the codec, and
+     * audio_decode_close(0) released an empty slot and took one off the
+     * audio session count while a real session was open. */
+    {
+        uint32_t audio_before = zzapp_rec_by_pid(0U)->kernel.resources.audio_sessions;
+        uint32_t image_before = zzapp_rec_by_pid(0U)->kernel.resources.image_sessions;
+        uint32_t feeds = image_feed_calls, closes = image_close_calls;
+        uint32_t releases = audio_release_calls;
+        unsigned bad = 0u;
+
+#define SESSION0(expr) do { if (!(expr)) { bad++; printf("session 0: %s\n", #expr); } } while (0)
+        assert(audio_before != 0u && image_before != 0u);
+        SESSION0(api->image_close(0u) == AAR_E_INVAL);
+        SESSION0(api->image_decode(0u, source, sizeof(source), 0u,
+                                   &image_result) == AAR_E_INVAL);
+        SESSION0(api->audio_decode(0u, source, sizeof(source), 0u, pcm, 2u,
+                                   &audio_result) == AAR_E_INVAL);
+        SESSION0(api->audio_decode_close(0u) == AAR_E_INVAL);
+        SESSION0(zzapp_rec_by_pid(0U)->kernel.resources.audio_sessions == audio_before);
+        SESSION0(zzapp_rec_by_pid(0U)->kernel.resources.image_sessions == image_before);
+        SESSION0(image_feed_calls == feeds && image_close_calls == closes);
+        SESSION0(audio_release_calls == releases);
+#undef SESSION0
+        printf("core_api: session 0: %u failures\n", bad);
+        assert(bad == 0u);
+    }
 
     assert(api->audio_decode_open(AAR_AUDIO_FLAC, &audio_session) == AAR_OK);
     assert(api->audio_decode(audio_session, source, sizeof(source), 0u, pcm,

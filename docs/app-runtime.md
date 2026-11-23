@@ -243,8 +243,11 @@ takes a completion that landed with the stop first, and waiting service calls
 return `AAR_E_IO`. A sleeping thread is not a registered wait, so the system
 pass wakes it itself when its record has a stop latched, and a sleep begun
 with a stop already latched returns at once: the app returns from the call,
-reads `aar_should_stop()` true and has the stop grace to finish. A sleep ends
-early only on a stop. `aar_sleep_us(us)` lasts at least `us` microseconds of
+reads `aar_should_stop()` true and has the stop grace to finish. A parked call
+that ends on the client's stop word latches the stop on the record before it
+returns, so `aar_should_stop()` is true on return without waiting for the
+tick. A sleep ends early only on a stop. `aar_sleep_us(us)` lasts at least
+`us` microseconds of
 the `aar_time_us` clock and ends at the first look at the clock after that:
 the thread keeps a microsecond deadline, and every advance of the scheduler
 (a tick, a switch) and every pass of the system thread's loop compares it to
@@ -294,9 +297,13 @@ before it parks, so a message that lands in that gap is found by the next
 service pass. A queued message ends the wait before a pending stop does. Like
 every declared wait it keeps the record out of the 30-second stall and
 10-second stuck-call watchdogs. Input events go into a 64-entry event ring of
-the record when the pump runs; the ring drops the newest event and counts it
-when full, and the client counts events it could not post in
-`AAR_CB_EVENTS_DROPPED`. The runtime keeps at least 64 events.
+the record when the pump runs. When the ring is full, mouse motion is merged
+into one pending event (`dx` and `dy` summed while the buttons stay the same)
+that goes into the ring, ahead of anything newer, as soon as the app takes an
+event. A key, a click or a button change that finds the ring full is dropped
+and counted in the record's own `events_dropped`, and the client counts events
+it could not post in `AAR_CB_EVENTS_DROPPED`. The runtime keeps at least 64
+events.
 
 Core 0 does not wait for core 1. It publishes work and raises doorbell SGI 15
 only when `service_pending` changes from zero to one. Core 1 drains a bounded
@@ -465,11 +472,18 @@ touching them. Invalid, overflowed, read-only-for-output, device, and
 other-slot pointers return `AAR_E_FAULT`. Firmware code never becomes a
 user-call target.
 
-GL client-array state is per slot. `DrawArrays` validates every enabled vertex,
-colour, and client texture-coordinate element in its requested range.
-`DrawElements` also validates its index buffer and every indexed element before
-MiniGL is called. An unmapped or changed range returns `AAR_E_FAULT` and records
-`GL_INVALID_VALUE` for `glGetError`.
+`aar_gl_bind` and `gl_bind_flags` take the id of the app's open display
+(`aar_surface.id`). Any other id, including 0, returns `NULL` (`AAR_E_INVAL`
+inside the runtime) before the module is loaded or a GL slot is taken, so the
+bind that follows with the right id is not refused as busy.
+
+GL client-array state is per slot. `glVertexPointer`, `glColorPointer` and
+`glTexCoordPointer` record their pointer without checking it, so a bad pointer
+is no error at that call. `DrawArrays` validates every enabled vertex, colour,
+and client texture-coordinate element in its requested range. `DrawElements`
+also validates its index buffer and every indexed element before MiniGL is
+called. An unmapped or changed range, or a pointer that is 0, returns
+`AAR_E_FAULT` from the draw and records `GL_INVALID_VALUE` for `glGetError`.
 
 ### Frames, commit, and teardown
 
@@ -538,11 +552,21 @@ minor words (`ZZAPP_ABI_MAJOR`, `ZZAPP_ABI_MINOR`).
 **Groups.** `aar_api.groups` and `aar_info.groups` report the same mask:
 `AAR_GROUP_INPUT` and `AAR_GROUP_SERVICES` always, and `AAR_GROUP_DISPLAY`,
 `AAR_GROUP_AUDIO`, `AAR_GROUP_GL` when the client capability word has the
-matching bit. `audio_stats` is `NULL`: the runtime keeps no underrun count.
+matching bit. `audio_stats` is `NULL`. On the card route the runtime counts
+played underruns in the ring header (`AAR_AUDIO_RING_UNDERRUNS`, a
+little-endian word beside `read_frame`), where the app and the client read
+them; on the AHI route the client consumes the ring and the word stays 0.
+
+**Image rules.** The loader reads an ELF32 ARM `ET_DYN` image. `e_flags` must
+say EABI version 5 and hard float, and must not say soft float; any other
+value is `AAR_E_INVAL`. A dynamic section that names `DT_RELR`, `DT_RELRSZ`
+or `DT_RELRENT` is `AAR_E_INVAL`: only `R_ARM_RELATIVE` entries from `DT_REL`
+and `DT_RELA` are applied. `e_entry` must be even and inside a `PF_X` segment
+(`AAR_E_INVAL`).
 
 **Note v1.** An image must carry exactly one AAR note (owner `AAR`, type 1, a
-40-byte descriptor of ten little-endian words), found in a `PT_NOTE` segment or,
-when no segment holds one, in a note section. The loader checks, in the
+40-byte descriptor of ten little-endian words), found in a `PT_NOTE` segment.
+A note that only a section header names is not found. The loader checks, in the
 descriptor's order: magic `0x4E524141` and version 1 (`AAR_E_INVAL`); profile
 A32 (`AAR_E_PROFILE`); `api_major` 0 and `api_minor` at most 5
 (`AAR_E_INVAL`); `stack_bytes` 0 for the default 1 MiB, else 64 KiB to 1 MiB
@@ -552,17 +576,24 @@ and a multiple of 16 (`AAR_E_INVAL`); the reserved word 0; every
 second AAR note, or a descriptor of the wrong size is `AAR_E_INVAL`. The load
 status the client sees maps `AAR_E_INVAL` and `AAR_E_PROFILE` to
 `BAD_REQUEST`, `AAR_E_NOGROUP` to `UNSUPPORTED`, and `AAR_E_NOMEM` to
-`NO_MEMORY`; a profile or group refusal prints its reason in the `[app] reject
-op` line. The groups a note names (required and optional) set the display,
-audio and GL bits of `AAR_CB_FLAGS`, which the client reads. An image
-without a v1 note, including one that carries a 0.4 note, does not load.
+`NO_MEMORY`. The status alone cannot tell `AAR_E_INVAL` from `AAR_E_PROFILE`
+or `AAR_E_NOGROUP` from a missing call, so the refusal reply carries the code
+too (see `LOAD_END` below). A profile or group refusal prints its reason in
+the `[app] reject op` line. The groups a note names (required and optional)
+set the display, audio and GL bits of `AAR_CB_FLAGS`, which the client reads.
+An image without a v1 note, including one that carries a 0.4 note, does not
+load.
 
 **Events.** `aar_event_poll` always delivers `AAR_EV_STOP` and
 `AAR_EV_LOW_MEMORY`, and delivers the client's key, mouse, joystick and
 break events only when the runtime has `AAR_GROUP_INPUT`. One stop request
 yields one stop event: the firmware queues it itself, and the client's own
 stop event for the same request counts as that delivery, so the second is
-dropped. The low-memory event carries no fields other than its type.
+dropped. A client STOP event that arrives while no stop is requested is
+delivered as an ordinary event and is not the delivery of a request made
+later, which still gets its own event. The poll latches the client's stop
+word first, so the event is queued at once. The low-memory event carries no
+fields other than its type.
 
 **Files.** The open flags travel unchanged from the app to the client, in
 the request's `AAR_A_FILE_OPEN_FLAGS` argument: `AAR_FILE_READ` 1, `WRITE` 2,
@@ -705,7 +736,7 @@ blocks of a claim are:
 | service | 48 KiB: 1 KiB scratch, 2 KiB palette (shadow and stage), 4 KiB console input, 8 KiB log, 32 KiB console output ring | first path, name, palette, console or log use | `RELEASE` |
 | data | 8 KiB steps up to 256 KiB | first file read or write | `RELEASE` (a growth replaces it, but not while a request still names it, below) |
 | audio ring | `0x80 + frames * 4` bytes, rounded to 8 KiB | `AAR_OP_AUDIO_OPEN` | the audio close, once it is answered, and exit on the card route. On the AHI route the client maps the ring, so a close that was not posted, not answered or answered with an error, an exit without a close and a quarantined claim keep it until `RELEASE` |
-| load buffer | 72 KiB: 64 KiB staging, 2 KiB argv area, rounded | `LOAD_BEGIN` | once `START` has copied argv, or at the end of the claim |
+| load buffer | 72 KiB: 64 KiB staging, 4 KiB argv area, rounded | `LOAD_BEGIN` | once `START` has copied argv, or at the end of the claim |
 
 A spin app with no services costs 16 KiB. A console app costs 64 KiB. A game
 that reads files costs up to 320 KiB plus its audio ring. A claim holds at
@@ -860,12 +891,21 @@ commits the image on its first step, all or nothing and before any zeroing
 `MEMORY`), and releases the staging block when it completes. Mapping the image
 takes tables from the record's reserve; an image that needs more than 16
 gives `TABLES`. A failed `LOAD_END` ends the claim: the frames, tables and
-staging go back and the state reads `IDLE`, with the reason in the reply (a
-4-byte `AAR_REASON_*`).
+staging go back and the state reads `IDLE`. The reply of a refused
+`LOAD_BEGIN` or `LOAD_END` holds the `AAR_REASON_*` word at 0 (`NONE` when no
+resource ran out) and, for `AAR_E_INVAL`, `AAR_E_NOMEM`, `AAR_E_PROFILE` and
+`AAR_E_NOGROUP`, that code as a positive number at 4
+(`ZZAPP_REFUSAL_CODE`; the reply is then 8 bytes). `aar.library` returns the
+code, except that a reason makes it return `AAR_E_NORESOURCE` with the reason.
+A reply of 4 bytes or none, as an older firmware sends, leaves the library on
+the status mapping. When `LOAD_END` completes, the firmware writes
+`AAR_CB_LOAD_BASE_HI` and `AAR_CB_LOAD_BASE_LO`: the app address of image
+offset 0 (`0xc0000000`), which a fault's `pc` is relative to.
 
-`START` carries only `argc`. The argv area of the load buffer holds a `u32`
-argc, 16 offsets from the start of the load buffer, then the strings, each at
-most 128 bytes including the NUL. The firmware copies the strings into the
+`START` carries only `argc`. The argv area of the load buffer is 4 KiB and
+holds a `u32` argc, 16 offsets from the start of the load buffer, then the
+strings, each at most 128 bytes including the NUL, so 16 full arguments fit
+(`ZZAPP_LOAD_ARGV_BYTES`). The firmware copies the strings into the
 app's heap and builds its `argv` there, then frees the load buffer. `STOP`
 latches a stop with reason `FORCED` on the claim; the app sees `AAR_EV_STOP`.
 
@@ -912,6 +952,8 @@ the client releases the claim.
   `RELEASE(handle)` frees the blocks and the record, with a new handle
   generation: the pointers are detached first, then the blocks are returned,
   so a replayed teardown frees nothing twice.
+  A `STOP` of a running app publishes `STOPPING` in `AAR_CB_STATE` at once,
+  with the stop latch, and the teardown that follows ends in `IDLE`.
   A client `STOP` of a claim that never ran (claimed, loading or loaded but
   not started) ends it the same way, with the reason `FORCED`.
 - Lease loss and an expired load quarantine the claim. A running app whose

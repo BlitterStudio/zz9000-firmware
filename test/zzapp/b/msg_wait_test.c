@@ -289,6 +289,11 @@ static void test_stop_cancels_the_wait(void)
 	mock_client_request_stop(&CL(0));
 	CHECK(zzapp_svc_msg_wait(5000000U) == AAR_E_IO);
 	CHECK(yields == 0U);
+	/* The wait ended on the stop word, so aar_should_stop() (it reads the
+	 * record's latch) is true now, without waiting for the tick or the
+	 * STOP op. */
+	CHECK(__atomic_load_n(&APP(0).rec->host.stop_requested,
+			      __ATOMIC_ACQUIRE) != 0U);
 
 	/* A queued message still wins over a stop, so none is dropped. */
 	host_push(0x44);
