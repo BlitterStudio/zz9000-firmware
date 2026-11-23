@@ -243,8 +243,11 @@ takes a completion that landed with the stop first, and waiting service calls
 return `AAR_E_IO`. A sleeping thread is not a registered wait, so the system
 pass wakes it itself when its record has a stop latched, and a sleep begun
 with a stop already latched returns at once: the app returns from the call,
-reads `aar_should_stop()` true and has the stop grace to finish. A sleep ends
-early only on a stop. `aar_sleep_us(us)` lasts at least `us` microseconds of
+reads `aar_should_stop()` true and has the stop grace to finish. A parked call
+that ends on the client's stop word latches the stop on the record before it
+returns, so `aar_should_stop()` is true on return without waiting for the
+tick. A sleep ends early only on a stop. `aar_sleep_us(us)` lasts at least
+`us` microseconds of
 the `aar_time_us` clock and ends at the first look at the clock after that:
 the thread keeps a microsecond deadline, and every advance of the scheduler
 (a tick, a switch) and every pass of the system thread's loop compares it to
@@ -562,7 +565,11 @@ without a v1 note, including one that carries a 0.4 note, does not load.
 break events only when the runtime has `AAR_GROUP_INPUT`. One stop request
 yields one stop event: the firmware queues it itself, and the client's own
 stop event for the same request counts as that delivery, so the second is
-dropped. The low-memory event carries no fields other than its type.
+dropped. A client STOP event that arrives while no stop is requested is
+delivered as an ordinary event and is not the delivery of a request made
+later, which still gets its own event. The poll latches the client's stop
+word first, so the event is queued at once. The low-memory event carries no
+fields other than its type.
 
 **Files.** The open flags travel unchanged from the app to the client, in
 the request's `AAR_A_FILE_OPEN_FLAGS` argument: `AAR_FILE_READ` 1, `WRITE` 2,
@@ -912,6 +919,8 @@ the client releases the claim.
   `RELEASE(handle)` frees the blocks and the record, with a new handle
   generation: the pointers are detached first, then the blocks are returned,
   so a replayed teardown frees nothing twice.
+  A `STOP` of a running app publishes `STOPPING` in `AAR_CB_STATE` at once,
+  with the stop latch, and the teardown that follows ends in `IDLE`.
   A client `STOP` of a claim that never ran (claimed, loading or loaded but
   not started) ends it the same way, with the reason `FORCED`.
 - Lease loss and an expired load quarantine the claim. A running app whose

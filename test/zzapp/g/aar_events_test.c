@@ -192,14 +192,16 @@ static void test_duplicate_stop_dropped(void)
     assert(ring_tail() == ring_head());
     expect_empty();
 
-    /* The client's own event first: it counts as the delivery, and the latch
-     * that follows queues nothing more. */
+    /* The client's stop word and its own event: the poll latches the word,
+     * the firmware's event is the delivery and the client's is dropped. */
     setup(ALL_GROUPS);
+    mock_client_request_stop(&client);
     ring_push(AAR_EV_KEY_DOWN, 1u, 0, 0, 0u, 1u);
     ring_push(AAR_EV_STOP, 0u, 0, 0, 0u, 2u);
     ring_push(AAR_EV_KEY_UP, 1u, 0, 0, 0u, 3u);
     assert(poll_n(ev, MAX_EVENTS) == 3u);
-    assert(ev[0].type == AAR_EV_KEY_DOWN && ev[1].type == AAR_EV_STOP &&
+    assert(count_type(ev, 3u, AAR_EV_STOP) == 1u);
+    assert(ev[0].type == AAR_EV_STOP && ev[1].type == AAR_EV_KEY_DOWN &&
            ev[2].type == AAR_EV_KEY_UP);
     zzapp_host_latch_stop(g_pid);
     expect_empty();
@@ -217,8 +219,10 @@ static void test_duplicate_stop_dropped(void)
     assert(ev[0].type == AAR_EV_KEY_DOWN && ev[0].code == 2u);
     expect_empty();
 
-    /* The client posts two stops: one is delivered. */
+    /* The client posts two stops with its stop word set: one is
+     * delivered. */
     setup(ALL_GROUPS);
+    mock_client_request_stop(&client);
     ring_push(AAR_EV_STOP, 0u, 0, 0, 0u, 1u);
     ring_push(AAR_EV_STOP, 0u, 0, 0, 0u, 2u);
     assert(poll_n(ev, MAX_EVENTS) == 1u);
@@ -232,6 +236,33 @@ static void test_duplicate_stop_dropped(void)
     ring_push(AAR_EV_STOP, 0u, 0, 0, 0u, 1u);
     expect_empty();
     zzapp_host_latch_stop(g_pid);
+    assert(poll_n(ev, MAX_EVENTS) == 1u);
+    expect_lifecycle(&ev[0], AAR_EV_STOP);
+    expect_empty();
+}
+
+/* A STOP event with no stop requested is the client's event and nothing
+ * more: it is delivered, but it is not the delivery of a request that comes
+ * later, which still gets its own event. */
+static void test_bare_stop_event_is_not_the_delivery(void)
+{
+    aar_event ev[MAX_EVENTS];
+
+    setup(ALL_GROUPS);
+    ring_push(AAR_EV_STOP, 0u, 0, 0, 0u, 1u);
+    assert(poll_n(ev, MAX_EVENTS) == 1u);
+    assert(ev[0].type == AAR_EV_STOP);
+    expect_empty();
+    zzapp_host_latch_stop(g_pid);
+    assert(poll_n(ev, MAX_EVENTS) == 1u);
+    expect_lifecycle(&ev[0], AAR_EV_STOP);
+    expect_empty();
+
+    /* The same with the request made by the client's stop word. */
+    setup(ALL_GROUPS);
+    ring_push(AAR_EV_STOP, 0u, 0, 0, 0u, 1u);
+    assert(poll_n(ev, MAX_EVENTS) == 1u);
+    mock_client_request_stop(&client);
     assert(poll_n(ev, MAX_EVENTS) == 1u);
     expect_lifecycle(&ev[0], AAR_EV_STOP);
     expect_empty();
@@ -345,6 +376,7 @@ int main(void)
     test_lifecycle_without_input_group(0u);
     test_input_with_input_group();
     test_duplicate_stop_dropped();
+    test_bare_stop_event_is_not_the_delivery();
     test_low_memory_per_crossing();
     test_short_buffer();
     test_bad_arguments();

@@ -178,12 +178,54 @@ static void test_calls_return_on_stop(void)
 	CHECK(!zzapp_services_wait_registered(PID_OF(0U)));
 }
 
+static void stop_word_when_parked(unsigned n)
+{
+	(void)n;
+	TH(0).state = ZZAPP_THREAD_BLOCKED;
+	mock_client_request_stop(&CL(0));
+	zzapp_services_poll();
+}
+
+/* The stop word alone (no STOP op, no tick): the call that ended on it has
+ * latched the stop on the record, which is what aar_should_stop() reads. */
+static void test_wait_ended_by_stop_word_latches(void)
+{
+	uint8_t buf[16];
+	uint32_t n = 0U;
+
+	reset();
+	CHECK(__atomic_load_n(&APP(0).rec->host.stop_requested,
+			      __ATOMIC_ACQUIRE) == 0U);
+	on_yield = stop_word_when_parked;
+	CHECK(zzapp_svc_console_read(buf, sizeof(buf), &n) == AAR_E_IO);
+	CHECK(__atomic_load_n(&APP(0).rec->host.stop_requested,
+			      __ATOMIC_ACQUIRE) != 0U);
+}
+
+/* Spec 5.1: RUNNING becomes STOPPING on the stop request, before the
+ * teardown ends it. */
+static void test_stop_publishes_stopping(void)
+{
+	reset();
+	CHECK(CBSTATE(0) == AAR_STATE_RUNNING);
+	send_app_stop();
+	CHECK(CBSTATE(0) == AAR_STATE_STOPPING);
+	CHECK(APP(0).rec->claim.state == ZZAPP_ST_STOPPING);
+	CHECK(__atomic_load_n(&APP(0).rec->host.stop_requested,
+			      __ATOMIC_ACQUIRE) != 0U);
+	/* A second stop leaves it STOPPING. */
+	send_app_stop();
+	CHECK(CBSTATE(0) == AAR_STATE_STOPPING);
+}
+
 int main(void)
 {
 	svc_env_init(8U, 0U, NULL);
 	test_stop_wakes_each_cancellable_wait();
 	test_audio_handoff_is_not_woken_by_stop();
 	test_calls_return_on_stop();
+	test_wait_ended_by_stop_word_latches();
+	test_stop_publishes_stopping();
 	printf("stop_wake_test: %d checks, %d failures\n", checks, failures);
 	return failures != 0;
 }
