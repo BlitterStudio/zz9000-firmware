@@ -157,6 +157,11 @@ static void test_layouts(void)
         ZZ9K_VOICE_RAMP_MAX_FRAMES == 512U && ZZ9K_VOICE_FADE_SLOTS == 32U);
   /* the two settings are independent bits of the CONFIG flags word */
   CHECK((ZZ9K_VOICE_CONFIG_RAMP & ZZ9K_VOICE_CONFIG_LIMITER) == 0U);
+  CHECK(ZZ9K_VOICE_CONFIG_INTERP == 4U && ZZ9K_VOICE_MODE_INTERP == 1U);
+  CHECK((ZZ9K_VOICE_CONFIG_INTERP &
+         (ZZ9K_VOICE_CONFIG_RAMP | ZZ9K_VOICE_CONFIG_LIMITER)) == 0U);
+  CHECK(ZZ9K_VOICE_INTERP_INHERIT == 0U && ZZ9K_VOICE_INTERP_NEAREST == 1U &&
+        ZZ9K_VOICE_INTERP_LINEAR == 2U && ZZ9K_VOICE_INTERP_CUBIC == 3U);
   CHECK(ZZ9K_VOICE_JITTER_NONE == 0xFFFFFFFFU);
 
   CHECK(ZZ9K_VOICE_OP_START == 1U && ZZ9K_VOICE_OP_LOOP == 2U &&
@@ -510,6 +515,39 @@ static void test_records(void)
    * it for this flag set) and does not name the limiter. */
   zz9k_voice_build_config_ramp(&r, 18U, 512U);
   CHECK((r.flags & ZZ9K_VOICE_CONFIG_LIMITER) == 0U && r.arg1 == 0U);
+
+  /* MODE and the default interpolation. The MODE record names the voice and
+   * the setting flag; both records carry the selector in arg0 and 0 in arg1,
+   * and the default names no other setting. */
+  memset(&r, 0xA5, sizeof(r));
+  zz9k_voice_build_mode_interp(&r, 20U, 31U, ZZ9K_VOICE_INTERP_CUBIC);
+  CHECK(r.stamp == 20U && r.voice == 31U && r.op == ZZ9K_VOICE_OP_MODE &&
+        r.flags == ZZ9K_VOICE_MODE_INTERP && r.arg0 == 3U && r.arg1 == 0U);
+  zz9k_voice_record_encode(&w, &r);
+  CHECK(b[0] == 0 && b[1] == 0 && b[2] == 0 && b[3] == 20U);
+  CHECK(b[4] == 31U && b[5] == 7U && b[6] == 0x00 && b[7] == 0x01);
+  CHECK(b[8] == 0 && b[9] == 0 && b[10] == 0 && b[11] == 3U);
+  CHECK(b[12] == 0 && b[13] == 0 && b[14] == 0 && b[15] == 0);
+  zz9k_voice_record_decode(&back, &w);
+  CHECK(memcmp(&back, &r, sizeof(r)) == 0);
+  zz9k_voice_build_mode_interp(&r, 21U, 0U, ZZ9K_VOICE_INTERP_INHERIT);
+  CHECK(r.arg0 == 0U && r.flags == ZZ9K_VOICE_MODE_INTERP);
+  zz9k_voice_build_mode_interp(&r, 21U, 0U, ZZ9K_VOICE_INTERP_NEAREST);
+  CHECK(r.arg0 == 1U);
+  zz9k_voice_build_mode_interp(&r, 21U, 0U, ZZ9K_VOICE_INTERP_LINEAR);
+  CHECK(r.arg0 == 2U);
+  memset(&r, 0xA5, sizeof(r));
+  zz9k_voice_build_config_interp(&r, 22U, ZZ9K_VOICE_INTERP_LINEAR);
+  CHECK(r.stamp == 22U && r.voice == 0U && r.op == ZZ9K_VOICE_OP_CONFIG &&
+        r.flags == ZZ9K_VOICE_CONFIG_INTERP && r.arg0 == 2U && r.arg1 == 0U);
+  zz9k_voice_record_encode(&w, &r);
+  CHECK(b[4] == 0U && b[5] == 9U && b[6] == 0x00 && b[7] == 0x04);
+  CHECK(b[8] == 0 && b[9] == 0 && b[10] == 0 && b[11] == 2U);
+  CHECK(b[12] == 0 && b[13] == 0 && b[14] == 0 && b[15] == 0);
+  /* a record a test sends to be refused goes through the generic builder */
+  zz9k_voice_build_config(&r, 23U, ZZ9K_VOICE_CONFIG_INTERP |
+                                       ZZ9K_VOICE_CONFIG_RAMP, 3U, 0U);
+  CHECK(r.flags == 5U && r.arg0 == 3U);
 }
 
 /* ---- Status reader ---- */
@@ -850,6 +888,50 @@ static void test_config_same_stamp_order(void)
           back.arg0 == 256U && back.arg1 == 1U);
   }
   CHECK(session.write_cursor == 12U);
+}
+
+/* A MODE record and the default-interpolation CONFIG record that a player
+ * sends with its notes keep their ring order at one stamp, wrap included:
+ * the interpolation a note reads with depends on it. */
+static void test_interp_same_stamp_order(void)
+{
+  uint8_t ring[ZZ9K_VOICE_RING_HEADER_BYTES + 8U * ZZ9K_VOICE_RECORD_BYTES];
+  ZZ9KVoiceSession session;
+  ZZ9KVoiceRecord recs[5];
+  ZZ9KVoiceRecord back;
+  ZZ9KVoiceRecordWire wire;
+  const uint32_t stamp = 9600U;
+  uint32_t round;
+  uint32_t i;
+
+  zz9k_voice_build_config_interp(&recs[0], stamp, ZZ9K_VOICE_INTERP_LINEAR);
+  zz9k_voice_build_mode_interp(&recs[1], stamp, 2U, ZZ9K_VOICE_INTERP_CUBIC);
+  zz9k_voice_build_start(&recs[2], stamp, 2U, 0U, 0U, 0U);
+  zz9k_voice_build_mode_interp(&recs[3], stamp, 2U,
+                               ZZ9K_VOICE_INTERP_INHERIT);
+  zz9k_voice_build_config_interp(&recs[4], stamp, ZZ9K_VOICE_INTERP_NEAREST);
+
+  memset(ring, 0, sizeof(ring));
+  fill_session(&session, ring, 8U);
+  for (round = 0U; round < 2U; round++) {
+    uint32_t base = session.write_cursor;
+
+    CHECK(zz9k_voice_ring_stage(&session, (uint16_t)base, recs, 3U) == 3U);
+    CHECK(zz9k_voice_ring_stage(&session, (uint16_t)base, recs + 3U, 2U) ==
+          2U);
+    zz9k_voice_ring_publish(&session);
+    for (i = 0U; i < 5U; i++) {
+      uint32_t slot = (base + i) & 7U;
+
+      memcpy(&wire, ring + ZZ9K_VOICE_RING_HEADER_BYTES +
+                        slot * ZZ9K_VOICE_RECORD_BYTES,
+             sizeof(wire));
+      zz9k_voice_record_decode(&back, &wire);
+      CHECK(memcmp(&back, &recs[i], sizeof(back)) == 0);
+      CHECK(back.stamp == stamp);
+    }
+  }
+  CHECK(session.write_cursor == 10U);
 }
 
 /* ---- Request builders and the OPEN reply decoder ---- */
@@ -2296,6 +2378,7 @@ int main(void)
   test_stage_then_publish();
   test_request_builders();
   test_config_same_stamp_order();
+  test_interp_same_stamp_order();
   test_open_reply_decoder();
 
   test_open_success(2U);

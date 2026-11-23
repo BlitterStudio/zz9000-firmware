@@ -24,8 +24,8 @@ and the firmware side of the mixing path in
   and the right volume on its right channel.
 - A voice plays forward or backward and can loop. A loop is a start and a
   length in bytes inside the sample.
-- Playback reads the nearest sample, or interpolates linearly between two
-  samples when the session was opened with the linear flag.
+- Playback reads the nearest sample, or interpolates between samples: linearly
+  when the session was opened with the linear flag, or with the cubic below.
 - Commands carry the 48 kHz frame they take effect at, so a note starts on
   exactly that output frame.
 - Optional ramps, set with a `CONFIG` record: volume changes, starts, stops
@@ -34,6 +34,9 @@ and the firmware side of the mixing path in
 - An optional static soft knee after the master gain, also set with a
   `CONFIG` record, that bends loud mixes toward the 16-bit rails instead of
   clipping them flat. Off by default.
+- Per-voice interpolation: a `MODE` record gives a voice nearest, linear or
+  cubic reading, and a `CONFIG` record changes the session default. Off by
+  default; see [Interpolation](#interpolation).
 
 The engine is integer only. Each voice contributes `sample * volume >> 16` to
 the left and right sums, so a volume of 65535 is close to unity. The sums are
@@ -151,7 +154,9 @@ use 48-byte inline payloads, big-endian, laid out in `zz9k/voice.h`.
 OPEN takes the three buffers, the bank size, the voice count, the requested
 lead and the flags. `ZZ9K_VOICE_OPEN_FLAG_NTSC` selects the NTSC Paula clock
 for period input (PAL otherwise). `ZZ9K_VOICE_OPEN_FLAG_LINEAR` selects
-linear interpolation (nearest otherwise). `ZZ9K_VOICE_OPEN_FLAG_LOW_LATENCY`
+linear interpolation as the session default (nearest otherwise); a `CONFIG`
+record can change the default later, see [Interpolation](#interpolation).
+`ZZ9K_VOICE_OPEN_FLAG_LOW_LATENCY`
 opens a [low-latency session](#low-latency-session). Reserved fields must be
 zero.
 
@@ -292,9 +297,9 @@ helper `ZZ9KVoiceWrite()` encodes records to the wire form.
 | STOP | 4 | Unused | Unused | Unused |
 | MASTER | 5 | Unused | Gain in Q8.8, 256 is unity, at most 0xFFFF | Unused |
 | DIRECTION | 6 | 1 plays backward, 0 plays forward | Unused | Unused |
-| MODE | 7 | Reserved | Reserved | Reserved |
+| MODE | 7 | 1 sets the interpolation of the voice | The selector, 0 (the session default) to 3 | 0 |
 | ENVELOPE | 8 | Reserved | Reserved | Reserved |
-| CONFIG | 9 | 1 sets the ramp length, 2 sets the limiter, 3 sets both | With flag 1, the ramp length in frames, 0 to 512. With flag 2 alone, 0 | With flag 2, 0 (off) or 1 (on). Ignored with flag 1 alone |
+| CONFIG | 9 | 1 sets the ramp length, 2 sets the limiter, 3 sets both, 4 sets the default interpolation | With flag 1, the ramp length in frames, 0 to 512. With flag 2 alone, 0. With flag 4, the selector, 1 to 3 | With flag 2, 0 (off) or 1 (on). Ignored with flag 1 alone. With flag 4, 0 |
 
 Behaviour of each op:
 
@@ -337,21 +342,26 @@ argument it reads, so a record holds one setting or both:
 | 1 | Ramp length, 0 to 512 | Ignored; send 0 | The ramp length |
 | 2 | Must be 0 | 0 or 1 | The limiter |
 | 3 | Ramp length, 0 to 512 | 0 or 1 | Both, together |
+| 4 | Selector, 1 to 3 | Must be 0 | The default interpolation, see [Interpolation](#interpolation) |
 
 The firmware checks every setting the record names before it applies any. A
 record is rejected whole, none of its settings applied, and counted in
 `rejected` when it has no flag, a flag the firmware does not know, a ramp
-length above 512 with flag 1, a limiter value above 1 with flag 2, or a
-nonzero arg0 with flag 2 and without flag 1. A setting that the record does
-not name keeps its value. Firmware without CONFIG counts every CONFIG record
-as rejected, so a client checks the `CONFIG` bit of the features word first.
-MODE (7) and ENVELOPE (8) are op numbers kept for later features; the engine
-rejects them.
+length above 512 with flag 1, a limiter value above 1 with flag 2, a
+nonzero arg0 with flag 2 and without flag 1, or flag 4 together with another
+flag, with a selector outside 1 to 3 or with a nonzero arg1. A setting that
+the record does not name keeps its value. Firmware without CONFIG counts
+every CONFIG record as rejected, so a client checks the `CONFIG` bit of the
+features word first. MODE (op 7) is described under
+[Interpolation](#interpolation). ENVELOPE (8) is an op number kept for a
+later feature; the engine rejects it.
 
 The builders in `zz9k/voice.h` fill these records:
 `zz9k_voice_build_config_ramp()` (flag 1, arg1 0),
-`zz9k_voice_build_config_limiter()` (flag 2, arg0 0, arg1 0 or 1) and
-`zz9k_voice_build_config_ramp_limiter()` (flags 3). The generic
+`zz9k_voice_build_config_limiter()` (flag 2, arg0 0, arg1 0 or 1),
+`zz9k_voice_build_config_ramp_limiter()` (flags 3) and
+`zz9k_voice_build_config_interp()` (flag 4, see
+[Interpolation](#interpolation)). The generic
 `zz9k_voice_build_config()` writes any flags and arguments, which is how a
 test sends a record the firmware must reject.
 
@@ -440,6 +450,100 @@ uses the limiter checks the `CONFIG` and `LIMITER` bits first; firmware
 without `LIMITER` may still accept the record, as it accepted ramp records
 before `RAMP` was advertised, and that use is for testing only.
 
+### Interpolation
+
+A voice reads its sample nearest, linearly or with a four-point cubic. The
+session has a default, and a voice follows it until a MODE record gives that
+voice a setting of its own. The selectors are the same in both records:
+
+| Selector | Constant | A voice reads |
+| ---: | --- | --- |
+| 0 | `ZZ9K_VOICE_INTERP_INHERIT` | MODE only: the session default |
+| 1 | `ZZ9K_VOICE_INTERP_NEAREST` | the frame at the position |
+| 2 | `ZZ9K_VOICE_INTERP_LINEAR` | a blend of the frame at the position and the next frame in play order, by the fraction |
+| 3 | `ZZ9K_VOICE_INTERP_CUBIC` | the Catmull-Rom curve through four frames, below |
+
+The session default is nearest, or linear when the session was opened with
+`ZZ9K_VOICE_OPEN_FLAG_LINEAR`. CONFIG with flag 4 (`ZZ9K_VOICE_CONFIG_INTERP`)
+replaces it: arg0 is a selector from 1 to 3, arg1 must be 0, and the record
+names no other setting. MODE (op 7) with flag 1 (`ZZ9K_VOICE_MODE_INTERP`)
+sets the setting of the voice in the voice field: arg0 is a selector from 0
+to 3 and arg1 must be 0. A record is rejected, counted in `rejected` and
+changes nothing when its flag is missing or unknown, its selector is out of
+range, its arg1 is not 0, a default record names another setting as well, or
+a MODE record names a voice that the grant does not have.
+
+- A record takes effect at its own frame: the frames before it are read with
+  the old setting. Records with one stamp apply in ring order, so what a
+  frame reads depends on that order.
+- A voice keeps its setting across START, STOP and RESET, as it keeps its rate
+  and volume. A new session starts with no setting on any voice.
+- A restart with ramps on hands the old sound to a fade slot with the
+  interpolation the voice reads with at that point of the record order, the
+  session default included. Later MODE and CONFIG records, or a later change
+  of the default, never change a tail. With MODE and START at one stamp, the
+  record first in the ring decides the tail.
+- Nearest and linear read as they always did. With no MODE record and no
+  interpolation CONFIG record the output is identical to an engine without
+  them, sample for sample, and a voice set to linear in a nearest session
+  gives the same samples as the same voice in a linear session.
+
+Cubic. With the taps a, b, c and d and the 16-bit fraction t, the engine
+computes, in 16-bit units,
+
+```text
+b + (t * ((c - a) + t * ((2a - 5b + 4c - d) + t * (d - a + 3(b - c))))) / 2
+```
+
+in fixed point, with each of the three products rounded to nearest, and 8-bit
+data promoted by 8 bits first. At t 0 the result is b exactly. The firmware's
+host test compares the fixed point form with the real-valued Catmull-Rom
+curve over four million random sets of taps, full-scale ones included: the
+worst difference was 0.993, so the result is within 1 LSB of the curve. With
+the volume at 65535 the output of a sine at up to four samples per frame was
+within 1.64 of the curve, the volume's floor adding to the rounding.
+
+- b is the frame at the position and c the next frame in play order. a is the
+  frame before b in play order and d the frame after c. Forward, that is the
+  previous and the next frames. At the end of a pass the next frame is the
+  loop start when there is a loop and the last frame again when there is none,
+  and the frame after that continues around the loop (a loop of one frame
+  repeats it). At the first frame of the sample a is that frame. Once a pass
+  has wrapped into the loop, a for the loop start is the last frame of the
+  loop; in the first pass it is the frame before the loop start. A first pass
+  shorter than the sample ends at its end for all four taps: frames beyond it
+  are not read, and the frames before the start offset are.
+- Backward play uses its own play order in the same way: c is the frame below
+  the position, and below the loop start comes the last frame of the loop.
+  The fraction is the engine's fraction of the position, as the linear blend
+  takes it, so the linear blend and the cubic move the same way through the
+  frames in either direction.
+- A stereo sample uses each side's frames for that side, and a mono sample
+  feeds both sides.
+- The curve overshoots: the weights of the four frames add up to at most 1.25
+  in magnitude, so a side of a voice can reach 40961 in magnitude where the
+  samples are at the 16-bit limits (for example the frames -32768, 32767,
+  32767, -32768 give 40959 half way between the middle two). The engine does
+  not clip the voice's own side: it applies the volume in wider arithmetic
+  and keeps the sums and the master product inside their 32-bit range, so the
+  master clamp or the limiter shapes the overshoot of the mix. With the
+  limiter off, a mix that overshoots past the rails clips there.
+
+Cubic costs more render time than linear, since it reads four frames for each
+output frame. The `CUBIC` and `VOICE_INTERP` bits are set: the card timing
+gate passed with 32 voices and a full fade pool, as it did for ramps and the
+limiter, see [Cubic timing](#cubic-timing). The firmware plays nearest or
+linear unless a client asks for cubic with a `MODE` record or a default
+interpolation. A client checks the `CONFIG` bit before it sends a default and
+the `VOICE_INTERP` and `CUBIC` bits before it uses them outside a
+qualification run. A firmware without the records counts them as rejected and
+plays as before.
+
+The builders in `zz9k/voice.h` are `zz9k_voice_build_mode_interp()` (voice,
+selector) and `zz9k_voice_build_config_interp()` (selector). The generic
+builders write any flags and arguments, which is how a test sends a record the
+firmware must reject.
+
 ### The ring
 
 The client owns the command ring: a host-window buffer with a 16-byte header
@@ -512,7 +616,8 @@ and 4 bytes in S16S.
   sample by the right volume, so volumes of (65535, 0) play the left channel
   only. A mono voice feeds its one sample to both sides, as before.
 - Linear interpolation blends the left samples with each other and the right
-  samples with each other.
+  samples with each other, and the cubic reads the four frames of each side
+  the same way.
 - A DEFINE with a format at or above `ZZ9K_VOICE_FORMAT_COUNT` (4) is refused
   with `ZZ9K_STATUS_BAD_REQUEST` and changes nothing. The request builder
   refuses it too. `zz9k_voice_format_valid()` tests a format.
@@ -638,7 +743,7 @@ paces on `playing_frame` already reads the status often enough.
 
 | Event | Result |
 | --- | --- |
-| `ZZ9KVoiceReset()` | Drops every record the client had written, every queued command and the periods the slot has already queued; silences all voices. Samples, master gain and the timeline stay, and the frame counter keeps counting, so stamps after a reset are relative to a fresh status read. Audio of at most the period now playing remains. A reset while the session is still staging its first lead also takes back the staged periods and restarts the timeline at frame 0; nothing of the earlier voices plays. |
+| `ZZ9KVoiceReset()` | Drops every record the client had written, every queued command and the periods the slot has already queued; silences all voices. Samples, master gain, the `CONFIG` settings, the interpolation settings of the voices and the timeline stay, and the frame counter keeps counting, so stamps after a reset are relative to a fresh status read. Audio of at most the period now playing remains. A reset while the session is still staging its first lead also takes back the staged periods and restarts the timeline at frame 0; nothing of the earlier voices plays. |
 | `ZZ9KVoiceClose()` | Silences the voices, drops the queued periods, detaches the slot, frees the bank and unpins and frees the buffers. |
 | Missed heartbeat | The firmware ends the session as Close does. The status block reads state 0. A later `ZZ9KVoiceClose()` returns `ZZ9K_STATUS_BAD_HANDLE` and still frees the buffers. |
 | Client exit | The final `CloseLibrary()` releases the opener's client id, which ends its session and frees its buffers, because the session is owned by the id that opened it (revision 44 or later; before it a session was always owned by client 0 and only the heartbeat limit ended it). A task that never opened the library owns its session as client 0, which no release reaches, so the heartbeat limit applies. |
@@ -716,10 +821,13 @@ that feature. It reads 0 on firmware that predates it. `CONFIG` says the
 been measured on the card with 32 voices and a full fade pool inside the
 render budget; until the bit is set, a client that wants ramps for testing
 sends the record without relying on it. `LIMITER` says the same of the soft
-knee set with flag 2, see [Limiter](#limiter). The other bits (`CUBIC`,
-`VOICE_INTERP`, `OVERSAMPLE`,
-`ENVELOPE`, `EVENTS`) belong to features that are not in the firmware yet and
-stay clear.
+knee set with flag 2, see [Limiter](#limiter). `CUBIC` says the same of the
+cubic interpolation, and `VOICE_INTERP` of the `MODE` record and the `CONFIG`
+default interpolation, see [Interpolation](#interpolation). The firmware
+advertises all of them once their card timing gates have passed; cubic
+reading is used only when a client asks for it.
+The other bits (`OVERSAMPLE`, `ENVELOPE`, `EVENTS`) belong to features that
+are not in the firmware yet and stay clear.
 
 ## zz9k-voiceplay
 
@@ -733,7 +841,7 @@ zz9k-voiceplay MODULE [LEAD=frames] [NTSC] [LINEAR] [SECONDS=n] [LOWLAT]
 zz9k-voiceplay CLICK [LEAD=frames] [SECONDS=n] [LOWLAT]
 zz9k-voiceplay LIVE [LEAD=frames] [SECONDS=n] [LOWLAT]
 zz9k-voiceplay LOAD VOICES=n SECONDS=n [LINEAR] [STEREO] [RATE=hz] [GAIN=n] [CHURN] [GROUPS=n] [LOWLAT]
-zz9k-voiceplay <any of the above> [RAMP=frames] [LIMITER]
+zz9k-voiceplay <any of the above> [RAMP=frames] [LIMITER] [INTERP=nearest|linear|cubic] [PERVOICE]
 ```
 
 | Argument | Meaning |
@@ -744,6 +852,8 @@ zz9k-voiceplay <any of the above> [RAMP=frames] [LIMITER]
 | `RATE` | LOAD mode only: the centre rate in Hz, 1 to 192000 (default 22050) |
 | `RAMP` | Any mode: send a `CONFIG` ramp record of this many frames (0 to 512) before any other record. Needs firmware with the `CONFIG` feature; the tool says when `RAMP` is not advertised yet and runs the ramp anyway, which is how the firmware is qualified |
 | `LIMITER` | Any mode: switch the static soft knee on with a `CONFIG` record (flag 2, arg1 1) before any other record. Needs firmware with the `CONFIG` feature, otherwise the tool exits with code 20. When `LIMITER` is not advertised it prints a warning that the knee is unqualified and runs it anyway, which is how the firmware is qualified. There is no option to send arg1 0 |
+| `INTERP` | Any mode: `nearest`, `linear` or `cubic`, the interpolation of the session, in place of `LINEAR`. Sent as a `CONFIG` default (flag 4) before any note, or with `PERVOICE` as a `MODE` record for each voice. When the firmware does not advertise `VOICE_INTERP` (or `CUBIC` with `cubic`) the tool prints a warning that the setting is unqualified and runs it anyway, which is how the firmware is qualified |
+| `PERVOICE` | With `INTERP`: send a `MODE` record for each voice in place of the `CONFIG` default |
 | `GAIN` | LOAD mode only: the volume of every voice on each side, 0 to 65535, in place of 65535 divided by the voice count |
 | `CHURN` | LOAD mode only: restart the voices continuously, see below |
 | `GROUPS` | With `CHURN`: restart groups, 1 to 32 (default 32) |
@@ -800,6 +910,18 @@ holds flags 3 (the ramp length in arg0, 1 in arg1) and the firmware
 validates and applies the two together. `RAMP` alone sends flag 1 and
 `LIMITER` alone sends flag 2 with arg0 0.
 
+With `INTERP` the tool sends the interpolation after that record and before
+the MASTER record and every note, also at the lead stamp. By default one
+`CONFIG` record sets the session default (flag 4, the selector in arg0, arg1
+0), which needs the `CONFIG` feature. With `PERVOICE` it sends a `MODE`
+record for each voice instead (flag 1, the selector in arg0, arg1 0), which
+works on a firmware that has the `MODE` record whether or not it has `CONFIG`.
+`INTERP` takes the place of `LINEAR`: `LINEAR INTERP=nearest` is nearest.
+The tool prints a warning and runs on when the firmware does not advertise
+`VOICE_INTERP`, or `CUBIC` for `INTERP=cubic`; that is how the firmware is
+qualified. A firmware older than the `MODE` record counts the records as
+rejected and plays with the interpolation it had, which the report shows.
+
 Saturation runs. `GAIN=65535` on 32 voices puts far more than full scale
 into the mix, so the master clamp (without `LIMITER`) or the soft knee (with
 it) is in use on most frames. With `CHURN` and `RAMP` every restart hands a
@@ -809,6 +931,7 @@ level. For example:
 ```text
 zz9k-voiceplay LOAD VOICES=32 GAIN=65535 LIMITER SECONDS=20
 zz9k-voiceplay LOAD VOICES=32 GAIN=65535 CHURN RAMP=256 LIMITER STEREO LINEAR SECONDS=20
+zz9k-voiceplay LOAD VOICES=32 STEREO RATE=96000 CHURN RAMP=256 GAIN=65535 LIMITER INTERP=cubic SECONDS=20
 ```
 
 These runs are loud and harsh by design. Turn the amplifier or speakers down
@@ -838,9 +961,9 @@ tool resets the session unless the song ended, closes it and prints a report:
 | late, rejected, underruns, dropped | The firmware counters from the status block |
 | session | `low latency` or `standard`, with the granted lead floor in frames |
 | jitter | The two jitter words of the status block: the smallest wait of a rendered period for the audio interrupt and the largest gap between firmware polls, in microseconds |
-| engine features | The features word of the status block, with `CONFIG`, `RAMP` and `LIMITER` named when they are set |
+| engine features | The features word of the status block, with `CONFIG`, `RAMP`, `LIMITER`, `CUBIC` and `VOICE_INTERP` named when they are set |
 | load | LOAD mode only: the voices, sample type, interpolation, rate range and the volume per side (65535 divided by the voice count unless `GAIN` is given) |
-| ramp, limiter, churn | Only with `RAMP`, `LIMITER` or `CHURN`: the ramp length, the limiter state, the restarts written, the groups and the interval between restarts |
+| ramp, limiter, interpolation, churn | Only with `RAMP`, `LIMITER`, `INTERP` or `CHURN`: the ramp length, the limiter state, the interpolation and how it was set, the restarts written, the groups and the interval between restarts |
 | keys played | Live mode only |
 | smallest scheduling margin | The smallest stamp minus horizon at the moment a record was written, in frames and microseconds |
 | record latency | Minimum, average and maximum of each record's stamp minus the playing frame of the status read before its write, in frames and milliseconds: how far ahead of the sound the records were queued. Click records are included |
@@ -979,6 +1102,53 @@ and 10 s with `LIMITER`, with the amplifier set very low, and heard no clear
 difference. The runs had 0 late records, 0 rejected records, 0 underruns and
 0 dropped records. This one comparison does not cover other material, levels
 or listening setups.
+
+### Cubic timing
+
+The cubic runs used a bench image built from the cubic source plus the
+mailbox timing instrument (bench base `ce51d576` with `5252e293`); it differs
+from the shipped firmware in the bench instrumentation, whose macros are off
+in the product build. The voice engine at that commit had the
+contiguous-load cubic kernel (`e33097bc`).
+The card was the same Zorro III A4000/68060, after a full power cycle, with
+the speakers off. Each run lasted 20 s and measured 1016 rendered periods of
+960 frames (20 ms), except the low-latency run, which measured 1006. Every
+run had 0 late records, 0 rejected records, 0 underruns and 0 dropped
+records.
+
+Every command below starts with
+`zz9k-voiceplay LOAD VOICES=32 SECONDS=20 RAMP=256 GAIN=65535 CHURN GROUPS=32 INTERP=cubic`
+unless the first column says otherwise.
+
+| Remaining arguments | Render average (us) | Render maximum (us) |
+| --- | ---: | ---: |
+| `STEREO RATE=96000 LIMITER` | 4207.81 | 4559.30 |
+| `STEREO RATE=96000 LIMITER` with `INTERP=linear` (the paired run, same image) | 2995.37 | 3344.68 |
+| `STEREO RATE=192000 LIMITER` (voices from 96000 to 192000 Hz) | 4180.91 | 4539.08 |
+| `STEREO RATE=96000` (limiter off) | 4120.48 | 4468.36 |
+| `RATE=96000 LIMITER` (mono) | 3220.97 | 3562.57 |
+| `STEREO RATE=96000 LIMITER GROUPS=1 LOWLAT` (lead 2880 frames) | 4213.79 | 4536.25 |
+| `STEREO RATE=96000 LIMITER PERVOICE` (a `MODE` record per voice) | 4205.30 | 4565.68 |
+| `STEREO RATE=22050 LIMITER`, `GAIN` omitted (default 2047) | 4190.71 | 4544.14 |
+| `STEREO RATE=96000 LIMITER`, `GAIN` omitted (default 2047) | 4137.71 | 4484.22 |
+| `STEREO RATE=96000 LIMITER RAMP=512` (half the restarts, 60419, so not the same work) | 4054.10 | 4392.78 |
+
+Before the change the same first load took 5570.12 us on average and 5918.96
+us at most with cubic, against 2987.77 and 3340.34 us with linear, over the
+budget. The kernel now reads the four taps of a frame with one load and
+transposes four frames at a time, and the left and right sides run
+together; the output is the same bit for bit as the scalar reference. A
+guard-page test (`test/audio/audio_voice_cubic_guard_test.c`) puts the sample
+bank against protected pages and checks that the final partial blocks of a
+run read nothing outside the four taps of a frame, for all four formats in
+both directions.
+
+The largest maximum, 4565.68 us, is below the 5000 us render budget, and the
+cubic runs cost about 1.2 ms over linear. The firmware advertises
+`ZZ9K_VOICE_FEATURE_CUBIC` and `ZZ9K_VOICE_FEATURE_VOICE_INTERP` (features
+word 0x8F) on this evidence. It covers the listed loads, not every command
+pattern. These are timing and cleanliness results only: nobody has listened
+to cubic output yet, and no claim is made about how it sounds.
 
 ### Low-latency sessions
 

@@ -106,6 +106,24 @@ changing the bank or the sample table. The formats and the rate and pass
 helpers in `zz9k/voice.h` are described in
 [zz9k-voice.md](../sdk/docs/zz9k-voice.md).
 
+Each voice reads nearest, linearly or with a four-point cubic. A session
+default (nearest, linear with the open flag, or the `CONFIG` default
+interpolation) applies to a voice until a `MODE` record gives it a setting of
+its own, and a fade slot keeps the setting its sound had when it was handed
+over. A cubic read overshoots the 16-bit range by up to a quarter, so the
+engine applies a cubic voice's volume in 64-bit arithmetic (or the vector
+equivalent) and, in a chunk that a cubic voice has added to, takes the
+32-bit master product for masters up to 511 instead of 1023; the limiter
+holds a sum beyond its last table node at that node. The nearest and linear
+arithmetic and its output are unchanged. The firmware accepts cubic, `MODE`
+and the default interpolation and advertises the `CUBIC` and `VOICE_INTERP`
+bits (features word 0x8F): 32 voices and a full fade pool rendered in at
+most 4566 us per 20 ms period across the load matrix in
+[zz9k-voice.md](../sdk/docs/zz9k-voice.md#cubic-timing), with no late or
+rejected record, underrun or drop. That is a timing result; the cubic output
+has not been listened to. The contract is in
+[zz9k-voice.md](../sdk/docs/zz9k-voice.md#interpolation).
+
 Closing a session detaches the slot, and a reset clears it. Both drop the
 periods already queued in the TX ring and request a rebuild from the
 remaining producers, so at most the period the DMA is playing still carries

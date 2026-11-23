@@ -73,7 +73,7 @@
 
 #define TEMPLATE "MODULE,LEAD/K/N,NTSC/S,LINEAR/S,SECONDS/K/N,LOWLAT/S," \
                  "VOICES/K/N,STEREO/S,RATE/K/N,RAMP/K/N,CHURN/S,GROUPS/K/N," \
-                 "LIMITER/S,GAIN/K/N"
+                 "LIMITER/S,GAIN/K/N,INTERP/K,PERVOICE/S"
 #define OPT_MODULE 0
 #define OPT_LEAD 1
 #define OPT_NTSC 2
@@ -88,7 +88,9 @@
 #define OPT_GROUPS 11
 #define OPT_LIMITER 12
 #define OPT_GAIN 13
-#define OPT_COUNT 14
+#define OPT_INTERP 14
+#define OPT_PERVOICE 15
+#define OPT_COUNT 16
 
 /* CHURN: a restart interval of the ramp length, but not below 32 frames (a
  * shorter one would write a record for every frame). */
@@ -221,7 +223,7 @@ static void usage(void)
   puts("       zz9k-voiceplay CLICK [LEAD=frames] [SECONDS=n] [LOWLAT]");
   puts("       zz9k-voiceplay LIVE [LEAD=frames] [SECONDS=n] [LOWLAT]");
   puts("       zz9k-voiceplay LOAD VOICES=n SECONDS=n [LINEAR] [STEREO] [RATE=hz] [GAIN=n] [CHURN] [GROUPS=n] [LOWLAT]");
-  puts("       every mode also takes RAMP=frames and LIMITER");
+  puts("       every mode also takes RAMP=frames, LIMITER, INTERP=nearest|linear|cubic and PERVOICE");
   puts("  MODULE   ProTracker module to play (DYN envelopes and EFx funk are refused)");
   puts("  CLICK    a short pulse once per second at 48000 Hz, for listening and");
   puts("           for checking the scheduling margin; 10 seconds unless SECONDS");
@@ -256,6 +258,14 @@ static void usage(void)
   puts("  LEAD     lead in 48 kHz frames; 0 or absent is the firmware floor");
   puts("  NTSC     Paula clock of the module is NTSC (else PAL)");
   puts("  LINEAR   linear interpolation (else nearest)");
+  puts("  INTERP   nearest, linear or cubic: the interpolation of the session,");
+  puts("           sent before anything else as a CONFIG default (or with");
+  puts("           PERVOICE as a MODE record for each voice), and in place of");
+  puts("           LINEAR. Needs a firmware with the MODE and default records;");
+  puts("           cubic and these records run unqualified, with a warning, on a");
+  puts("           firmware that does not advertise CUBIC and VOICE_INTERP");
+  puts("  PERVOICE with INTERP: one MODE record per voice instead of the CONFIG");
+  puts("           default");
   puts("  SECONDS  stop after this many seconds of engine time");
   puts("  LOWLAT   low-latency session: shorter audio fill-ahead while it runs and");
   puts("           a lead floor of 3 periods (2880 frames) instead of 8. Without");
@@ -517,6 +527,37 @@ static int load_mode;
 static int ramp_set;
 static uint32_t ramp_frames;
 static int limiter_set;
+
+/* INTERP: the interpolation asked for, sent as the CONFIG default or, with
+ * PERVOICE, as a MODE record for each voice. It takes the place of LINEAR. */
+static int interp_set;
+static int interp_pervoice;
+static uint32_t interp_value;
+
+static int parse_interp(const char *text)
+{
+  if (is_word(text, "NEAREST")) {
+    interp_value = ZZ9K_VOICE_INTERP_NEAREST;
+  } else if (is_word(text, "LINEAR")) {
+    interp_value = ZZ9K_VOICE_INTERP_LINEAR;
+  } else if (is_word(text, "CUBIC")) {
+    interp_value = ZZ9K_VOICE_INTERP_CUBIC;
+  } else {
+    return 0;
+  }
+  interp_set = 1;
+  return 1;
+}
+
+/* What the session reads with: INTERP if given, else LINEAR or nearest. */
+static const char *interp_name(void)
+{
+  if (interp_set) {
+    return interp_value == ZZ9K_VOICE_INTERP_CUBIC ? "cubic"
+           : interp_value == ZZ9K_VOICE_INTERP_LINEAR ? "linear" : "nearest";
+  }
+  return load_linear ? "linear" : "nearest";
+}
 static uint32_t load_volume;
 static uint32_t churn_groups;
 static uint32_t churn_interval;
@@ -905,7 +946,7 @@ static void report(const char *reason)
     printf("  load: %lu voices, %s samples, %s, rates %lu to %lu Hz, volume "
            "%lu per side\n", (unsigned long)load_voices,
            load_stereo ? "stereo" : "mono",
-           load_linear ? "linear" : "nearest",
+           interp_name(),
            (unsigned long)load_voice_rate(0U),
            (unsigned long)load_voice_rate(load_voices - 1U),
            (unsigned long)load_volume);
@@ -915,6 +956,11 @@ static void report(const char *reason)
   }
   if (limiter_set) {
     puts("  limiter: on (static soft knee above 24576)");
+  }
+  if (interp_set) {
+    printf("  interpolation: %s, set with %s\n", interp_name(),
+           interp_pervoice ? "a MODE record for each voice"
+                           : "the CONFIG default");
   }
   if (churn_groups != 0U) {
     printf("  churn: %lu restarts, %lu group%s, a restart every %lu frames "
@@ -1090,6 +1136,19 @@ int main(void)
   limiter_set = options[OPT_LIMITER] != 0;
   load_stereo = options[OPT_STEREO] != 0;
   load_linear = options[OPT_LINEAR] != 0;
+  if (options[OPT_INTERP]) {
+    if (!parse_interp((const char *)options[OPT_INTERP])) {
+      puts("zz9k-voiceplay: INTERP is nearest, linear or cubic");
+      FreeArgs(rdargs);
+      return 10;
+    }
+  }
+  if (options[OPT_PERVOICE] && !options[OPT_INTERP]) {
+    puts("zz9k-voiceplay: PERVOICE belongs to INTERP");
+    FreeArgs(rdargs);
+    return 10;
+  }
+  interp_pervoice = options[OPT_PERVOICE] != 0;
   if (options[OPT_LEAD]) {
     LONG value = *(LONG *)options[OPT_LEAD];
 
@@ -1329,15 +1388,18 @@ int main(void)
     ZZ9KVoiceExtStatus ext;
 
     zz9k_voice_ext_status_read(session.status, &ext);
-    printf("  engine features 0x%lx%s%s%s%s\n", (unsigned long)ext.features,
+    printf("  engine features 0x%lx%s%s%s%s%s%s\n", (unsigned long)ext.features,
            (ext.features & ZZ9K_VOICE_FEATURE_CONFIG) ? " CONFIG" : "",
            (ext.features & ZZ9K_VOICE_FEATURE_RAMP) ? " RAMP" : "",
            (ext.features & ZZ9K_VOICE_FEATURE_LIMITER) ? " LIMITER" : "",
+           (ext.features & ZZ9K_VOICE_FEATURE_CUBIC) ? " CUBIC" : "",
+           (ext.features & ZZ9K_VOICE_FEATURE_VOICE_INTERP) ? " VOICE_INTERP"
+                                                            : "",
            ext.features == 0U ? " (none: an older firmware)" : "");
-    if ((ramp_set || limiter_set) &&
+    if ((ramp_set || limiter_set || (interp_set && !interp_pervoice)) &&
         (ext.features & ZZ9K_VOICE_FEATURE_CONFIG) == 0U) {
-      puts("zz9k-voiceplay: RAMP and LIMITER need a firmware with the CONFIG "
-           "record");
+      puts("zz9k-voiceplay: RAMP, LIMITER and INTERP need a firmware with the "
+           "CONFIG record");
       code = 20;
       goto close_session;
     }
@@ -1349,6 +1411,19 @@ int main(void)
     if (limiter_set && (ext.features & ZZ9K_VOICE_FEATURE_LIMITER) == 0U) {
       puts("zz9k-voiceplay: WARNING: the firmware does not advertise "
            "LIMITER: the soft knee is unqualified, running it for its "
+           "qualification only. Keep the volume low and the speakers "
+           "protected");
+    }
+    if (interp_set && (ext.features & ZZ9K_VOICE_FEATURE_VOICE_INTERP) == 0U) {
+      puts("zz9k-voiceplay: WARNING: the firmware does not advertise "
+           "VOICE_INTERP: the INTERP records are unqualified, running them "
+           "for their qualification only. A firmware older than the MODE "
+           "record counts them as rejected and plays as before");
+    }
+    if (interp_set && interp_value == ZZ9K_VOICE_INTERP_CUBIC &&
+        (ext.features & ZZ9K_VOICE_FEATURE_CUBIC) == 0U) {
+      puts("zz9k-voiceplay: WARNING: the firmware does not advertise CUBIC: "
+           "the cubic interpolation is unqualified, running it for its "
            "qualification only. Keep the volume low and the speakers "
            "protected");
     }
@@ -1394,6 +1469,27 @@ int main(void)
           zz9k_voice_build_config_limiter(record, lead_frames, 1);
         } else {
           zz9k_voice_build_config_ramp(record, lead_frames, ramp_frames);
+        }
+      }
+    }
+    if (interp_set) {
+      /* The interpolation goes out at the lead stamp too, ahead of every
+       * note: the session default in one CONFIG record, or a MODE record
+       * for each voice. */
+      if (interp_pervoice) {
+        uint32_t v;
+
+        for (v = 0U; v < voice_count; v++) {
+          record = pending_next(lead_frames, v, ZZ9K_VOICE_OP_MODE);
+          if (record) {
+            zz9k_voice_build_mode_interp(record, lead_frames, (uint8_t)v,
+                                         interp_value);
+          }
+        }
+      } else {
+        record = pending_next(lead_frames, 0U, ZZ9K_VOICE_OP_CONFIG);
+        if (record) {
+          zz9k_voice_build_config_interp(record, lead_frames, interp_value);
         }
       }
     }

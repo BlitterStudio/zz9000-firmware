@@ -268,6 +268,11 @@ static int ref_config(struct ref_state *s, unsigned flags, uint32_t a0,
 	const int ramp = (flags & 1U) != 0U;
 	const int lim = (flags & 2U) != 0U;
 
+	/* The default interpolation is a record of its own; the effect of
+	 * the nearest, linear and cubic defaults is covered by
+	 * audio_voice_cubic_test, and the sums here read the nearest sample. */
+	if (flags == 4U)
+		return a0 >= 1U && a0 <= 3U && a1 == 0U;
 	if (flags == 0U || (flags & ~3U) != 0U)
 		return 0;
 	if (ramp && a0 > 512U)
