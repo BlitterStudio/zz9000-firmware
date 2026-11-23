@@ -270,40 +270,56 @@ static void publish_status(void)
 
 /* ---- render ---- */
 
+/* Render one period at `produced` and publish it to the ISR. */
+static void render_period(void)
+{
+	uint64_t produced = g_s.produced;
+	uint8_t *out = g_staging + (uint32_t)(produced % STAGING_BYTES);
+	size_t used;
+	uint32_t irq_state;
+
+	used = audio_voice_render(&g_engine, (int16_t *)(void *)out,
+		AUDIO_VOICE_PERIOD_FRAMES, g_queue + g_s.queue_head,
+		g_s.queue_count);
+	g_s.queue_head += (uint32_t)used;
+	g_s.queue_count -= (uint32_t)used;
+	if (g_s.queue_count == 0U)
+		g_s.queue_head = 0U;
+	Xil_DCacheFlushRange((INTPTR)out, PERIOD_BYTES);
+	if (g_s.slot_live)
+		g_s.period_stamp[(produced / PERIOD_BYTES) %
+			STAGING_PERIODS] = now_ticks();
+	irq_state = smp_local_irq_save();
+	g_s.produced = produced + PERIOD_BYTES;
+	smp_local_irq_restore(irq_state);
+}
+
 /*
  * Render whole periods into the staging ring while the engine is less than
- * the granted lead past the playing frame. The rendered-but-unstaged
- * periods never exceed the lead (the ISR consumes before it retires), so
- * the ring keeps the TX replay window behind `consumed` intact; the size
- * assert at the top of the file holds that arithmetic.
+ * the granted lead past the playing frame, at most `max_periods` of them.
+ * The rendered-but-unstaged periods never exceed the lead (the ISR consumes
+ * before it retires), so the ring keeps the TX replay window behind
+ * `consumed` intact; the size assert at the top of the file holds that
+ * arithmetic.
+ *
+ * The poll runs in the main loop's no-request branch, and every Zorro
+ * register access from the 68k waits while a render runs. 32 interpolated
+ * voices cost about 3 ms a period, so rendering the whole 8-period lead in
+ * one call after an OPEN or START stalled the 68k for about 24 ms and
+ * froze the machine. The poll renders one period per call: the main loop
+ * serves the next Zorro request between periods, and the steady state needs
+ * one period per 20 ms anyway. Catching up after a stall takes one call per
+ * period; the loop makes many calls in a period.
  */
-static void render_to_lead(void)
+static void render_to_lead(uint32_t max_periods)
 {
-	for (;;) {
-		uint64_t produced = g_s.produced;
+	while (max_periods-- != 0U) {
 		uint32_t playing =
 			(uint32_t)(read_cursor64(&g_s.retired) / 4U);
-		uint8_t *out;
-		size_t used;
-		uint32_t irq_state;
 
 		if (g_engine.frame - playing >= g_s.lead)
 			break;
-		out = g_staging + (uint32_t)(produced % STAGING_BYTES);
-		used = audio_voice_render(&g_engine, (int16_t *)(void *)out,
-			AUDIO_VOICE_PERIOD_FRAMES, g_queue + g_s.queue_head,
-			g_s.queue_count);
-		g_s.queue_head += (uint32_t)used;
-		g_s.queue_count -= (uint32_t)used;
-		if (g_s.queue_count == 0U)
-			g_s.queue_head = 0U;
-		Xil_DCacheFlushRange((INTPTR)out, PERIOD_BYTES);
-		if (g_s.slot_live)
-			g_s.period_stamp[(produced / PERIOD_BYTES) %
-				STAGING_PERIODS] = now_ticks();
-		irq_state = smp_local_irq_save();
-		g_s.produced = produced + PERIOD_BYTES;
-		smp_local_irq_restore(irq_state);
+		render_period();
 	}
 }
 
@@ -585,6 +601,14 @@ uint16_t audio_voice_session_reset(uint32_t session)
 		 * from there, so the frame counter never goes backwards past
 		 * a frame the client was told was rendered and still agrees
 		 * with produced / 4.
+		 *
+		 * The first silent period is rendered before the interrupts
+		 * come back: the formatter ISR runs on this core and takes
+		 * one period per tick, so a tick landing between the cursor
+		 * reset and the first render would find nothing staged and
+		 * count a voice underrun for a stream the client just
+		 * flushed. The poll renders the rest of the lead, one period
+		 * per call; a tick needs one period at a time.
 		 */
 		irq_state = smp_local_irq_save();
 		audio_fabric_request_rebuild(VOICE_SLOT);
@@ -593,8 +617,25 @@ uint16_t audio_voice_session_reset(uint32_t session)
 		g_s.produced = consumed;
 		g_s.retired = consumed;
 		g_engine.frame = (uint32_t)(consumed / 4U);
+		render_period();
 		smp_local_irq_restore(irq_state);
-		render_to_lead();
+	} else {
+		/*
+		 * Not live yet: the polls that are building the first lead
+		 * have staged periods of the pre-reset voices, and the slot
+		 * would play them once it goes live. Take them back. The ISR
+		 * takes nothing from a slot that is not live, so `consumed`
+		 * is still 0, there is no TX ring content to rebuild and no
+		 * ISR to hold off. The playing frame is 0 and the client has
+		 * been told nothing but a horizon that was never played, so
+		 * the timeline restarting at the consumed cursor cannot go
+		 * backwards past a played frame. The polls render silence
+		 * from there up to the lead and then the slot goes live.
+		 */
+		consumed = g_s.consumed;
+		g_s.produced = consumed;
+		g_s.retired = consumed;
+		g_engine.frame = (uint32_t)(consumed / 4U);
 	}
 	publish_status();
 	return SDK_STATUS_OK;
@@ -640,6 +681,20 @@ uint16_t audio_voice_session_upload(uint32_t session,
 
 /* ---- main-loop poll ---- */
 
+/* One period per poll call: see render_to_lead(). */
+#define POLL_MAX_PERIODS 1U
+
+/*
+ * The poll runs in the main loop's no-request branch only. A 68k that keeps
+ * a Zorro request in flight every iteration (a P96 blit, a long copy) would
+ * hold the poll off for as long as it lasts, and the lead only covers
+ * (lead - fill-ahead) * 20 ms, 40 ms at the floor. audio_voice_session_
+ * poll_busy() is called from the request branch and polls anyway once this
+ * long has passed since the last poll, so a render and a ring drain are at
+ * most this far apart however busy the bus is.
+ */
+#define BUSY_POLL_TICKS (COUNTS_PER_SECOND / 500U)
+
 void audio_voice_session_poll(void)
 {
 	uint16_t write_cursor;
@@ -672,14 +727,34 @@ void audio_voice_session_poll(void)
 	    g_s.state == AUDIO_VOICE_STATE_OPEN)
 		g_s.state = AUDIO_VOICE_STATE_LIVE;
 	if (g_s.state == AUDIO_VOICE_STATE_LIVE) {
-		render_to_lead();
-		if (!g_s.slot_live) {
-			/* The first record fixes frame 0: the slot goes live
-			 * with the first periods already staged. */
+		render_to_lead(POLL_MAX_PERIODS);
+		/*
+		 * The first record fixes frame 0. The slot goes live once the
+		 * whole lead is staged, which takes one call per period: going
+		 * live primes the TX ring with the staged periods up to the
+		 * fabric fill-ahead (6 periods, 2 in a low-latency session;
+		 * the lead is always at least one more), and the ISR adds one
+		 * period per tick after that, so a slot that went live with
+		 * fewer periods staged would leave the ring short of its
+		 * fill-ahead and run out before the poll caught up. Until
+		 * then the playing frame stays 0 and the engine renders up
+		 * to the lead.
+		 */
+		if (!g_s.slot_live && g_engine.frame >= g_s.lead) {
 			g_s.slot_live = 1U;
 			(void)audio_fabric_producer_go_live_when_ready(
 				VOICE_SLOT, 1);
 		}
 	}
 	publish_status();
+}
+
+void audio_voice_session_poll_busy(void)
+{
+	if (g_s.state == AUDIO_VOICE_STATE_CLOSED)
+		return;
+	if (g_s.poll_seen &&
+	    now_ticks() - g_s.last_poll_ticks < BUSY_POLL_TICKS)
+		return;
+	audio_voice_session_poll();
 }

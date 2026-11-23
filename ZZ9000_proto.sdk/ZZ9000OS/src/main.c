@@ -3071,6 +3071,11 @@ int main() {
 		 * iteration. Dormant (a cheap empty-queue scan) until core 1 is enabled.
 		 */
 		scheduler_core0_poll((writereq || readreq) ? 1 : 0, 0);
+		/* The voice poll only runs when no request was pending (see
+		 * above): under steady Zorro traffic it polls here, rate
+		 * limited to once per 2 ms. */
+		if (writereq || readreq)
+			audio_voice_session_poll_busy();
 
 		/* P96 video overlay: enqueue the ISR-requested compose frame
 		 * (the ISR itself must not touch the single-producer queue)

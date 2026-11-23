@@ -180,11 +180,16 @@ this.
 
 Every record carries a stamp, the engine frame it takes effect at. The
 firmware renders whole 960-frame periods (20 ms) on its main loop, up to
-`playing_frame + lead_frames`, into a staging ring. The fabric copies those
+`playing_frame + lead_frames`, into a staging ring, one period per pass of
+the loop so that the 68k's register accesses are served between periods. A
+session starts playing once the whole lead is staged, as long after the first
+record as it takes to render the lead. Until then the status `horizon` climbs
+one period per pass and `playing_frame` stays 0. The fabric copies those
 periods into the transmit ring from its interrupt. A record must reach the
-firmware before the engine renders its frame. A record whose frame has already
-been rendered is applied at the first frame of the next period the engine
-renders, and counts as late.
+firmware before the
+engine renders its frame. A record whose frame has already been rendered is
+applied at the first frame of the next period the engine renders, and counts
+as late.
 
 Three numbers in the grant bound the lead:
 
@@ -384,8 +389,8 @@ and 4 bytes in S16S.
   partial frame, because the length is rounded down.
 
 Firmware advertises the formats with `ZZ9K_SERVICE_FLAG_AUDIO_VOICE_STEREO`
-(see [Discovery](#discovery)). The engine plays them already, and the flag is
-not set yet.
+(see [Discovery](#discovery)). It sets the flag on Zorro III, together with
+`ZZ9K_SERVICE_FLAG_AUDIO_VOICE`, and not on Zorro II.
 
 ## Timing helpers
 
@@ -493,7 +498,7 @@ paces on `playing_frame` already reads the status often enough.
 
 | Event | Result |
 | --- | --- |
-| `ZZ9KVoiceReset()` | Drops every record the client had written, every queued command and the periods the slot has already queued; silences all voices. Samples, master gain and the timeline stay, and the frame counter keeps counting, so stamps after a reset are relative to a fresh status read. Audio of at most the period now playing remains. |
+| `ZZ9KVoiceReset()` | Drops every record the client had written, every queued command and the periods the slot has already queued; silences all voices. Samples, master gain and the timeline stay, and the frame counter keeps counting, so stamps after a reset are relative to a fresh status read. Audio of at most the period now playing remains. A reset while the session is still staging its first lead also takes back the staged periods and restarts the timeline at frame 0; nothing of the earlier voices plays. |
 | `ZZ9KVoiceClose()` | Silences the voices, drops the queued periods, detaches the slot, frees the bank and unpins and frees the buffers. |
 | Missed heartbeat | The firmware ends the session as Close does. The status block reads state 0. A later `ZZ9KVoiceClose()` returns `ZZ9K_STATUS_BAD_HANDLE` and still frees the buffers. |
 | Client exit | The final `CloseLibrary()` releases the opener's client id, which ends its session and frees its buffers. Without that the heartbeat limit applies. |
@@ -549,9 +554,10 @@ The stereo sample formats have their own flag,
 `ZZ9K_SERVICE_FLAG_AUDIO_VOICE_STEREO` (bit 29, printed as
 `audio-voice-stereo`), reported together with `audio-voice`. A client that
 wants S8S or S16S samples checks it and defines only the mono formats when it
-is clear. The firmware engine plays both formats, but no firmware sets the
-flag yet, so a client cannot use them until one does. A firmware without
-the stereo support refuses a DEFINE in format 2 or 3 with
+is clear. Firmware with stereo support sets the flag on Zorro III together
+with `audio-voice`. Earlier firmware with the voice engine plays both formats
+but never sets the flag, so a client does not use them there. A firmware
+without the stereo support refuses a DEFINE in format 2 or 3 with
 `ZZ9K_STATUS_BAD_REQUEST`. See [Stereo samples](#stereo-samples).
 
 ## zz9k-voiceplay

@@ -53,7 +53,23 @@ output.
 The voice engine renders on the core-0 main loop, from
 `audio_voice_session_poll()`. It renders whole periods until its frame
 counter is the granted lead past the playing frame, and writes them into a
-staging ring of 40 periods that serves as the slot's source ring. The
+staging ring of 40 periods that serves as the slot's source ring. A poll
+call renders one period at most. The main loop runs the poll in the branch
+where no Zorro request is pending, and every register access from the 68k
+waits while a render runs; 32 interpolated voices cost about 3 ms a period
+on the card, and a call that rendered the whole eight-period lead after an
+open or a START held the 68k for about 24 ms. The main loop calls the poll
+many times in a period, so a short lead is rebuilt within a few loop
+iterations, with Zorro requests served between the periods. The slot goes
+live once the whole lead is staged, because going live primes the TX ring
+from the staged periods up to the fill-ahead. A reset stages one silent
+period inside its critical section and leaves the rest of the lead to the
+poll. A reset before the slot goes live takes back the periods the earlier
+polls staged, and the engine timeline restarts at frame 0 (nothing has been
+played), so the pre-reset voices never sound. Zorro traffic that never
+pauses never reaches the poll's branch, so
+the request branch calls `audio_voice_session_poll_busy()`, which polls when
+2 ms have passed since the last poll. The
 fabric ISR only copies periods out of that ring, as it does for the other
 slots, and the slot's retirement gives the playing frame that clients read.
 The slot produces 48 kHz stereo S16, so it needs no conversion.
@@ -216,7 +232,7 @@ at 48 kHz and never needs conversion.
 | `SDK_SERVICE_FLAG_AUDIO_FABRIC` | bit 22 | Direct-ring audio fabric is available in the audio service |
 | `SDK_SERVICE_FLAG_AUDIO_FABRIC_RATE` | bit 23 | Source-rate leases are available |
 | `SDK_SERVICE_FLAG_AUDIO_VOICE` | bit 28 | Voice engine opcodes are advertised. The firmware sets it on Zorro III; it is not set on Zorro II yet |
-| `SDK_SERVICE_FLAG_AUDIO_VOICE_STEREO` | bit 29 | The voice engine's stereo sample formats are advertised. The flag is defined in the firmware headers, and no firmware sets it yet |
+| `SDK_SERVICE_FLAG_AUDIO_VOICE_STEREO` | bit 29 | The voice engine's stereo sample formats are advertised. The firmware sets it on Zorro III with the voice flag; it is not set on Zorro II yet |
 
 Clients should check the capability and service flags before using the
 opcodes. Firmware that does not recognize the source-rate flag returns

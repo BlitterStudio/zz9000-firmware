@@ -176,7 +176,21 @@ uint16_t audio_voice_session_upload(uint32_t session,
  */
 void audio_voice_session_shutdown(void);
 
-/* Main-loop pass: heartbeat, ring drain, render, status. */
+/*
+ * Main-loop pass: heartbeat, ring drain, render, status. Renders at most
+ * one period per call, so the main loop can serve a Zorro request between
+ * periods; a lead that is short (after OPEN, START, RESET or a stall) is
+ * rebuilt over as many calls. The slot goes live once the full lead is
+ * staged.
+ */
 void audio_voice_session_poll(void);
+
+/*
+ * For the main loop's request branch, where audio_voice_session_poll() does
+ * not run: polls when at least 2 ms have passed since the last poll, so
+ * Zorro traffic that never pauses cannot starve the engine. No-op without
+ * a session.
+ */
+void audio_voice_session_poll_busy(void);
 
 #endif /* ZZ_AUDIO_VOICE_SESSION_H */
