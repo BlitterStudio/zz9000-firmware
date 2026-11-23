@@ -191,12 +191,21 @@ typedef struct ZZ9KVoiceRingHeader {
  * MODE and ENVELOPE are op numbers of later features; the firmware rejects
  * them until it has them. CONFIG (ZZ9K_VOICE_FEATURE_CONFIG) carries
  * session-wide settings: flags name the settings the record holds, the voice
- * field is ignored. ZZ9K_VOICE_CONFIG_RAMP: arg0 = ramp length in frames,
- * 0 to ZZ9K_VOICE_RAMP_MAX_FRAMES; with a length above 0, volume changes,
+ * field is ignored, and every named setting is validated before any is
+ * applied, so a record that holds a bad value changes nothing.
+ * ZZ9K_VOICE_CONFIG_RAMP: arg0 = ramp length in frames, 0 to
+ * ZZ9K_VOICE_RAMP_MAX_FRAMES; with a length above 0, volume changes,
  * starts, stops and restarts fade over that many frames instead of
  * stepping, and a restart of a sounding voice lets the old sound fade out in
- * one of ZZ9K_VOICE_FADE_SLOTS slots. A record with no flag, an unknown flag
- * or an out-of-range value is rejected whole. */
+ * one of ZZ9K_VOICE_FADE_SLOTS slots. ZZ9K_VOICE_CONFIG_LIMITER: arg1 = 0
+ * (off) or 1 (on), the static soft knee after the master gain: a sample up
+ * to 24576 in magnitude passes unchanged, a louder one is bent toward, and
+ * never onto, the 16-bit rails. A record that names only the limiter must
+ * carry arg0 = 0; a record that names only the ramp ignores arg1 (legacy);
+ * a record that names both carries the ramp length in arg0 and the limiter
+ * setting in arg1. A record with no flag, an unknown flag, a ramp length
+ * above the maximum, a limiter value above 1 or a limiter-only record with
+ * a nonzero arg0 is rejected whole. */
 #define ZZ9K_VOICE_OP_START     1U
 #define ZZ9K_VOICE_OP_LOOP      2U
 #define ZZ9K_VOICE_OP_SET       3U
@@ -212,7 +221,8 @@ typedef struct ZZ9KVoiceRingHeader {
 #define ZZ9K_VOICE_SET_RATE_HZ  0x0004U /* rate is Hz, else a Paula period */
 #define ZZ9K_VOICE_DIR_BACKWARD 0x0001U
 
-#define ZZ9K_VOICE_CONFIG_RAMP  0x0001U
+#define ZZ9K_VOICE_CONFIG_RAMP    0x0001U
+#define ZZ9K_VOICE_CONFIG_LIMITER 0x0002U
 
 #define ZZ9K_VOICE_RAMP_MAX_FRAMES 512U
 #define ZZ9K_VOICE_FADE_SLOTS      32U
@@ -284,7 +294,11 @@ typedef struct ZZ9KVoiceRecord {
 /* Feature bits of the features word. CONFIG is the CONFIG record itself;
  * RAMP says that a ramp length set with it is qualified: the firmware has
  * been measured with 32 voices and a full fade pool inside its render
- * budget. The firmware sets a bit only for a feature it has. */
+ * budget. LIMITER says the same of the soft knee set with
+ * ZZ9K_VOICE_CONFIG_LIMITER. A firmware may accept the CONFIG setting
+ * before it advertises the bit, so that the setting can be qualified; a
+ * client uses the setting outside a qualification run only once the bit is
+ * set. The firmware sets a bit only for a feature it has. */
 #define ZZ9K_VOICE_FEATURE_RAMP         0x0001U
 #define ZZ9K_VOICE_FEATURE_LIMITER      0x0002U
 #define ZZ9K_VOICE_FEATURE_CUBIC        0x0004U
@@ -717,7 +731,11 @@ static inline void zz9k_voice_build_direction(ZZ9KVoiceRecord *record,
 }
 
 /* A CONFIG record carrying the settings named by flags (ZZ9K_VOICE_CONFIG_*);
- * the voice field is 0. */
+ * the voice field is 0. The firmware rejects the record whole when flags is
+ * 0 or holds an unknown bit, when RAMP is named and arg0 is above
+ * ZZ9K_VOICE_RAMP_MAX_FRAMES, when LIMITER is named and arg1 is above 1, or
+ * when LIMITER is named without RAMP and arg0 is not 0. arg1 is ignored when
+ * only RAMP is named. */
 static inline void zz9k_voice_build_config(ZZ9KVoiceRecord *record,
                                            uint32_t stamp, uint16_t flags,
                                            uint32_t arg0, uint32_t arg1)
@@ -734,6 +752,28 @@ static inline void zz9k_voice_build_config_ramp(ZZ9KVoiceRecord *record,
                                                 uint32_t frames)
 {
   zz9k_voice_build_config(record, stamp, ZZ9K_VOICE_CONFIG_RAMP, frames, 0U);
+}
+
+/* The static soft knee, on (nonzero) or off (0), with arg0 = 0 as a
+ * limiter-only record requires. The ramp length is not touched. Check
+ * ZZ9K_VOICE_FEATURE_CONFIG first, and ZZ9K_VOICE_FEATURE_LIMITER before
+ * relying on the knee outside a qualification run. */
+static inline void zz9k_voice_build_config_limiter(ZZ9KVoiceRecord *record,
+                                                   uint32_t stamp,
+                                                   int enabled)
+{
+  zz9k_voice_build_config(record, stamp, ZZ9K_VOICE_CONFIG_LIMITER, 0U,
+                          enabled ? 1U : 0U);
+}
+
+/* Ramp length and limiter in one record, applied together or not at all: a
+ * bad ramp length leaves the limiter as it was and the other way round. */
+static inline void zz9k_voice_build_config_ramp_limiter(
+    ZZ9KVoiceRecord *record, uint32_t stamp, uint32_t frames, int enabled)
+{
+  zz9k_voice_build_config(
+      record, stamp, ZZ9K_VOICE_CONFIG_RAMP | ZZ9K_VOICE_CONFIG_LIMITER,
+      frames, enabled ? 1U : 0U);
 }
 
 /* Copies up to count records into the ring behind the session's write

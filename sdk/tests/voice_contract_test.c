@@ -153,8 +153,10 @@ static void test_layouts(void)
         ZZ9K_VOICE_FEATURE_CONFIG == 0x80U);
   CHECK(ZZ9K_VOICE_OP_MODE == 7U && ZZ9K_VOICE_OP_ENVELOPE == 8U &&
         ZZ9K_VOICE_OP_CONFIG == 9U);
-  CHECK(ZZ9K_VOICE_CONFIG_RAMP == 1U && ZZ9K_VOICE_RAMP_MAX_FRAMES == 512U &&
-        ZZ9K_VOICE_FADE_SLOTS == 32U);
+  CHECK(ZZ9K_VOICE_CONFIG_RAMP == 1U && ZZ9K_VOICE_CONFIG_LIMITER == 2U &&
+        ZZ9K_VOICE_RAMP_MAX_FRAMES == 512U && ZZ9K_VOICE_FADE_SLOTS == 32U);
+  /* the two settings are independent bits of the CONFIG flags word */
+  CHECK((ZZ9K_VOICE_CONFIG_RAMP & ZZ9K_VOICE_CONFIG_LIMITER) == 0U);
   CHECK(ZZ9K_VOICE_JITTER_NONE == 0xFFFFFFFFU);
 
   CHECK(ZZ9K_VOICE_OP_START == 1U && ZZ9K_VOICE_OP_LOOP == 2U &&
@@ -464,6 +466,50 @@ static void test_records(void)
         r.arg1 == 6U);
   zz9k_voice_record_encode(&w, &r);
   CHECK(b[4] == 0U && b[5] == 9U && b[6] == 0x00 && b[7] == 0x03);
+
+  /* Limiter-only: flags name the limiter, arg0 is 0 as the firmware needs,
+   * arg1 is 0 or 1 whatever nonzero value the caller passes. */
+  memset(&r, 0xA5, sizeof(r));
+  zz9k_voice_build_config_limiter(&r, 12U, 1);
+  CHECK(r.stamp == 12U && r.voice == 0U && r.op == ZZ9K_VOICE_OP_CONFIG &&
+        r.flags == ZZ9K_VOICE_CONFIG_LIMITER && r.arg0 == 0U && r.arg1 == 1U);
+  zz9k_voice_build_config_limiter(&r, 13U, 0);
+  CHECK(r.flags == ZZ9K_VOICE_CONFIG_LIMITER && r.arg0 == 0U &&
+        r.arg1 == 0U);
+  zz9k_voice_build_config_limiter(&r, 14U, 7);
+  CHECK(r.flags == ZZ9K_VOICE_CONFIG_LIMITER && r.arg0 == 0U &&
+        r.arg1 == 1U);
+  zz9k_voice_record_encode(&w, &r);
+  CHECK(b[0] == 0 && b[1] == 0 && b[2] == 0 && b[3] == 14U);
+  CHECK(b[4] == 0U && b[5] == ZZ9K_VOICE_OP_CONFIG);
+  CHECK(b[6] == 0x00 && b[7] == ZZ9K_VOICE_CONFIG_LIMITER);
+  CHECK(b[8] == 0 && b[9] == 0 && b[10] == 0 && b[11] == 0);
+  CHECK(b[12] == 0 && b[13] == 0 && b[14] == 0 && b[15] == 1U);
+  zz9k_voice_record_decode(&back, &w);
+  CHECK(memcmp(&back, &r, sizeof(r)) == 0);
+
+  /* Ramp and limiter in one record: both flags, ramp length in arg0,
+   * limiter switch in arg1. */
+  zz9k_voice_build_config_ramp_limiter(&r, 15U, ZZ9K_VOICE_RAMP_MAX_FRAMES,
+                                       1);
+  CHECK(r.stamp == 15U && r.voice == 0U && r.op == ZZ9K_VOICE_OP_CONFIG &&
+        r.flags == (ZZ9K_VOICE_CONFIG_RAMP | ZZ9K_VOICE_CONFIG_LIMITER) &&
+        r.arg0 == 512U && r.arg1 == 1U);
+  zz9k_voice_build_config_ramp_limiter(&r, 16U, 0U, 0);
+  CHECK(r.flags == 3U && r.arg0 == 0U && r.arg1 == 0U);
+  zz9k_voice_record_encode(&w, &r);
+  CHECK(b[6] == 0x00 && b[7] == 0x03);
+  CHECK(b[8] == 0 && b[9] == 0 && b[10] == 0 && b[11] == 0);
+  CHECK(b[15] == 0U);
+  zz9k_voice_build_config_ramp_limiter(&r, 17U, 300U, 1);
+  zz9k_voice_record_encode(&w, &r);
+  CHECK(b[8] == 0 && b[9] == 0 && b[10] == 0x01 && b[11] == 0x2C);
+  CHECK(b[12] == 0 && b[13] == 0 && b[14] == 0 && b[15] == 1U);
+
+  /* A ramp-only record keeps the limiter argument 0 (the firmware ignores
+   * it for this flag set) and does not name the limiter. */
+  zz9k_voice_build_config_ramp(&r, 18U, 512U);
+  CHECK((r.flags & ZZ9K_VOICE_CONFIG_LIMITER) == 0U && r.arg1 == 0U);
 }
 
 /* ---- Status reader ---- */
@@ -747,6 +793,63 @@ static void test_stage_then_publish(void)
   CHECK(zz9k_voice_ring_stage(&session, 0U, recs, 1U) == 0U);
   session.mapped = 1U;
   CHECK(zz9k_voice_ring_stage(&session, 0U, 0, 1U) == 0U);
+}
+
+/* The CONFIG record a player sends ahead of its notes shares the lead stamp
+ * with them. The firmware applies same-stamp records in ring order, so the
+ * staging path must keep that order whatever the batching and the wrap. */
+static void test_config_same_stamp_order(void)
+{
+  uint8_t ring[ZZ9K_VOICE_RING_HEADER_BYTES + 8U * ZZ9K_VOICE_RECORD_BYTES];
+  ZZ9KVoiceSession session;
+  ZZ9KVoiceRecord recs[6];
+  ZZ9KVoiceRecord back;
+  ZZ9KVoiceRecordWire wire;
+  const uint32_t stamp = 7680U;
+  uint32_t round;
+  uint32_t i;
+
+  zz9k_voice_build_config_ramp_limiter(&recs[0], stamp, 256U, 1);
+  zz9k_voice_build_master(&recs[1], stamp, ZZ9K_VOICE_MASTER_UNITY);
+  zz9k_voice_build_set(&recs[2], stamp, 3U,
+                       ZZ9K_VOICE_SET_RATE | ZZ9K_VOICE_SET_VOLUME, 428U,
+                       0xFFFFU, 0xFFFFU);
+  zz9k_voice_build_start(&recs[3], stamp, 3U, 0U, 0U, 0U);
+  zz9k_voice_build_loop(&recs[4], stamp, 3U, 0U, 8192U);
+  zz9k_voice_build_config_limiter(&recs[5], stamp, 0);
+
+  /* Two rounds: the second starts at cursor 6, so the batch wraps the
+   * eight-record ring. Each round stages in two uneven batches. */
+  memset(ring, 0, sizeof(ring));
+  fill_session(&session, ring, 8U);
+  for (round = 0U; round < 2U; round++) {
+    uint32_t base = session.write_cursor;
+
+    CHECK(zz9k_voice_ring_stage(&session, (uint16_t)base, recs, 2U) == 2U);
+    CHECK(zz9k_voice_ring_stage(&session, (uint16_t)base, recs + 2U, 4U) ==
+          4U);
+    zz9k_voice_ring_publish(&session);
+    CHECK(zz9k_get_be16(ring) == (uint16_t)session.write_cursor);
+    for (i = 0U; i < 6U; i++) {
+      uint32_t slot = (base + i) & 7U;
+
+      memcpy(&wire, ring + ZZ9K_VOICE_RING_HEADER_BYTES +
+                        slot * ZZ9K_VOICE_RECORD_BYTES,
+             sizeof(wire));
+      zz9k_voice_record_decode(&back, &wire);
+      CHECK(memcmp(&back, &recs[i], sizeof(back)) == 0);
+      CHECK(back.stamp == stamp);
+    }
+    /* the settings record is first in the ring, ahead of every note */
+    memcpy(&wire, ring + ZZ9K_VOICE_RING_HEADER_BYTES +
+                      (base & 7U) * ZZ9K_VOICE_RECORD_BYTES,
+           sizeof(wire));
+    zz9k_voice_record_decode(&back, &wire);
+    CHECK(back.op == ZZ9K_VOICE_OP_CONFIG &&
+          back.flags == (ZZ9K_VOICE_CONFIG_RAMP | ZZ9K_VOICE_CONFIG_LIMITER) &&
+          back.arg0 == 256U && back.arg1 == 1U);
+  }
+  CHECK(session.write_cursor == 12U);
 }
 
 /* ---- Request builders and the OPEN reply decoder ---- */
@@ -2192,6 +2295,7 @@ int main(void)
   test_ring_math();
   test_stage_then_publish();
   test_request_builders();
+  test_config_same_stamp_order();
   test_open_reply_decoder();
 
   test_open_success(2U);

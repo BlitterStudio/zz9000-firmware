@@ -693,7 +693,9 @@ static int run_sequence(uint32_t seq, uint64_t seed)
 				c->arg0 = rnd(2) ? 256 : rnd(600);
 			} else if (pick < 95) {
 				c->op = AUDIO_VOICE_OP_CONFIG;
-				c->flags = rnd(12) ? 1 : rnd(4);
+				/* flags 0 or unknown bits: bit 1 is the limiter, covered by
+				 * audio_voice_limiter_test */
+				c->flags = rnd(12) ? 1 : (uint16_t)(rnd(4) << 2);
 				c->arg0 = rnd(20) ? pick_ramp() : 513 + rnd(1000);
 			} else {
 				c->op = (uint8_t)(rnd(2) ? 7 + rnd(2) : 10 + rnd(200));
@@ -1029,8 +1031,8 @@ static void test_config(void)
 	c[0] = mk(0, 0, AUDIO_VOICE_OP_CONFIG, 1, 512, 0);
 	c[1] = mk(0, 0, AUDIO_VOICE_OP_CONFIG, 1, 513, 0);
 	c[2] = mk(0, 0, AUDIO_VOICE_OP_CONFIG, 0, 100, 0);
-	c[3] = mk(0, 0, AUDIO_VOICE_OP_CONFIG, 2, 100, 0);
-	c[4] = mk(0, 9, AUDIO_VOICE_OP_CONFIG, 3, 100, 0);
+	c[3] = mk(0, 0, AUDIO_VOICE_OP_CONFIG, 4, 100, 0);
+	c[4] = mk(0, 9, AUDIO_VOICE_OP_CONFIG, 5, 100, 0);
 	c[5] = mk(0, 200, AUDIO_VOICE_OP_CONFIG, 1, 7, 0);
 	c[6] = mk(0, 0, AUDIO_VOICE_OP_MODE, 1, 7, 0);
 	c[7] = mk(0, 0, AUDIO_VOICE_OP_ENVELOPE, 1, 7, 0);

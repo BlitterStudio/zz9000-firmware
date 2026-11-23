@@ -88,6 +88,31 @@ comment.
 `ZZ9K_AUDIO_BALANCE_NEUTRAL` (`0x7f7f`) releases an owner's trim and keeps
 the operator baseline. It reserves an absolute 127/127 trim request.
 
+## Voice engine soft knee
+
+The voice engine has an optional static soft knee on its own mix, set with
+a `CONFIG` record (see [zz9k-voice.md](../sdk/docs/zz9k-voice.md#limiter)).
+It is a third mechanism next to the two above and replaces neither:
+
+- It acts inside the voice engine, on the sum of the voices after the master
+  gain, and passes samples up to 24576 in magnitude unchanged. Louder
+  samples are bent toward the rails and stay at or below 32766 in magnitude.
+- It does not change the Paula and AX ceilings, the weighted boundary or the
+  mixer trims. Those rules stay as described above, with or without the
+  knee.
+- It is not the ADAU1701 limiter, which bounds the summed output at its
+  boot threshold. The knee bounds one source, so it does not repair
+  distortion that another source or a later stage adds.
+- It is not calibrated. The ceilings in this document come from one R1 card
+  and say nothing about the knee. The knee is off by default, and production
+  firmware does not advertise it: a test sends the `CONFIG` record on its own.
+
+`zz9k-voiceplay LOAD GAIN=65535` drives the engine far past full scale to
+exercise the knee, and `GAIN=65535 CHURN RAMP=256` adds full-volume fade
+tails. The output is loud and harsh, so lower the amplifier and speaker
+volume before such a run and keep headphones at a low level. Do not read a
+clean result of a saturation run as a ceiling for any source.
+
 ## Measuring a card
 
 Measure the Paula and AX paths independently on the card being calibrated.

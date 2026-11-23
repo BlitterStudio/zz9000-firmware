@@ -31,6 +31,7 @@ VOICE_PT4_TARGET := $(BUILD_DIR)/audio_voice_pt4_test
 VOICE_SESSION_TARGET := $(BUILD_DIR)/audio_voice_session_test
 VOICE_BASELINE_TARGET := $(BUILD_DIR)/audio_voice_baseline_test
 VOICE_RAMP_TARGET := $(BUILD_DIR)/audio_voice_ramp_test
+VOICE_LIMITER_TARGET := $(BUILD_DIR)/audio_voice_limiter_test
 VOICE_PARITY_TARGET := $(BUILD_DIR)/audio_voice_abi_parity_test
 TARGETS := $(CONVERT_TARGET) $(CONVERT_EXACT_TARGET) $(CAPTURE_TARGET) $(PROFILE_TARGET) \
 	$(PLAYBACK_TARGET) $(RATE_TARGET) $(PRECONVERT_TARGET) \
@@ -40,7 +41,7 @@ TARGETS := $(CONVERT_TARGET) $(CONVERT_EXACT_TARGET) $(CAPTURE_TARGET) $(PROFILE
 	$(RING_TARGET) $(BENCH_SMOKE_TARGET) $(STREAM_DECODE_TARGET) \
 	$(REDUCE_TARGET) $(VOICE_TARGET) $(VOICE_PT4_TARGET) \
 	$(VOICE_BASELINE_TARGET) \
-	$(VOICE_RAMP_TARGET) $(VOICE_PARITY_TARGET) \
+	$(VOICE_RAMP_TARGET) $(VOICE_LIMITER_TARGET) $(VOICE_PARITY_TARGET) \
 	$(VOICE_SESSION_TARGET)
 
 # mock/ shadows ff.h and xil_cache.h for the TUs (zz_config.c) whose
@@ -80,6 +81,7 @@ test: $(TARGETS)
 	$(VOICE_SESSION_TARGET)
 	$(VOICE_RAMP_TARGET)
 	$(VOICE_PARITY_TARGET)
+	$(VOICE_LIMITER_TARGET)
 
 # U2 fabric compositor: the characterization golden (pump_golden.c, a
 # verbatim capture of the pre-fabric pump) drives the parity scenarios
@@ -328,6 +330,16 @@ $(VOICE_RAMP_TARGET): audio_voice_ramp_test.c \
 	$(CC) $(CPPFLAGS) -Ibaseline $(CFLAGS) -o $@ audio_voice_ramp_test.c \
 		baseline/audio_voice_baseline.c $(SRC_DIR)/audio_voice.c
 
+# The optional static soft knee (CONFIG limiter) against an independent
+# model of the mix and the rational curve: dense sweeps, segment edges, the
+# maximum master with 32 voices and 32 fade tails, CONFIG timing and split
+# renders, the CONFIG validation matrix.
+$(VOICE_LIMITER_TARGET): audio_voice_limiter_test.c \
+	$(SRC_DIR)/audio_voice.c $(SRC_DIR)/audio_voice.h
+	@mkdir -p $(BUILD_DIR)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ audio_voice_limiter_test.c \
+		$(SRC_DIR)/audio_voice.c
+
 # The voice constants of the SDK header and of the firmware headers agree.
 $(VOICE_PARITY_TARGET): audio_voice_abi_parity_test.c \
 	$(SRC_DIR)/audio_voice.h $(SRC_DIR)/audio_voice_session.h \
@@ -386,10 +398,12 @@ $(VOICE_SESSION_TARGET): audio_voice_session_test.c \
 		$(SRC_DIR)/audio_fabric.c $(SRC_DIR)/audio_fabric_lease.c \
 		$(SRC_DIR)/audio_convert.c $(SRC_DIR)/audio_convert_tables.c -lm
 
+# The limiter table in audio_voice.c is the marked block the generator emits.
 check-tables:
 	python3 ../../util/gen_audio_convert_tables.py
 	git diff --exit-code -- ../../ZZ9000_proto.sdk/ZZ9000OS/src/audio_convert_tables.c \
 		../../ZZ9000_proto.sdk/ZZ9000OS/src/audio_convert_tables.h
+	python3 ../../util/gen_voice_limiter_table.py --check $(SRC_DIR)/audio_voice.c
 
 clean:
 	rm -rf $(BUILD_DIR)

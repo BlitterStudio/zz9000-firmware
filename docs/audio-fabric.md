@@ -77,6 +77,21 @@ fabric ISR only copies periods out of that ring, as it does for the other
 slots, and the slot's retirement gives the playing frame that clients read.
 The slot produces 48 kHz stereo S16, so it needs no conversion.
 
+The engine's final stage sums the voices, scales the sums by the Q8.8 master
+gain and clamps them to 16 bits. A `CONFIG`
+record can switch on a static soft knee between the master gain and the
+clamp: samples up to 24576 in magnitude pass unchanged and louder ones are
+bent toward the rails, never reaching them. The knee keeps no state, so the
+result does not depend on how the render splits its periods, and records
+with one stamp apply in ring order, so a `CONFIG` record ahead of the notes
+at the lead stamp takes effect before the first note. The `LIMITER` feature
+bit stays clear in production firmware until the knee is qualified; the
+voice slot accepts the record before that so a bench build can test it. The
+curve and the client contract are in
+[zz9k-voice.md](../sdk/docs/zz9k-voice.md#limiter), and the relation to the
+saturation ceilings is in
+[audio-saturation-ceiling.md](audio-saturation-ceiling.md).
+
 The engine reads mono S8 and S16 samples and interleaved stereo S8S and S16S
 samples (left sample, then right sample) from the session's bank. A frame is
 1, 2, 2 or 4 bytes for S8, S16, S8S and S16S, and the byte offsets and

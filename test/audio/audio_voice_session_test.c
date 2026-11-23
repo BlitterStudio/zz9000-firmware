@@ -2525,9 +2525,139 @@ static void scenario_config(void)
 	      "config: close", "");
 }
 
+/*
+ * The soft knee through the ring: CONFIG limiter records at stamps that are
+ * not periods, two in the same stamp in both orders, and two the engine
+ * refuses, with MASTER and four looping voices at the first stamp. Every
+ * frame of the period holding them is judged against the rule (identity
+ * through 24576, then 24576 + 8191 * d / (8191 + d) within 2 units, or the
+ * S16 clamp while the limiter is off) from the state the ring order gives.
+ */
+#define LIM_START 4900U
+#define LIM_MASTER 0x600U
+
+static int lim_on_at(uint32_t k)
+{
+	/* off; on at 200; on then off at 400; off then on at 500; the refused
+	 * records at 700 and 800 change nothing */
+	if (k < 200U)
+		return 0;
+	if (k < 400U)
+		return 1;
+	if (k < 500U)
+		return 0;
+	return 1;
+}
+
+static int knee_close(long long x, int out)
+{
+	const long long ax = x < 0 ? -x : x;
+	const long long ao = out < 0 ? -(long long)out : out;
+	long long d, r, t;
+
+	if ((x < 0) != (out < 0))
+		return 0;
+	if (ax <= 24576LL)
+		return ao == ax;
+	d = ax - 24576LL;
+	r = 8191LL + d;
+	t = (ao - 24576LL) * r - 8191LL * d;
+	if (t < 0)
+		t = -t;
+	return ao <= 32766LL && t <= 2LL * r;
+}
+
+/* 1: the period starts at LIM_START and matches, 0: it is not that period,
+ * -1: it is and a sample is off. */
+static int limiter_period(const int16_t *p)
+{
+	const uint32_t index = LIM_START % AUDIO_VOICE_PERIOD_FRAMES;
+	uint32_t f;
+
+	if (p[0] != 0 || p[2U * (AUDIO_VOICE_PERIOD_FRAMES - 1U)] == 0)
+		return 0;
+	for (f = 0U; f < AUDIO_VOICE_PERIOD_FRAMES; f++) {
+		const uint32_t k = f - index;
+		long long x;
+		int ok;
+
+		if (f < index) {
+			if (p[2U * f] != 0 || p[2U * f + 1U] != 0)
+				return -1;
+			continue;
+		}
+		x = ((4LL * ramp_out(k)) * LIM_MASTER) / 256LL;
+		if (lim_on_at(k)) {
+			ok = knee_close(x, p[2U * f]) && knee_close(x, p[2U * f + 1U]);
+		} else {
+			const int want = x > 32767LL ? 32767 : (int)x;
+
+			ok = p[2U * f] == want && p[2U * f + 1U] == want;
+		}
+		if (!ok)
+			return -1;
+	}
+	return 1;
+}
+
+static void scenario_limiter_order(void)
+{
+	uint32_t i;
+	int found = 0, wrong = 0;
+
+	fresh();
+	check(open_session(7680U, 4U) == SDK_STATUS_OK, "limiter: open", "");
+	check(upload_ramp(g_grant.session) == SDK_STATUS_OK, "limiter: upload",
+	      "");
+	rec(LIM_START, 0U, AUDIO_VOICE_OP_MASTER, 0U, LIM_MASTER, 0U);
+	rec(LIM_START, 0U, AUDIO_VOICE_OP_CONFIG, AUDIO_VOICE_CONFIG_LIMITER,
+	    0U, 0U);
+	for (i = 0U; i < 4U; i++)
+		rec_start_ramp(LIM_START, (uint8_t)i);
+	rec(LIM_START + 200U, 0U, AUDIO_VOICE_OP_CONFIG,
+	    AUDIO_VOICE_CONFIG_LIMITER, 0U, 1U);
+	rec(LIM_START + 400U, 0U, AUDIO_VOICE_OP_CONFIG,
+	    AUDIO_VOICE_CONFIG_LIMITER, 0U, 1U);
+	rec(LIM_START + 400U, 0U, AUDIO_VOICE_OP_CONFIG,
+	    AUDIO_VOICE_CONFIG_LIMITER, 0U, 0U);
+	rec(LIM_START + 500U, 0U, AUDIO_VOICE_OP_CONFIG,
+	    AUDIO_VOICE_CONFIG_LIMITER, 0U, 0U);
+	rec(LIM_START + 500U, 0U, AUDIO_VOICE_OP_CONFIG,
+	    AUDIO_VOICE_CONFIG_LIMITER, 0U, 1U);
+	rec(LIM_START + 700U, 0U, AUDIO_VOICE_OP_CONFIG,
+	    AUDIO_VOICE_CONFIG_LIMITER, 5U, 1U);
+	rec(LIM_START + 800U, 0U, AUDIO_VOICE_OP_CONFIG,
+	    AUDIO_VOICE_CONFIG_RAMP | AUDIO_VOICE_CONFIG_LIMITER,
+	    AUDIO_VOICE_RAMP_MAX_FRAMES + 1U, 0U);
+	publish();
+	for (i = 0U; i < 14U; i++) {
+		uint32_t p;
+
+		period(1);
+		for (p = 0U; p < AUDIO_NUM_PERIODS; p++) {
+			const int m = limiter_period(tx_period(p));
+
+			if (m > 0)
+				found = 1;
+			else if (m < 0)
+				wrong = 1;
+		}
+	}
+	check(found && !wrong,
+	      "limiter: every frame follows the knee or the clamp in ring order",
+	      fmt("found %d, wrong %d", found, wrong));
+	check(st_rejected() == 2U && st_late() == 0U && st_dropped() == 0U,
+	      "limiter: the two refused CONFIG records are counted, nothing else",
+	      fmt("rejected=%u late=%u dropped=%u", st_rejected(), st_late(),
+	      st_dropped()));
+	check(audio_voice_session_close(g_grant.session) == SDK_STATUS_OK,
+	      "limiter: close", "");
+}
+
 int main(void)
 {
 	scenario_config();
+	scenario_limiter_order();
 	scenario_open();
 	scenario_open_refused();
 	scenario_ring_geometry();

@@ -25,7 +25,8 @@
  * loops one 16-bit sample (a few sine cycles plus a little noise, mono or
  * interleaved stereo) on VOICES voices (1 to 32, default 32) at rates spread
  * from half to twice RATE (default 22050 Hz), volume 65535 divided by the
- * voice count per side, for SECONDS (default 20). The AUDIO_VOICE_BENCH
+ * voice count per side (GAIN=n replaces that with an explicit volume per
+ * side, 0 to 65535), for SECONDS (default 20). The AUDIO_VOICE_BENCH
  * firmware prints its per-period render times when the session closes.
  *
  * LOWLAT opens a low-latency session: the firmware shortens its audio
@@ -71,7 +72,8 @@
 #include "zz9k-voice-pt4.h"
 
 #define TEMPLATE "MODULE,LEAD/K/N,NTSC/S,LINEAR/S,SECONDS/K/N,LOWLAT/S," \
-                 "VOICES/K/N,STEREO/S,RATE/K/N,RAMP/K/N,CHURN/S,GROUPS/K/N"
+                 "VOICES/K/N,STEREO/S,RATE/K/N,RAMP/K/N,CHURN/S,GROUPS/K/N," \
+                 "LIMITER/S,GAIN/K/N"
 #define OPT_MODULE 0
 #define OPT_LEAD 1
 #define OPT_NTSC 2
@@ -84,7 +86,9 @@
 #define OPT_RAMP 9
 #define OPT_CHURN 10
 #define OPT_GROUPS 11
-#define OPT_COUNT 12
+#define OPT_LIMITER 12
+#define OPT_GAIN 13
+#define OPT_COUNT 14
 
 /* CHURN: a restart interval of the ramp length, but not below 32 frames (a
  * shorter one would write a record for every frame). */
@@ -216,8 +220,8 @@ static void usage(void)
   puts("usage: zz9k-voiceplay MODULE [LEAD=frames] [NTSC] [LINEAR] [SECONDS=n] [LOWLAT]");
   puts("       zz9k-voiceplay CLICK [LEAD=frames] [SECONDS=n] [LOWLAT]");
   puts("       zz9k-voiceplay LIVE [LEAD=frames] [SECONDS=n] [LOWLAT]");
-  puts("       zz9k-voiceplay LOAD VOICES=n SECONDS=n [LINEAR] [STEREO] [RATE=hz] [CHURN] [GROUPS=n] [LOWLAT]");
-  puts("       every mode also takes RAMP=frames");
+  puts("       zz9k-voiceplay LOAD VOICES=n SECONDS=n [LINEAR] [STEREO] [RATE=hz] [GAIN=n] [CHURN] [GROUPS=n] [LOWLAT]");
+  puts("       every mode also takes RAMP=frames and LIMITER");
   puts("  MODULE   ProTracker module to play (DYN envelopes and EFx funk are refused)");
   puts("  CLICK    a short pulse once per second at 48000 Hz, for listening and");
   puts("           for checking the scheduling margin; 10 seconds unless SECONDS");
@@ -235,9 +239,20 @@ static void usage(void)
   puts("           fade pool stays full: every voice restarts every RAMP frames");
   puts("           (256 without RAMP), in GROUPS groups spread evenly over that");
   puts("           time (1 to 32, default 32; 1 restarts all voices together)");
+  puts("           GAIN sets the volume of every voice, per side, 0 to 65535, in");
+  puts("           place of 65535 / VOICES. GAIN=65535 on 32 voices is far past");
+  puts("           full scale: it drives the master clip or the limiter knee and");
+  puts("           the full-volume tails of a CHURN restart with RAMP. It is very");
+  puts("           loud and can be harsh: turn the amplifier or speakers down");
+  puts("           first, and use headphones only at a low level");
   puts("  RAMP     CONFIG ramp length in frames (0 to 512) sent before anything");
   puts("           else, for any mode: volume changes, starts, stops and restarts");
   puts("           fade over that many frames. Needs a firmware with CONFIG");
+  puts("  LIMITER  CONFIG static soft knee, for any mode, in the same CONFIG");
+  puts("           record as RAMP: magnitudes up to 24576 pass unchanged and");
+  puts("           louder ones bend toward, never onto, the 16-bit rails. Needs a");
+  puts("           firmware with CONFIG. A firmware that does not advertise");
+  puts("           LIMITER runs it unqualified, for its qualification only");
   puts("  LEAD     lead in 48 kHz frames; 0 or absent is the firmware floor");
   puts("  NTSC     Paula clock of the module is NTSC (else PAL)");
   puts("  LINEAR   linear interpolation (else nearest)");
@@ -496,9 +511,13 @@ static uint32_t load_bytes;
 static int load_linear;
 static int load_mode;
 
-/* RAMP: the CONFIG ramp length sent first. CHURN: restart groups, 0 = none. */
+/* RAMP: the CONFIG ramp length sent first. LIMITER: the CONFIG soft knee
+ * switch. CHURN: restart groups, 0 = none. load_volume: the LOAD volume per
+ * side, 65535 / VOICES unless GAIN. */
 static int ramp_set;
 static uint32_t ramp_frames;
+static int limiter_set;
+static uint32_t load_volume;
 static uint32_t churn_groups;
 static uint32_t churn_interval;
 static uint32_t churn_step;
@@ -565,7 +584,7 @@ static uint32_t load_voice_rate(uint32_t voice)
 static void load_start(Source *source)
 {
   uint32_t stamp = lead_frames + source->next_frame;
-  uint32_t volume = 0xFFFFU / load_voices;
+  uint32_t volume = load_volume;
   uint32_t voice;
 
   for (voice = 0U; voice < load_voices; voice++) {
@@ -889,10 +908,13 @@ static void report(const char *reason)
            load_linear ? "linear" : "nearest",
            (unsigned long)load_voice_rate(0U),
            (unsigned long)load_voice_rate(load_voices - 1U),
-           (unsigned long)(0xFFFFU / load_voices));
+           (unsigned long)load_volume);
   }
   if (ramp_set) {
     printf("  ramp: %lu frames\n", (unsigned long)ramp_frames);
+  }
+  if (limiter_set) {
+    puts("  limiter: on (static soft knee above 24576)");
   }
   if (churn_groups != 0U) {
     printf("  churn: %lu restarts, %lu group%s, a restart every %lu frames "
@@ -1024,8 +1046,10 @@ int main(void)
   live = is_word(name, "LIVE");
   load = is_word(name, "LOAD");
   if (!load && (options[OPT_VOICES] || options[OPT_STEREO] ||
-                options[OPT_RATE] || options[OPT_CHURN])) {
-    puts("zz9k-voiceplay: VOICES, STEREO, RATE and CHURN belong to LOAD mode");
+                options[OPT_RATE] || options[OPT_CHURN] ||
+                options[OPT_GAIN])) {
+    puts("zz9k-voiceplay: VOICES, STEREO, RATE, GAIN and CHURN belong to LOAD "
+         "mode");
     FreeArgs(rdargs);
     usage();
     return 10;
@@ -1052,6 +1076,18 @@ int main(void)
     }
     load_rate = (uint32_t)value;
   }
+  load_volume = 0xFFFFU / load_voices;
+  if (options[OPT_GAIN]) {
+    LONG value = *(LONG *)options[OPT_GAIN];
+
+    if (value < 0 || value > 65535L) {
+      puts("zz9k-voiceplay: GAIN is 0 to 65535");
+      FreeArgs(rdargs);
+      return 10;
+    }
+    load_volume = (uint32_t)value;
+  }
+  limiter_set = options[OPT_LIMITER] != 0;
   load_stereo = options[OPT_STEREO] != 0;
   load_linear = options[OPT_LINEAR] != 0;
   if (options[OPT_LEAD]) {
@@ -1293,12 +1329,15 @@ int main(void)
     ZZ9KVoiceExtStatus ext;
 
     zz9k_voice_ext_status_read(session.status, &ext);
-    printf("  engine features 0x%lx%s%s%s\n", (unsigned long)ext.features,
+    printf("  engine features 0x%lx%s%s%s%s\n", (unsigned long)ext.features,
            (ext.features & ZZ9K_VOICE_FEATURE_CONFIG) ? " CONFIG" : "",
            (ext.features & ZZ9K_VOICE_FEATURE_RAMP) ? " RAMP" : "",
+           (ext.features & ZZ9K_VOICE_FEATURE_LIMITER) ? " LIMITER" : "",
            ext.features == 0U ? " (none: an older firmware)" : "");
-    if (ramp_set && (ext.features & ZZ9K_VOICE_FEATURE_CONFIG) == 0U) {
-      puts("zz9k-voiceplay: RAMP needs a firmware with the CONFIG record");
+    if ((ramp_set || limiter_set) &&
+        (ext.features & ZZ9K_VOICE_FEATURE_CONFIG) == 0U) {
+      puts("zz9k-voiceplay: RAMP and LIMITER need a firmware with the CONFIG "
+           "record");
       code = 20;
       goto close_session;
     }
@@ -1306,6 +1345,12 @@ int main(void)
         (ext.features & ZZ9K_VOICE_FEATURE_RAMP) == 0U) {
       puts("  the firmware does not advertise RAMP yet: running the ramp "
            "for its qualification");
+    }
+    if (limiter_set && (ext.features & ZZ9K_VOICE_FEATURE_LIMITER) == 0U) {
+      puts("zz9k-voiceplay: WARNING: the firmware does not advertise "
+           "LIMITER: the soft knee is unqualified, running it for its "
+           "qualification only. Keep the volume low and the speakers "
+           "protected");
     }
   }
 
@@ -1336,11 +1381,20 @@ int main(void)
   {
     ZZ9KVoiceRecord *record;
 
-    if (ramp_set) {
+    if (ramp_set || limiter_set) {
       record = pending_next(lead_frames, 0U, ZZ9K_VOICE_OP_CONFIG);
       if (record) {
-        record->flags = ZZ9K_VOICE_CONFIG_RAMP;
-        record->arg0 = ramp_frames;
+        /* One record at the lead stamp, ahead of the master gain and every
+         * note, so the ring order puts the settings first. Both settings in
+         * the record are validated together by the firmware. */
+        if (ramp_set && limiter_set) {
+          zz9k_voice_build_config_ramp_limiter(record, lead_frames,
+                                               ramp_frames, 1);
+        } else if (limiter_set) {
+          zz9k_voice_build_config_limiter(record, lead_frames, 1);
+        } else {
+          zz9k_voice_build_config_ramp(record, lead_frames, ramp_frames);
+        }
       }
     }
     record = pending_next(lead_frames, 0U, ZZ9K_VOICE_OP_MASTER);
