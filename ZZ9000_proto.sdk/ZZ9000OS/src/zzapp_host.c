@@ -410,6 +410,16 @@ int zzapp_proc_heap_info(uint32_t *committed, uint32_t *limit,
 static uint32_t g_test_host_visible_heap = 78u << 20;
 #endif
 
+/* ZZAPP_SHARED_MAX_MIB is what aar.library reports as the largest shared
+ * limit. The card grants exactly that much: the alias window is that size and
+ * the host-visible heap is not smaller, so zzapp_host_visible_capacity()
+ * below is the window. */
+_Static_assert((ZZAPP_AS_ALIAS_END - ZZAPP_AS_ALIAS_BASE) ==
+               (ZZAPP_SHARED_MAX_MIB << 20),
+               "ZZAPP_SHARED_MAX_MIB is the alias window");
+_Static_assert(HOST_VISIBLE_HEAP_SIZE >= (ZZAPP_SHARED_MAX_MIB << 20),
+               "the host-visible heap holds ZZAPP_SHARED_MAX_MIB");
+
 uint32_t zzapp_host_visible_capacity(void)
 {
     uint32_t alias = ZZAPP_AS_ALIAS_END - ZZAPP_AS_ALIAS_BASE;

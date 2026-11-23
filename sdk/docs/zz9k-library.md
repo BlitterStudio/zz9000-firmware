@@ -176,6 +176,12 @@ Points that matter to a caller:
   an app publishes, and `AARSharedToken` is its inverse. `AARSharedUnmap` is
   bookkeeping: the pages stay cache-inhibited, because restoring them costs
   about 0.7 s a range.
+- **Shared limit.** `AARInfo.shared_max_mib` is 62 on the ZZ9000, the largest
+  limit the card grants (`ZZAPP_SHARED_MAX_MIB`, the alias window one app
+  maps its shared blocks through). `AARSetTags` with `AAR_TAG_SHARED_MIB`
+  above it returns `AAR_E_INVAL`. The firmware refuses a larger limit at
+  `LOAD_BEGIN` with `NO_MEMORY` (`docs/app-runtime.md`, "Load, start and
+  stop").
 - **Lease.** The card stops an app whose client does not advance
   `AAR_CB_LEASE_COUNTER`: after 2 s while it runs (10 s with
   `ZZAPP_CLIENT_LEASE_EXTENDED`, which the library sets unless

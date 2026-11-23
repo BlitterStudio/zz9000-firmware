@@ -871,8 +871,12 @@ kick costs latency only.
 `LOAD_BEGIN` reads `AAR_CB_PRIVATE_MIB`, `AAR_CB_SHARED_MIB` and
 `AAR_CB_WEIGHT` from the control block. A memory limit above 4095 MiB returns
 `BAD_REQUEST`; a shared limit the card cannot grant (the smaller of the
-surface heap and one app's alias window of 62 MiB) returns
-`SDK_STATUS_NO_MEMORY` at once and leaves the claim as it was. Zero selects
+surface heap, about 78 MiB, and one app's alias window of 62 MiB, so the
+window) returns `SDK_STATUS_NO_MEMORY` at once and leaves the claim as it
+was. That 62 MiB is `ZZAPP_SHARED_MAX_MIB`: `aar.library` reports it as
+`AARInfo.shared_max_mib` and `AARSetTagList` refuses a larger
+`AAR_TAG_SHARED_MIB` with `AAR_E_INVAL`, so a client that stays within
+`shared_max_mib` never meets the `NO_MEMORY` refusal. Zero selects
 the pool for the private limit and 16 MiB for the shared one
 (`ZZAPP_HOST_VISIBLE_DEFAULT_BYTES`). The limits cap the image, stack and
 minimum heap commit as well as later growth, and a shared cap is not a

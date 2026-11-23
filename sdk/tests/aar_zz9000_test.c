@@ -992,7 +992,7 @@ static void test_query_and_extension(void)
           info.max_args == ZZAPP_ARGV_MAX && info.max_arg_bytes == ZZAPP_ARGV_STR_MAX &&
           info.shared_granule == 4096U && info.stall_limit_ms == 30000U &&
           info.stop_grace_ms == 500U && info.shared_default_mib == AAR_SHARED_DEFAULT_MIB &&
-          info.shared_max_mib == 4095U && info.weight_max == ZZAPP_WEIGHT_MAX);
+          info.shared_max_mib == 62U && info.weight_max == ZZAPP_WEIGHT_MAX);
     CHECK(info.queue_depth == 64U && info.msg_capacity == AAR_MSG_CAPACITY);
     CHECK(info.platform[AAR_ZZ9000_INFO_RECORDS_FREE] == 15U &&
           info.platform[AAR_ZZ9000_INFO_TABLES_FREE] == 3871U &&

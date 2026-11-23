@@ -21,7 +21,9 @@
 #include "zz9k/abi.h"
 
 #define ZZ_SHARED_GRANULE   4096u
-#define ZZ_SHARED_MAX_MIB   4095u
+/* The largest limit LOAD_BEGIN grants (zzapp_proto.h): AARInfo reports it,
+ * and AARSetTagList refuses a larger AAR_TAG_SHARED_MIB. */
+#define ZZ_SHARED_MAX_MIB   ZZAPP_SHARED_MAX_MIB
 #define ZZ_STALL_LIMIT_MS   30000u /* ZZAPP_APP_STALL_US of zzapp_runtime.h */
 #define ZZ_STOP_GRACE_MS    500u   /* ZZAPP_STOP_GRACE_US */
 #define ZZ_CB_BYTES_MAX     0x100000u
