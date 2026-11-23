@@ -64,7 +64,10 @@ iterations, with Zorro requests served between the periods. The slot goes
 live once the whole lead is staged, because going live primes the TX ring
 from the staged periods up to the fill-ahead. A reset stages one silent
 period inside its critical section and leaves the rest of the lead to the
-poll. Zorro traffic that never pauses never reaches the poll's branch, so
+poll. A reset before the slot goes live takes back the periods the earlier
+polls staged, and the engine timeline restarts at frame 0 (nothing has been
+played), so the pre-reset voices never sound. Zorro traffic that never
+pauses never reaches the poll's branch, so
 the request branch calls `audio_voice_session_poll_busy()`, which polls when
 2 ms have passed since the last poll. The
 fabric ISR only copies periods out of that ring, as it does for the other

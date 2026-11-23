@@ -498,7 +498,7 @@ paces on `playing_frame` already reads the status often enough.
 
 | Event | Result |
 | --- | --- |
-| `ZZ9KVoiceReset()` | Drops every record the client had written, every queued command and the periods the slot has already queued; silences all voices. Samples, master gain and the timeline stay, and the frame counter keeps counting, so stamps after a reset are relative to a fresh status read. Audio of at most the period now playing remains. |
+| `ZZ9KVoiceReset()` | Drops every record the client had written, every queued command and the periods the slot has already queued; silences all voices. Samples, master gain and the timeline stay, and the frame counter keeps counting, so stamps after a reset are relative to a fresh status read. Audio of at most the period now playing remains. A reset while the session is still staging its first lead also takes back the staged periods and restarts the timeline at frame 0; nothing of the earlier voices plays. |
 | `ZZ9KVoiceClose()` | Silences the voices, drops the queued periods, detaches the slot, frees the bank and unpins and frees the buffers. |
 | Missed heartbeat | The firmware ends the session as Close does. The status block reads state 0. A later `ZZ9KVoiceClose()` returns `ZZ9K_STATUS_BAD_HANDLE` and still frees the buffers. |
 | Client exit | The final `CloseLibrary()` releases the opener's client id, which ends its session and frees its buffers. Without that the heartbeat limit applies. |

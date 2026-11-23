@@ -2199,9 +2199,10 @@ static const char *chord32_mode(uint32_t flags)
  * ZZAXVoiceTest S2 as the AHI driver sends it: 32 voices of one 64-frame
  * looped cycle in a major chord over three octaves (7040 Hz up to about
  * 42 kHz), master gain 8 (1/32), the 97 records of the model at the first
- * stamp. Opens the session and publishes the records; nothing is polled.
+ * stamp (`stamp`: 7680 is the lead, 0 sounds from the first frame). Opens
+ * the session and publishes the records; nothing is polled.
  */
-static void chord32_start(uint32_t flags)
+static void chord32_start(uint32_t flags, uint32_t stamp)
 {
 	static const uint32_t semitone[12] = {
 		65536U, 69433U, 73561U, 77935U, 82570U, 87480U, 92682U,
@@ -2231,7 +2232,7 @@ static void chord32_start(uint32_t flags)
 	up.format = AUDIO_VOICE_FMT_S16;
 	check(audio_voice_session_upload(g_grant.session, &up) ==
 	      SDK_STATUS_OK, cname(mode, "upload"), "");
-	rec(7680U, 0U, AUDIO_VOICE_OP_MASTER, 0U, 8U, 0U);
+	rec(stamp, 0U, AUDIO_VOICE_OP_MASTER, 0U, 8U, 0U);
 	for (i = 0U; i < 32U; i++) {
 		uint32_t semis = chord[i % 3U] + 12U * ((i / 3U) % 3U);
 		uint32_t hz = (7040U * (semitone[semis % 12U] <<
@@ -2240,12 +2241,12 @@ static void chord32_start(uint32_t flags)
 		uint32_t left = (0x8000U * ((0x10000U - pan) >> 1)) >> 14;
 		uint32_t right = (0x8000U * (pan >> 1)) >> 14;
 
-		rec(7680U, (uint8_t)i, AUDIO_VOICE_OP_SET,
+		rec(stamp, (uint8_t)i, AUDIO_VOICE_OP_SET,
 		    AUDIO_VOICE_SET_RATE | AUDIO_VOICE_SET_VOLUME |
 		    AUDIO_VOICE_RATE_HZ, hz, (left << 16) | right);
-		rec(7680U, (uint8_t)i, AUDIO_VOICE_OP_START, SAMPLE_ID, 0U,
+		rec(stamp, (uint8_t)i, AUDIO_VOICE_OP_START, SAMPLE_ID, 0U,
 		    128U);
-		rec(7680U, (uint8_t)i, AUDIO_VOICE_OP_LOOP, 0U, 0U, 128U);
+		rec(stamp, (uint8_t)i, AUDIO_VOICE_OP_LOOP, 0U, 0U, 128U);
 	}
 	publish();
 }
@@ -2261,7 +2262,7 @@ static void scenario_chord32(uint32_t flags)
 	uint32_t i;
 	int nonzero = 0;
 
-	chord32_start(flags);
+	chord32_start(flags, 7680U);
 	run(250);
 	for (i = 0U; i < AUDIO_NUM_PERIODS; i++) {
 		const int16_t *p = tx_period(i);
@@ -2303,7 +2304,7 @@ static void scenario_chord32_bounded(uint32_t flags)
 	uint32_t last = 0U;
 	uint32_t step_max = 0U;
 
-	chord32_start(flags);
+	chord32_start(flags, 7680U);
 	periods = g_grant.lead_frames / AUDIO_VOICE_PERIOD_FRAMES;
 	while (st_horizon() < g_grant.lead_frames && calls < 64U) {
 		uint32_t horizon;
@@ -2375,7 +2376,7 @@ static void scenario_busy_poll(void)
 	uint32_t i;
 	uint32_t horizon;
 
-	chord32_start(AUDIO_VOICE_OPEN_LINEAR);
+	chord32_start(AUDIO_VOICE_OPEN_LINEAR, 7680U);
 	run(30);
 	check(st_horizon() - st_playing() == g_grant.lead_frames,
 	      "busy poll: steady state keeps the lead", "");
@@ -2415,6 +2416,74 @@ static void scenario_busy_poll(void)
 	      st_late(), st_horizon(), st_playing()));
 }
 
+/* The five periods queued after the DMA are the slot's (the rest of the
+ * test ring still holds the fabric reset pattern until it is written). */
+static int tx_queued_silent(void)
+{
+	uint32_t pos = dma_period();
+	uint32_t k;
+
+	for (k = 1U; k <= 5U; k++) {
+		if (!period_all(tx_period(pos + k), 0))
+			return 0;
+	}
+	return 1;
+}
+
+/*
+ * A RESET while the first lead is still being staged (the slot goes live
+ * only once the whole lead is there): START at frame 0, four polls of an
+ * eight-period lead, RESET, then the remaining polls. What the first four
+ * polls staged is the pre-reset voices and must not play. Everything the
+ * slot plays afterwards is silent, the lead still fills, the slot goes
+ * live and nothing underruns.
+ */
+static void scenario_reset_before_live(uint32_t flags)
+{
+	const char *mode = chord32_mode(flags);
+	uint32_t lead;
+	uint32_t calls = 0U;
+	uint32_t i;
+	int silent = 1;
+
+	chord32_start(flags, 0U);
+	lead = g_grant.lead_frames;
+	for (i = 0U; i < 4U; i++)
+		audio_voice_session_poll();
+	check(st_horizon() == 4U * AUDIO_VOICE_PERIOD_FRAMES &&
+	      st_playing() == 0U,
+	      cname(mode, "reset before live: four periods staged, none played"),
+	      fmt("horizon=%u playing=%u", st_horizon(), st_playing()));
+	check(audio_voice_session_reset(g_grant.session) == SDK_STATUS_OK,
+	      cname(mode, "reset before live: reset"), "");
+	check(st_horizon() == 0U && st_playing() == 0U,
+	      cname(mode, "reset before live: the staged periods are taken back"),
+	      fmt("horizon=%u playing=%u", st_horizon(), st_playing()));
+	while (st_horizon() < lead && calls < 64U) {
+		audio_voice_session_poll();
+		calls++;
+	}
+	check(calls == lead / AUDIO_VOICE_PERIOD_FRAMES,
+	      cname(mode, "reset before live: the lead refills one period a call"),
+	      fmt("calls=%u horizon=%u", calls, st_horizon()));
+	for (i = 0U; i < 40U; i++) {
+		period(1);
+		if (!tx_queued_silent())
+			silent = 0;
+	}
+	check(silent,
+	      cname(mode, "reset before live: nothing the voices rendered before the reset plays"),
+	      "");
+	check(st_state() == AUDIO_VOICE_STATE_LIVE && st_playing() > 0U &&
+	      st_horizon() - st_playing() == lead,
+	      cname(mode, "reset before live: the slot goes live and keeps the lead"),
+	      fmt("state=%u horizon=%u playing=%u", st_state(), st_horizon(),
+	      st_playing()));
+	check(st_underruns() == 0U && st_late() == 0U,
+	      cname(mode, "reset before live: no underrun or late"),
+	      fmt("underruns=%u late=%u", st_underruns(), st_late()));
+}
+
 int main(void)
 {
 	scenario_open();
@@ -2452,6 +2521,8 @@ int main(void)
 	scenario_chord32_bounded(0U);
 	scenario_chord32_bounded(AUDIO_VOICE_OPEN_LINEAR);
 	scenario_busy_poll();
+	scenario_reset_before_live(0U);
+	scenario_reset_before_live(AUDIO_VOICE_OPEN_LINEAR);
 	if (failures != 0)
 		printf("audio_voice_session_test: %d FAILED\n", failures);
 	else

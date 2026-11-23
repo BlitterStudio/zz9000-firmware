@@ -619,6 +619,23 @@ uint16_t audio_voice_session_reset(uint32_t session)
 		g_engine.frame = (uint32_t)(consumed / 4U);
 		render_period();
 		smp_local_irq_restore(irq_state);
+	} else {
+		/*
+		 * Not live yet: the polls that are building the first lead
+		 * have staged periods of the pre-reset voices, and the slot
+		 * would play them once it goes live. Take them back. The ISR
+		 * takes nothing from a slot that is not live, so `consumed`
+		 * is still 0, there is no TX ring content to rebuild and no
+		 * ISR to hold off. The playing frame is 0 and the client has
+		 * been told nothing but a horizon that was never played, so
+		 * the timeline restarting at the consumed cursor cannot go
+		 * backwards past a played frame. The polls render silence
+		 * from there up to the lead and then the slot goes live.
+		 */
+		consumed = g_s.consumed;
+		g_s.produced = consumed;
+		g_s.retired = consumed;
+		g_engine.frame = (uint32_t)(consumed / 4U);
 	}
 	publish_status();
 	return SDK_STATUS_OK;
