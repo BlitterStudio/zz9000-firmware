@@ -940,9 +940,10 @@ static const zzapp_svc_descriptor_t gl_descriptors[GL_COUNT] = {
     G0(GetError, ZZAPP_SVC_RETURN_INT), G2(Hint, ZZAPP_SVC_RETURN_VOID),
     G2(PixelStorei, ZZAPP_SVC_RETURN_VOID), DF(0, 8, ZZAPP_SVC_RETURN_VOID, N, N, N),
     [GL_SLOT(Build2DMipmaps)] = D(7, ZZAPP_SVC_RETURN_INT, IN_PIXELS(6, 2, 4, 5), N, N),
-    [GL_SLOT(VertexPointer)] = D(4, ZZAPP_SVC_RETURN_VOID, IN_FIXED(3, 1U, 0U), N, N),
-    [GL_SLOT(TexCoordPointer)] = D(4, ZZAPP_SVC_RETURN_VOID, IN_FIXED(3, 1U, 0U), N, N),
-    [GL_SLOT(ColorPointer)] = D(4, ZZAPP_SVC_RETURN_VOID, IN_FIXED(3, 1U, 0U), N, N),
+    /* The array pointers are not checked when they are set: gl_validate_draw
+     * checks every enabled array when it is drawn. */
+    G4(VertexPointer, ZZAPP_SVC_RETURN_VOID), G4(TexCoordPointer, ZZAPP_SVC_RETURN_VOID),
+    G4(ColorPointer, ZZAPP_SVC_RETURN_VOID),
     G1(EnableClientState, ZZAPP_SVC_RETURN_VOID), G1(DisableClientState, ZZAPP_SVC_RETURN_VOID),
     G1(ClientActiveTextureARB, ZZAPP_SVC_RETURN_VOID), G3(DrawArrays, ZZAPP_SVC_RETURN_VOID),
     [GL_SLOT(DrawElements)] = D(4, ZZAPP_SVC_RETURN_VOID, IN_INDICES(3, 1), N, N),

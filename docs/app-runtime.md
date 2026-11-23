@@ -474,11 +474,13 @@ user-call target.
 inside the runtime) before the module is loaded or a GL slot is taken, so the
 bind that follows with the right id is not refused as busy.
 
-GL client-array state is per slot. `DrawArrays` validates every enabled vertex,
-colour, and client texture-coordinate element in its requested range.
-`DrawElements` also validates its index buffer and every indexed element before
-MiniGL is called. An unmapped or changed range returns `AAR_E_FAULT` and records
-`GL_INVALID_VALUE` for `glGetError`.
+GL client-array state is per slot. `glVertexPointer`, `glColorPointer` and
+`glTexCoordPointer` record their pointer without checking it, so a bad pointer
+is no error at that call. `DrawArrays` validates every enabled vertex, colour,
+and client texture-coordinate element in its requested range. `DrawElements`
+also validates its index buffer and every indexed element before MiniGL is
+called. An unmapped or changed range, or a pointer that is 0, returns
+`AAR_E_FAULT` from the draw and records `GL_INVALID_VALUE` for `glGetError`.
 
 ### Frames, commit, and teardown
 
