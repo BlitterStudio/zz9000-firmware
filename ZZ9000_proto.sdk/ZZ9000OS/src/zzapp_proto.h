@@ -129,6 +129,14 @@
 #define ZZAPP_REFUSAL_REASON       0u
 #define ZZAPP_REFUSAL_REPLY_BYTES  4u
 
+/* A refused LOAD_BEGIN or LOAD_END adds the AAR_E_* code of the refusal as a
+ * positive number (13 for AAR_E_PROFILE) after the reason, for INVAL, NOMEM,
+ * PROFILE and NOGROUP, which the mailbox statuses cannot tell apart. Word 0
+ * is AAR_REASON_NONE when no resource ran out. A reply of 4 bytes or none
+ * has no code: the client maps the status. */
+#define ZZAPP_REFUSAL_CODE         4u
+#define ZZAPP_REFUSAL_CODE_REPLY_BYTES 8u
+
 /* ---- LOAD_BEGIN, LOAD_CHUNK, LOAD_END, START ---------------------------- */
 
 /* LOAD_BEGIN reads the limits the client wrote to the control block
@@ -160,7 +168,7 @@
 
 #define ZZAPP_LOAD_STAGING_BYTES   0x00010000u /* 64 KiB, at buffer offset 0 */
 #define ZZAPP_LOAD_ARGV_OFF        ZZAPP_LOAD_STAGING_BYTES
-#define ZZAPP_LOAD_ARGV_BYTES      2048u
+#define ZZAPP_LOAD_ARGV_BYTES      4096u
 #define ZZAPP_LOAD_BUFFER_BYTES    0x00012000u /* 72 KiB */
 
 /* LOAD_CHUNK: the firmware reads `length` bytes at offset 0 of the load
@@ -276,6 +284,8 @@ _Static_assert((ZZAPP_LOAD_BUFFER_BYTES & 0x1fffu) == 0u,
 _Static_assert(ZZAPP_ARGV_STR_OFF < ZZAPP_LOAD_ARGV_BYTES, "argv header");
 _Static_assert(ZZAPP_ARGV_STR_OFF + ZZAPP_ARGV_STR_MAX <= ZZAPP_LOAD_ARGV_BYTES,
                "one max argv string");
+_Static_assert(ZZAPP_ARGV_STR_OFF + ZZAPP_ARGV_MAX * ZZAPP_ARGV_STR_MAX <=
+               ZZAPP_LOAD_ARGV_BYTES, "every max argv string");
 _Static_assert(ZZAPP_OP_LAST <= ZZAPP_OP_RANGE_HI, "operations in range");
 
 /* ---- Big-endian accessors ----------------------------------------------- */

@@ -91,6 +91,24 @@ static void argv_entry(const void *api_ptr, int argc, char **argv)
     assert(bytes != 0u);
     argv_started = 1;
 }
+
+static int full_argv_started;
+
+/* Sixteen arguments of 127 bytes: the limits QUERY advertises. */
+static void full_argv_entry(const void *api_ptr, int argc, char **argv)
+{
+    int i;
+
+    (void)api_ptr;
+    assert(argc == (int)ZZAPP_ARGV_MAX);
+    for (i = 0; i < argc; i++) {
+        assert(strlen(argv[i]) == ZZAPP_ARGV_STR_MAX - 1u);
+        assert(argv[i][0] == (char)('a' + i));
+        assert(argv[i][ZZAPP_ARGV_STR_MAX - 2u] == (char)('a' + i));
+    }
+    assert(argv[argc] == NULL);
+    full_argv_started = 1;
+}
 static int rejected_started;
 
 static void rejected_entry(const void *api_ptr, int argc, char **argv)
@@ -209,7 +227,7 @@ static void make_image(uint8_t image[IMAGE_BYTES])
     put32(image + 24, LOAD_OFF);
     put32(image + 28, PHOFF);
     put32(image + 32, SHOFF);
-    put32(image + 36, 0x400);             /* hard-float */
+    put32(image + 36, 0x05000400);       /* EABI 5, hard-float */
     put16(image + 40, 52);
     put16(image + 42, 32);
     put16(image + 44, 2);
@@ -344,6 +362,31 @@ static void set_argv(const char *text, uint32_t bytes)
                    ZZAPP_ARGV_OFFS_OFF, ZZAPP_LOAD_ARGV_OFF + ZZAPP_ARGV_STR_OFF);
     memcpy((uint8_t *)load.ptr + ZZAPP_LOAD_ARGV_OFF + ZZAPP_ARGV_STR_OFF,
            text, bytes);
+}
+
+/* START's argv area with ZZAPP_ARGV_MAX strings of ZZAPP_ARGV_STR_MAX - 1
+ * bytes, laid out back to back after the offset table. */
+static void set_argv_full(void)
+{
+    zzapp_rec_t *rec = zzapp_rec_by_pid(0U);
+    zzapp_xport_buf_t load;
+    uint8_t *area;
+    uint32_t i;
+
+    assert(rec != NULL);
+    (void)zzapp_xport_block_free(rec, ZZAPP_XPORT_BLOCK_LOAD);
+    assert(zzapp_xport_block_alloc(rec, ZZAPP_XPORT_BLOCK_LOAD,
+                                   ZZAPP_LOAD_BUFFER_BYTES, &load) == AAR_OK);
+    area = (uint8_t *)load.ptr;
+    for (i = 0U; i < ZZAPP_ARGV_MAX; i++) {
+        uint32_t off = ZZAPP_LOAD_ARGV_OFF + ZZAPP_ARGV_STR_OFF +
+                       i * ZZAPP_ARGV_STR_MAX;
+
+        zzapp_put_be32(area + ZZAPP_LOAD_ARGV_OFF + ZZAPP_ARGV_OFFS_OFF +
+                       4u * i, off);
+        memset(area + off, (int)('a' + i), ZZAPP_ARGV_STR_MAX - 1u);
+        area[off + ZZAPP_ARGV_STR_MAX - 1u] = '\0';
+    }
 }
 
 static int load_end(uint8_t image[IMAGE_BYTES])
@@ -967,7 +1010,8 @@ static void test_note_v1_load_rules(void)
     memcpy(image + PHOFF + 64U, image + PHOFF + 32U, 32U);
     put16(image + 44U, 3U);
     assert(load_end(image) == AAR_E_INVAL);
-    /* A note in a section is found when no segment carries one. */
+    /* A note in a section header is not a note: spec 2.2.7 wants a PT_NOTE
+     * segment. */
     zzapp_boot_init();
     make_image(image);
     put32(image + PHOFF + 32U, 0U);
@@ -976,8 +1020,84 @@ static void test_note_v1_load_rules(void)
     put32(image + SHOFF + 16U, NOTE_OFF);
     put32(image + SHOFF + 20U, TEST_NOTE_BYTES);
     put32(image + SHOFF + 36U, 0U);
-    assert(load_end(image) == AAR_OK);
-    zzapp_loader_release();
+    assert(load_end(image) == AAR_E_INVAL);
+}
+
+static unsigned refusal_failures;
+
+/* The image loads with `expected`; a refusal leaves the loader idle. */
+static void expect_load(const char *what, uint8_t image[IMAGE_BYTES],
+                        int expected)
+{
+    int rc;
+
+    zzapp_boot_init();
+    rc = load_end(image);
+    if (rc != expected) {
+        fprintf(stderr, "refusal case %s: got %d, wanted %d\n", what, rc, expected);
+        refusal_failures++;
+    }
+    if (rc == AAR_OK)
+        zzapp_loader_release();
+    else if (zzapp_loader_state() != ZZAPP_ST_IDLE)
+        refusal_failures++;
+}
+
+/* Spec 2.2 items 2, 5 and 6: e_flags, DT_RELR and the entry point. */
+static void test_elf_header_dynamic_and_entry_rules(void)
+{
+    static const struct {
+        const char *what;
+        uint32_t flags;
+        int expected;
+    } flags_cases[] = {
+        { "eabi5 hard", 0x05000400u, AAR_OK },
+        { "eabi4 hard", 0x04000400u, AAR_E_INVAL },
+        { "eabi0 hard", 0x00000400u, AAR_E_INVAL },
+        { "eabi6 hard", 0x06000400u, AAR_E_INVAL },
+        { "eabi5 soft", 0x05000200u, AAR_E_INVAL },
+        { "eabi5 no float flag", 0x05000000u, AAR_E_INVAL },
+        { "eabi5 soft and hard", 0x05000600u, AAR_E_INVAL },
+    };
+    static const uint32_t relr_tags[] = { 35u, 36u, 37u };
+    uint8_t image[IMAGE_BYTES];
+    unsigned i;
+
+    refusal_failures = 0U;
+    for (i = 0U; i < sizeof(flags_cases) / sizeof(flags_cases[0]); i++) {
+        make_image(image);
+        put32(image + 36, flags_cases[i].flags);
+        expect_load(flags_cases[i].what, image, flags_cases[i].expected);
+    }
+
+    /* DT_RELR, DT_RELRSZ and DT_RELRENT each refuse, beside a valid REL. */
+    for (i = 0U; i < sizeof(relr_tags) / sizeof(relr_tags[0]); i++) {
+        make_reloc_image(image, 0);
+        put32(image + DYN_OFF + 24, relr_tags[i]);
+        put32(image + DYN_OFF + 28, 0U);
+        expect_load("DT_RELR family", image, AAR_E_INVAL);
+    }
+
+    /* The entry must be in a PF_X segment, and A32 entries are even. */
+    make_image(image);
+    expect_load("entry at segment start", image, AAR_OK);
+    make_image(image);
+    put32(image + 24, LOAD_OFF + 0x40u);
+    expect_load("entry past the segment", image, AAR_E_INVAL);
+    make_image(image);
+    put32(image + 24, LOAD_OFF - 4u);
+    expect_load("entry before the segment", image, AAR_E_INVAL);
+    make_image(image);
+    put32(image + PHOFF + 24, 4u);                   /* PF_R only */
+    expect_load("entry in a non-executable segment", image, AAR_E_INVAL);
+    make_image(image);
+    put32(image + 24, LOAD_OFF + 1u);
+    expect_load("entry with bit 0 set", image, AAR_E_INVAL);
+    make_image(image);
+    put32(image + 24, LOAD_OFF + 2u);
+    expect_load("entry at an even offset", image, AAR_OK);
+    fprintf(stderr, "elf refusal rules: %u failures\n", refusal_failures);
+    assert(refusal_failures == 0U);
 }
 
 
@@ -1009,6 +1129,7 @@ int main(void)
     test_relocation_validation_is_sliced();
     test_relocation_allocation_and_zero_use_separate_passes();
     test_relocation_passes_are_bounded_and_flushed();
+    test_elf_header_dynamic_and_entry_rules();
     test_note_v1_load_rules();
     zzapp_boot_init();
     make_image(image);
@@ -1069,10 +1190,8 @@ int main(void)
     assert(load_end(image) == AAR_E_INVAL);
 
     zzapp_boot_init(); make_image(image);
-    put32(image + 24, 0u);
-    assert(load_end(image) == AAR_OK);
-    assert(zzapp_loader_have_image());
-    zzapp_loader_release();
+    put32(image + 24, 0u);                 /* outside every PF_X segment */
+    assert(load_end(image) == AAR_E_INVAL);
 
     zzapp_boot_init(); make_reloc_image(image, 1);
     put32(image + RELA_OFF + 4, 2);
@@ -1141,6 +1260,17 @@ int main(void)
     start_pending = 1;
     zzapp_worker_hook();
     assert(argv_started);
+
+    zzapp_boot_init();
+    make_image(image);
+    assert(load_end(image) == AAR_OK);
+    set_argv_full();
+    start_argc = ZZAPP_ARGV_MAX;
+    full_argv_started = 0;
+    zzapp_test_set_entry(full_argv_entry);
+    start_pending = 1;
+    zzapp_worker_hook();
+    assert(full_argv_started);
 
     /* The record of the first app was retired at its exit: the next app
      * claims a new one. */

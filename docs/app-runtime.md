@@ -540,9 +540,16 @@ minor words (`ZZAPP_ABI_MAJOR`, `ZZAPP_ABI_MINOR`).
 `AAR_GROUP_AUDIO`, `AAR_GROUP_GL` when the client capability word has the
 matching bit. `audio_stats` is `NULL`: the runtime keeps no underrun count.
 
+**Image rules.** The loader reads an ELF32 ARM `ET_DYN` image. `e_flags` must
+say EABI version 5 and hard float, and must not say soft float; any other
+value is `AAR_E_INVAL`. A dynamic section that names `DT_RELR`, `DT_RELRSZ`
+or `DT_RELRENT` is `AAR_E_INVAL`: only `R_ARM_RELATIVE` entries from `DT_REL`
+and `DT_RELA` are applied. `e_entry` must be even and inside a `PF_X` segment
+(`AAR_E_INVAL`).
+
 **Note v1.** An image must carry exactly one AAR note (owner `AAR`, type 1, a
-40-byte descriptor of ten little-endian words), found in a `PT_NOTE` segment or,
-when no segment holds one, in a note section. The loader checks, in the
+40-byte descriptor of ten little-endian words), found in a `PT_NOTE` segment.
+A note that only a section header names is not found. The loader checks, in the
 descriptor's order: magic `0x4E524141` and version 1 (`AAR_E_INVAL`); profile
 A32 (`AAR_E_PROFILE`); `api_major` 0 and `api_minor` at most 5
 (`AAR_E_INVAL`); `stack_bytes` 0 for the default 1 MiB, else 64 KiB to 1 MiB
@@ -552,10 +559,13 @@ and a multiple of 16 (`AAR_E_INVAL`); the reserved word 0; every
 second AAR note, or a descriptor of the wrong size is `AAR_E_INVAL`. The load
 status the client sees maps `AAR_E_INVAL` and `AAR_E_PROFILE` to
 `BAD_REQUEST`, `AAR_E_NOGROUP` to `UNSUPPORTED`, and `AAR_E_NOMEM` to
-`NO_MEMORY`; a profile or group refusal prints its reason in the `[app] reject
-op` line. The groups a note names (required and optional) set the display,
-audio and GL bits of `AAR_CB_FLAGS`, which the client reads. An image
-without a v1 note, including one that carries a 0.4 note, does not load.
+`NO_MEMORY`. The status alone cannot tell `AAR_E_INVAL` from `AAR_E_PROFILE`
+or `AAR_E_NOGROUP` from a missing call, so the refusal reply carries the code
+too (see `LOAD_END` below). A profile or group refusal prints its reason in
+the `[app] reject op` line. The groups a note names (required and optional)
+set the display, audio and GL bits of `AAR_CB_FLAGS`, which the client reads.
+An image without a v1 note, including one that carries a 0.4 note, does not
+load.
 
 **Events.** `aar_event_poll` always delivers `AAR_EV_STOP` and
 `AAR_EV_LOW_MEMORY`, and delivers the client's key, mouse, joystick and
@@ -705,7 +715,7 @@ blocks of a claim are:
 | service | 48 KiB: 1 KiB scratch, 2 KiB palette (shadow and stage), 4 KiB console input, 8 KiB log, 32 KiB console output ring | first path, name, palette, console or log use | `RELEASE` |
 | data | 8 KiB steps up to 256 KiB | first file read or write | `RELEASE` (a growth replaces it, but not while a request still names it, below) |
 | audio ring | `0x80 + frames * 4` bytes, rounded to 8 KiB | `AAR_OP_AUDIO_OPEN` | the audio close, once it is answered, and exit on the card route. On the AHI route the client maps the ring, so a close that was not posted, not answered or answered with an error, an exit without a close and a quarantined claim keep it until `RELEASE` |
-| load buffer | 72 KiB: 64 KiB staging, 2 KiB argv area, rounded | `LOAD_BEGIN` | once `START` has copied argv, or at the end of the claim |
+| load buffer | 72 KiB: 64 KiB staging, 4 KiB argv area, rounded | `LOAD_BEGIN` | once `START` has copied argv, or at the end of the claim |
 
 A spin app with no services costs 16 KiB. A console app costs 64 KiB. A game
 that reads files costs up to 320 KiB plus its audio ring. A claim holds at
@@ -860,12 +870,21 @@ commits the image on its first step, all or nothing and before any zeroing
 `MEMORY`), and releases the staging block when it completes. Mapping the image
 takes tables from the record's reserve; an image that needs more than 16
 gives `TABLES`. A failed `LOAD_END` ends the claim: the frames, tables and
-staging go back and the state reads `IDLE`, with the reason in the reply (a
-4-byte `AAR_REASON_*`).
+staging go back and the state reads `IDLE`. The reply of a refused
+`LOAD_BEGIN` or `LOAD_END` holds the `AAR_REASON_*` word at 0 (`NONE` when no
+resource ran out) and, for `AAR_E_INVAL`, `AAR_E_NOMEM`, `AAR_E_PROFILE` and
+`AAR_E_NOGROUP`, that code as a positive number at 4
+(`ZZAPP_REFUSAL_CODE`; the reply is then 8 bytes). `aar.library` returns the
+code, except that a reason makes it return `AAR_E_NORESOURCE` with the reason.
+A reply of 4 bytes or none, as an older firmware sends, leaves the library on
+the status mapping. When `LOAD_END` completes, the firmware writes
+`AAR_CB_LOAD_BASE_HI` and `AAR_CB_LOAD_BASE_LO`: the app address of image
+offset 0 (`0xc0000000`), which a fault's `pc` is relative to.
 
-`START` carries only `argc`. The argv area of the load buffer holds a `u32`
-argc, 16 offsets from the start of the load buffer, then the strings, each at
-most 128 bytes including the NUL. The firmware copies the strings into the
+`START` carries only `argc`. The argv area of the load buffer is 4 KiB and
+holds a `u32` argc, 16 offsets from the start of the load buffer, then the
+strings, each at most 128 bytes including the NUL, so 16 full arguments fit
+(`ZZAPP_LOAD_ARGV_BYTES`). The firmware copies the strings into the
 app's heap and builds its `argv` there, then frees the load buffer. `STOP`
 latches a stop with reason `FORCED` on the claim; the app sees `AAR_EV_STOP`.
 
