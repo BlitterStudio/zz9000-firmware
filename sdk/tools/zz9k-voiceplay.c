@@ -73,7 +73,7 @@
 
 #define TEMPLATE "MODULE,LEAD/K/N,NTSC/S,LINEAR/S,SECONDS/K/N,LOWLAT/S," \
                  "VOICES/K/N,STEREO/S,RATE/K/N,RAMP/K/N,CHURN/S,GROUPS/K/N," \
-                 "LIMITER/S,GAIN/K/N,INTERP/K,PERVOICE/S"
+                 "LIMITER/S,GAIN/K/N,INTERP/K,PERVOICE/S,OVERSAMPLE/S"
 #define OPT_MODULE 0
 #define OPT_LEAD 1
 #define OPT_NTSC 2
@@ -90,7 +90,8 @@
 #define OPT_GAIN 13
 #define OPT_INTERP 14
 #define OPT_PERVOICE 15
-#define OPT_COUNT 16
+#define OPT_OVERSAMPLE 16
+#define OPT_COUNT 17
 
 /* CHURN: a restart interval of the ramp length, but not below 32 frames (a
  * shorter one would write a record for every frame). */
@@ -223,7 +224,7 @@ static void usage(void)
   puts("       zz9k-voiceplay CLICK [LEAD=frames] [SECONDS=n] [LOWLAT]");
   puts("       zz9k-voiceplay LIVE [LEAD=frames] [SECONDS=n] [LOWLAT]");
   puts("       zz9k-voiceplay LOAD VOICES=n SECONDS=n [LINEAR] [STEREO] [RATE=hz] [GAIN=n] [CHURN] [GROUPS=n] [LOWLAT]");
-  puts("       every mode also takes RAMP=frames, LIMITER, INTERP=nearest|linear|cubic and PERVOICE");
+  puts("       every mode also takes RAMP=frames, LIMITER, INTERP=nearest|linear|cubic, PERVOICE and OVERSAMPLE");
   puts("  MODULE   ProTracker module to play (DYN envelopes and EFx funk are refused)");
   puts("  CLICK    a short pulse once per second at 48000 Hz, for listening and");
   puts("           for checking the scheduling margin; 10 seconds unless SECONDS");
@@ -255,6 +256,15 @@ static void usage(void)
   puts("           louder ones bend toward, never onto, the 16-bit rails. Needs a");
   puts("           firmware with CONFIG. A firmware that does not advertise");
   puts("           LIMITER runs it unqualified, for its qualification only");
+  puts("  OVERSAMPLE  CONFIG 2x oversampling, for any mode, sent first: the");
+  puts("           engine mixes at 96 kHz and decimates to 48 kHz with a");
+  puts("           59-tap filter, which delays the sound by 14 frames (the");
+  puts("           firmware reports it) and removes what a voice above 48 kHz");
+  puts("           would fold into the audible band. It costs about twice the");
+  puts("           render time. Needs a firmware with CONFIG; one that does not");
+  puts("           advertise OVERSAMPLE runs it unqualified, for its");
+  puts("           qualification only. The firmware refuses it while a voice");
+  puts("           sounds, so it goes out ahead of the first note");
   puts("  LEAD     lead in 48 kHz frames; 0 or absent is the firmware floor");
   puts("  NTSC     Paula clock of the module is NTSC (else PAL)");
   puts("  LINEAR   linear interpolation (else nearest)");
@@ -527,6 +537,7 @@ static int load_mode;
 static int ramp_set;
 static uint32_t ramp_frames;
 static int limiter_set;
+static int oversample_set;
 
 /* INTERP: the interpolation asked for, sent as the CONFIG default or, with
  * PERVOICE, as a MODE record for each voice. It takes the place of LINEAR. */
@@ -957,6 +968,13 @@ static void report(const char *reason)
   if (limiter_set) {
     puts("  limiter: on (static soft knee above 24576)");
   }
+  if (oversample_set) {
+    ZZ9KVoiceExtStatus ext;
+
+    zz9k_voice_ext_status_read(session.status, &ext);
+    printf("  oversampling: 2x, output delay %u frames\n",
+           (unsigned)ext.output_delay_frames);
+  }
   if (interp_set) {
     printf("  interpolation: %s, set with %s\n", interp_name(),
            interp_pervoice ? "a MODE record for each voice"
@@ -1134,6 +1152,7 @@ int main(void)
     load_volume = (uint32_t)value;
   }
   limiter_set = options[OPT_LIMITER] != 0;
+  oversample_set = options[OPT_OVERSAMPLE] != 0;
   load_stereo = options[OPT_STEREO] != 0;
   load_linear = options[OPT_LINEAR] != 0;
   if (options[OPT_INTERP]) {
@@ -1388,18 +1407,20 @@ int main(void)
     ZZ9KVoiceExtStatus ext;
 
     zz9k_voice_ext_status_read(session.status, &ext);
-    printf("  engine features 0x%lx%s%s%s%s%s%s\n", (unsigned long)ext.features,
+    printf("  engine features 0x%lx%s%s%s%s%s%s%s\n", (unsigned long)ext.features,
            (ext.features & ZZ9K_VOICE_FEATURE_CONFIG) ? " CONFIG" : "",
            (ext.features & ZZ9K_VOICE_FEATURE_RAMP) ? " RAMP" : "",
            (ext.features & ZZ9K_VOICE_FEATURE_LIMITER) ? " LIMITER" : "",
            (ext.features & ZZ9K_VOICE_FEATURE_CUBIC) ? " CUBIC" : "",
            (ext.features & ZZ9K_VOICE_FEATURE_VOICE_INTERP) ? " VOICE_INTERP"
                                                             : "",
+           (ext.features & ZZ9K_VOICE_FEATURE_OVERSAMPLE) ? " OVERSAMPLE" : "",
            ext.features == 0U ? " (none: an older firmware)" : "");
-    if ((ramp_set || limiter_set || (interp_set && !interp_pervoice)) &&
+    if ((ramp_set || limiter_set || oversample_set ||
+         (interp_set && !interp_pervoice)) &&
         (ext.features & ZZ9K_VOICE_FEATURE_CONFIG) == 0U) {
-      puts("zz9k-voiceplay: RAMP, LIMITER and INTERP need a firmware with the "
-           "CONFIG record");
+      puts("zz9k-voiceplay: RAMP, LIMITER, OVERSAMPLE and INTERP need a "
+           "firmware with the CONFIG record");
       code = 20;
       goto close_session;
     }
@@ -1413,6 +1434,11 @@ int main(void)
            "LIMITER: the soft knee is unqualified, running it for its "
            "qualification only. Keep the volume low and the speakers "
            "protected");
+    }
+    if (oversample_set && (ext.features & ZZ9K_VOICE_FEATURE_OVERSAMPLE) == 0U) {
+      puts("zz9k-voiceplay: WARNING: the firmware does not advertise "
+           "OVERSAMPLE: the 2x oversampling is unqualified and may not fit "
+           "its render budget, running it for its qualification only");
     }
     if (interp_set && (ext.features & ZZ9K_VOICE_FEATURE_VOICE_INTERP) == 0U) {
       puts("zz9k-voiceplay: WARNING: the firmware does not advertise "
@@ -1456,6 +1482,14 @@ int main(void)
   {
     ZZ9KVoiceRecord *record;
 
+    if (oversample_set) {
+      /* Ahead of everything else at the lead stamp: the firmware refuses
+       * the change once a voice sounds. */
+      record = pending_next(lead_frames, 0U, ZZ9K_VOICE_OP_CONFIG);
+      if (record) {
+        zz9k_voice_build_config_oversample(record, lead_frames, 1);
+      }
+    }
     if (ramp_set || limiter_set) {
       record = pending_next(lead_frames, 0U, ZZ9K_VOICE_OP_CONFIG);
       if (record) {

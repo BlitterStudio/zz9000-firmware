@@ -124,6 +124,18 @@ rejected record, underrun or drop. That is a timing result; the cubic output
 has not been listened to. The contract is in
 [zz9k-voice.md](../sdk/docs/zz9k-voice.md#interpolation).
 
+An optional 2x oversampling (`CONFIG` flag 8) mixes the voices at 96 kHz:
+the sums stay 32-bit per 96 kHz frame, the master applies to them per
+stretch between `MASTER` records, and the 59-tap half-band filter of the
+stream reducer (`audio_reduce_table.h`, with 64-bit accumulation) decimates
+to the fabric's 48 kHz before the one limiter or clamp. The sound is late by
+exactly 14 frames, which the status block publishes as `output_delay_frames`;
+stamps, the horizon and every client frame number stay at 48 kHz. A change of
+the setting needs a silent engine (no voice and no fade tail sounding), and
+a reset clears the filter's history. The `OVERSAMPLE` feature bit stays clear
+until the card timing gate for it has passed. The contract is in
+[zz9k-voice.md](../sdk/docs/zz9k-voice.md#oversampling).
+
 Closing a session detaches the slot, and a reset clears it. Both drop the
 periods already queued in the TX ring and request a rebuild from the
 remaining producers, so at most the period the DMA is playing still carries

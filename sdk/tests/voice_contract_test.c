@@ -160,6 +160,12 @@ static void test_layouts(void)
   CHECK(ZZ9K_VOICE_CONFIG_INTERP == 4U && ZZ9K_VOICE_MODE_INTERP == 1U);
   CHECK((ZZ9K_VOICE_CONFIG_INTERP &
          (ZZ9K_VOICE_CONFIG_RAMP | ZZ9K_VOICE_CONFIG_LIMITER)) == 0U);
+  CHECK(ZZ9K_VOICE_CONFIG_OVERSAMPLE == 8U &&
+        (ZZ9K_VOICE_CONFIG_OVERSAMPLE &
+         (ZZ9K_VOICE_CONFIG_RAMP | ZZ9K_VOICE_CONFIG_LIMITER |
+          ZZ9K_VOICE_CONFIG_INTERP)) == 0U);
+  CHECK(ZZ9K_VOICE_OVERSAMPLE_OFF == 1U && ZZ9K_VOICE_OVERSAMPLE_2X == 2U &&
+        ZZ9K_VOICE_OVERSAMPLE_DELAY_FRAMES == 14U);
   CHECK(ZZ9K_VOICE_INTERP_INHERIT == 0U && ZZ9K_VOICE_INTERP_NEAREST == 1U &&
         ZZ9K_VOICE_INTERP_LINEAR == 2U && ZZ9K_VOICE_INTERP_CUBIC == 3U);
   CHECK(ZZ9K_VOICE_JITTER_NONE == 0xFFFFFFFFU);
@@ -548,6 +554,26 @@ static void test_records(void)
   zz9k_voice_build_config(&r, 23U, ZZ9K_VOICE_CONFIG_INTERP |
                                        ZZ9K_VOICE_CONFIG_RAMP, 3U, 0U);
   CHECK(r.flags == 5U && r.arg0 == 3U);
+  /* oversampling: its own record, the factor in arg0 */
+  memset(&r, 0xA5, sizeof(r));
+  zz9k_voice_build_config_oversample(&r, 24U, 1);
+  CHECK(r.stamp == 24U && r.voice == 0U && r.op == ZZ9K_VOICE_OP_CONFIG &&
+        r.flags == ZZ9K_VOICE_CONFIG_OVERSAMPLE && r.arg0 == 2U &&
+        r.arg1 == 0U);
+  zz9k_voice_record_encode(&w, &r);
+  CHECK(b[5] == 9U && b[6] == 0x00 && b[7] == 0x08);
+  CHECK(b[8] == 0 && b[9] == 0 && b[10] == 0 && b[11] == 2U);
+  CHECK(b[12] == 0 && b[13] == 0 && b[14] == 0 && b[15] == 0);
+  zz9k_voice_build_config_oversample(&r, 25U, 0);
+  CHECK(r.flags == ZZ9K_VOICE_CONFIG_OVERSAMPLE && r.arg0 == 1U &&
+        r.arg1 == 0U);
+  /* the step with oversampling is half the 48 kHz step, rounded down once */
+  CHECK(zz9k_voice_rate_step_oversampled(44100U) == 30105U &&
+        zz9k_voice_rate_step(44100U) == 60211U);
+  CHECK(zz9k_voice_rate_step_oversampled(192000U) == 131072U &&
+        zz9k_voice_rate_step_oversampled(400000U) == 131072U &&
+        zz9k_voice_rate_step_oversampled(1U) == 0U &&
+        zz9k_voice_rate_step_oversampled(0U) == 0U);
 }
 
 /* ---- Status reader ---- */
