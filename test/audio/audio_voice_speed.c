@@ -210,6 +210,88 @@ static double time_ref(const struct scenario *sc, uint32_t bytes,
 	return best;
 }
 
+/*
+ * Churn: every 8 frames the next voice (of 32) is restarted, so each voice
+ * restarts every 256 frames and, with a ramp of 256, the fade pool stays
+ * full. The records are built before the timed loop. Returns ns per period
+ * of the current engine with ramp frames `ramp` (0 = no CONFIG record).
+ */
+#define CHURN_MAX_PERIODS 2000U
+static struct audio_voice_cmd g_churn[CHURN_MAX_PERIODS][2U * 120U];
+
+static double time_churn(const struct scenario *sc, uint32_t bytes,
+                         uint32_t ramp)
+{
+	static struct audio_voice_engine e;
+	struct audio_voice_cmd setup[3U * AUDIO_VOICE_MAX_VOICES + 1U];
+	double best = 1e30;
+	uint32_t t, v, n = 0, p, s, periods = g_periods < CHURN_MAX_PERIODS ?
+	                                      g_periods : CHURN_MAX_PERIODS;
+
+	if (ramp != 0U) {
+		memset(&setup[n], 0, sizeof(setup[n]));
+		setup[n].op = AUDIO_VOICE_OP_CONFIG;
+		setup[n].flags = AUDIO_VOICE_CONFIG_RAMP;
+		setup[n].arg0 = ramp;
+		n++;
+	}
+	for (v = 0; v < sc->voices; v++) {
+		uint32_t vol = 0xFFFFU / sc->voices;
+
+		memset(&setup[n], 0, sizeof(setup[n]));
+		setup[n].voice = (uint8_t)v;
+		setup[n].op = AUDIO_VOICE_OP_SET;
+		setup[n].flags = AUDIO_VOICE_SET_RATE | AUDIO_VOICE_RATE_HZ |
+		                AUDIO_VOICE_SET_VOLUME;
+		setup[n].arg0 = voice_rate(sc->rate, sc->voices, v);
+		setup[n].arg1 = (vol << 16) | vol;
+		n++;
+		memset(&setup[n], 0, sizeof(setup[n]));
+		setup[n].voice = (uint8_t)v;
+		setup[n].op = AUDIO_VOICE_OP_START;
+		n++;
+		memset(&setup[n], 0, sizeof(setup[n]));
+		setup[n].voice = (uint8_t)v;
+		setup[n].op = AUDIO_VOICE_OP_LOOP;
+		setup[n].arg1 = bytes;
+		n++;
+	}
+	/* period p starts at engine frame (p + 1) * PERIOD_FRAMES: the first
+	 * period carries the setup */
+	for (p = 0; p < periods; p++)
+		for (s = 0; s < 120U; s++) {
+			struct audio_voice_cmd *c = &g_churn[p][2U * s];
+			uint32_t stamp = (p + 1U) * PERIOD_FRAMES + 8U * s;
+			uint8_t voice = (uint8_t)((p * 120U + s) % sc->voices);
+
+			memset(c, 0, 2U * sizeof(*c));
+			c[0].stamp = c[1].stamp = stamp;
+			c[0].voice = c[1].voice = voice;
+			c[0].op = AUDIO_VOICE_OP_START;
+			c[1].op = AUDIO_VOICE_OP_LOOP;
+			c[1].arg1 = bytes;
+		}
+	for (t = 0; t < g_trials; t++) {
+		uint64_t t0, t1;
+
+		audio_voice_init(&e, g_bank, bytes, AUDIO_VOICE_CLOCK_PAL);
+		e.interp = sc->linear ? AUDIO_VOICE_INTERP_LINEAR :
+		                        AUDIO_VOICE_INTERP_NEAREST;
+		audio_voice_sample_set(&e, 0, 0, bytes,
+		                       sc->stereo ? AUDIO_VOICE_FMT_S16S :
+		                                    AUDIO_VOICE_FMT_S16);
+		audio_voice_render(&e, g_out_cur, PERIOD_FRAMES, setup, n);
+		t0 = now_ns();
+		for (p = 0; p < periods; p++)
+			audio_voice_render(&e, g_out_cur, PERIOD_FRAMES, g_churn[p],
+			                   2U * 120U);
+		t1 = now_ns();
+		if ((double)(t1 - t0) / periods < best)
+			best = (double)(t1 - t0) / periods;
+	}
+	return best;
+}
+
 int main(void)
 {
 	static const uint32_t voices[] = { 1, 8, 16, 32 };
@@ -259,6 +341,21 @@ int main(void)
 			       h_ref == h_cur ? "" : "  PCM DIFFERS");
 			bad |= h_ref != h_cur;
 		}
+	}
+	printf("\nrestart churn (32 voices, a restart every 8 frames in turn, "
+	       "22050 Hz), ns per period, current engine only\n");
+	printf("%-34s %12s %12s\n", "scenario", "ramp off", "ramp 256");
+	for (st = 0; st < 2; st++)
+	for (lin = 0; lin < 2; lin++) {
+		uint32_t bytes = make_sample(st);
+		struct scenario sc = { 32, lin, st, 22050 };
+		char name[64];
+		double off = time_churn(&sc, bytes, 0);
+		double on = time_churn(&sc, bytes, 256);
+
+		snprintf(name, sizeof(name), "32 voices %s %s",
+		         st ? "stereo" : "mono  ", lin ? "linear " : "nearest");
+		printf("%-34s %12.0f %12.0f\n", name, off, on);
 	}
 	return bad;
 }

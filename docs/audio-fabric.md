@@ -56,9 +56,12 @@ counter is the granted lead past the playing frame, and writes them into a
 staging ring of 40 periods that serves as the slot's source ring. A poll
 call renders one period at most. The main loop runs the poll in the branch
 where no Zorro request is pending, and every register access from the 68k
-waits while a render runs; 32 interpolated voices cost about 3 ms a period
-on the card, and a call that rendered the whole eight-period lead after an
-open or a START held the 68k for about 24 ms. The main loop calls the poll
+waits while a render runs; 32 interpolated voices cost about 1.0 ms (mono) to
+1.4 ms (stereo) a period on the card, measured with the `AUDIO_VOICE_BENCH`
+build, and a period with no sounding voice about 2.5 us. Before the mixer ran
+in runs per voice the same load cost 3 to 3.5 ms a period, and a call that
+rendered all eight periods of the lead after an open or a START held the 68k
+for about 24 ms. The main loop calls the poll
 many times in a period, so a short lead is rebuilt within a few loop
 iterations, with Zorro requests served between the periods. The slot goes
 live once the whole lead is staged, because going live primes the TX ring

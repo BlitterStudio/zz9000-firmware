@@ -28,6 +28,9 @@ and the firmware side of the mixing path in
   samples when the session was opened with the linear flag.
 - Commands carry the 48 kHz frame they take effect at, so a note starts on
   exactly that output frame.
+- Optional ramps, set with a `CONFIG` record: volume changes, starts, stops
+  and restarts fade over up to 512 frames, and a restarted voice lets its old
+  sound fade out, so a cut or a retrigger does not click. Off by default.
 
 The engine is integer only. Each voice contributes `sample * volume >> 16` to
 the left and right sums, so a volume of 65535 is close to unity. The sums are
@@ -69,6 +72,7 @@ The descriptors and the record builders are in `zz9k/voice.h`:
 | `ZZ9KVoiceGrant` (in `session.grant`) | What the firmware granted |
 | `ZZ9KVoiceStatus` | Host-order copy of the status block |
 | `ZZ9KVoiceJitter` and `zz9k_voice_jitter_read()` | The two jitter words of the status block, read apart from `ZZ9KVoiceStatus` so that struct keeps its size |
+| `ZZ9KVoiceExtStatus` and `zz9k_voice_ext_status_read()` | The extended status words (features and reserved ones), also read apart from `ZZ9KVoiceStatus` |
 | `zz9k_voice_build_start()` and the other `zz9k_voice_build_*()` helpers | Fill a `ZZ9KVoiceRecord` |
 
 ```c
@@ -283,6 +287,9 @@ helper `ZZ9KVoiceWrite()` encodes records to the wire form.
 | STOP | 4 | Unused | Unused | Unused |
 | MASTER | 5 | Unused | Gain in Q8.8, 256 is unity, at most 0xFFFF | Unused |
 | DIRECTION | 6 | 1 plays backward, 0 plays forward | Unused | Unused |
+| MODE | 7 | Reserved | Reserved | Reserved |
+| ENVELOPE | 8 | Reserved | Reserved | Reserved |
+| CONFIG | 9 | 1 sets the ramp length | The ramp length in frames, 0 to 512 | Reserved |
 
 Behaviour of each op:
 
@@ -301,7 +308,8 @@ Behaviour of each op:
   previous step. Rates above 192000 Hz are clamped. A voice that never
   received a rate has step 0: it outputs nothing and does not advance. The
   engine divides the Paula clock by the period in integer arithmetic.
-- STOP silences the voice.
+- STOP silences the voice; with a ramp length set it fades the voice out, see
+  [Ramps and CONFIG](#ramps-and-config).
 - MASTER sets the gain of the final mix, after all voices are summed; the
   voice field is ignored.
 - DIRECTION sets the direction of a playing voice and does nothing to a
@@ -309,6 +317,60 @@ Behaviour of each op:
 
 A record for a voice at or above the granted voice count, or with an unknown
 op, is rejected and never applied.
+
+### Ramps and CONFIG
+
+CONFIG (op 9) carries session-wide settings. Its flags field names the
+settings the record holds and its voice field is ignored. Flag 1
+(`ZZ9K_VOICE_CONFIG_RAMP`) sets the ramp length in frames with arg0, 0 to
+`ZZ9K_VOICE_RAMP_MAX_FRAMES` (512); arg1 is reserved. A record with no flag,
+with a flag the firmware does not know, or with a ramp above 512 is rejected
+with none of its settings applied and counted in `rejected`. Firmware without CONFIG counts every
+CONFIG record as rejected, so a client checks the `CONFIG` bit of the features
+word first. MODE (7) and ENVELOPE (8) are op numbers kept for later features;
+the engine rejects them.
+
+With a ramp length R above 0, volume changes, starts, stops and restarts fade
+over R frames instead of stepping, which removes the click of a cut or a
+retrigger and the zipper noise of a stepped volume. With R at 0, the default,
+the engine behaves exactly as it does without CONFIG and its output is
+identical, sample for sample.
+
+Each side of a voice has a gain, kept as the volume times 256. A ramp from a
+gain g to a target t over R frames adds (t - g) / R to the gain on every
+frame, the division truncating toward zero, so frame j of the ramp plays at
+volume (g + j * ((t - g) / R)) >> 8 and frame R and later at t exactly. A ramp
+starts on the frame of its record and a new target while one runs starts a
+new ramp from the gain the voice has on that frame.
+
+- START on a silent voice makes it rise from silence to its volume.
+- START on a sounding voice hands the old sound to a fade slot and starts the
+  new one from silence. The slot is a copy that keeps playing from where the
+  voice was and fades from its current gain to silence over R frames, then
+  frees itself. A voice that was already stopping keeps the fade it had. No
+  slot is taken for a sound that is silent or has no rate. A START the engine
+  rejects still hands the old sound over, so it fades out.
+- SET with a volume on a sounding voice ramps from its current gain to the new
+  volume. On a voice that is stopping it only stores the volume. SET of the
+  rate is not ramped.
+- STOP on a sounding voice ramps its gain to silence over R frames and then
+  deactivates it; a voice that is silent already stops at once. A second STOP
+  while the voice fades changes nothing.
+- LOOP, DIRECTION and SET records for a voice never touch the fade slots it
+  has handed its earlier sounds to, and a STOP does not end earlier tails. A
+  voice that reaches the end of its sample stops at once, ramp or not.
+- There are 32 fade slots. A restart that finds all in use overwrites the
+  oldest, which cuts that tail short.
+
+Records with the same stamp apply in ring order, so a SET, STOP and START for
+one voice at one frame give different sounds in different orders, as they do
+without ramps. MASTER is not ramped. A ramp that is running when R is set to
+0 runs out, and records after that act at once.
+
+Ramping costs render time. A ramping voice, and each fade slot that is still
+fading, costs about as much as a sounding voice plus a vector pass over the
+frames it plays. The `RAMP` feature bit is set only for firmware whose render
+time with 32 voices and 32 fade slots is inside the 5 ms budget on the card.
 
 ### The ring
 
@@ -471,6 +533,7 @@ has the byte layout.
 | `session` | The session id |
 | jitter `margin_min_us` | The smallest time a rendered period waited for the audio interrupt to take it, in microseconds since open, or `0xFFFFFFFF` until the first period is taken. Periods rendered before the slot goes live are not counted |
 | jitter `poll_gap_max_us` | The largest gap between two firmware polls of the session since open, in microseconds |
+| `features` | The features word, see below and [Discovery](#discovery) |
 
 The words are consistent individually; the block is not one atomic snapshot.
 
@@ -485,6 +548,14 @@ polled twice. A margin near zero means a period was rendered just before the
 interrupt needed it, so any further delay would have counted an underrun. A
 poll gap above `(lead - fill-ahead) * 20 ms` less the render time is a lead
 that was too small for that machine's load.
+
+The extended words follow at offsets 40 to 53, also in formerly reserved
+bytes. `features` (offset 40, 32 bits) is the features word described under
+[Discovery](#discovery) and is kept in every status write. `active_mask` (44),
+`ends` (48) and `output_delay_frames` (52, 16 bits) are reserved for later
+features and read 0. Read them with `zz9k_voice_ext_status_read()` into a
+`ZZ9KVoiceExtStatus`, with the same tear protection and cache rule as the
+status words. Bytes 54 to 63 stay reserved.
 
 The heartbeat is a counter in the ring header. `ZZ9KVoiceGetStatus()` adds
 one to it on every call, so the one call both reads the status and keeps the
@@ -569,6 +640,17 @@ but never sets the flag, so a client does not use them there. A firmware
 without the stereo support refuses a DEFINE in format 2 or 3 with
 `ZZ9K_STATUS_BAD_REQUEST`. See [Stereo samples](#stereo-samples).
 
+The status block's features word (`ZZ9K_VOICE_FEATURE_*`, read with
+`zz9k_voice_ext_status_read()`) names what the firmware's engine can do beyond
+the base contract, and a client checks a bit before it sends the records of
+that feature. It reads 0 on firmware that predates it. `CONFIG` says the
+`CONFIG` record is understood. `RAMP` says that a ramp length set with it has
+been measured on the card with 32 voices and a full fade pool inside the
+render budget; until the bit is set, a client that wants ramps for testing
+sends the record without relying on it. The other bits (`LIMITER`, `CUBIC`,
+`VOICE_INTERP`, `OVERSAMPLE`, `ENVELOPE`, `EVENTS`) belong to features that
+are not in the firmware yet and stay clear.
+
 ## zz9k-voiceplay
 
 `zz9k-voiceplay` plays a ProTracker module, a click, the keyboard, or a
@@ -580,7 +662,8 @@ revision 43 for `LOWLAT`, and `timer.device`.
 zz9k-voiceplay MODULE [LEAD=frames] [NTSC] [LINEAR] [SECONDS=n] [LOWLAT]
 zz9k-voiceplay CLICK [LEAD=frames] [SECONDS=n] [LOWLAT]
 zz9k-voiceplay LIVE [LEAD=frames] [SECONDS=n] [LOWLAT]
-zz9k-voiceplay LOAD VOICES=n SECONDS=n [LINEAR] [STEREO] [RATE=hz] [LOWLAT]
+zz9k-voiceplay LOAD VOICES=n SECONDS=n [LINEAR] [STEREO] [RATE=hz] [CHURN] [GROUPS=n] [LOWLAT]
+zz9k-voiceplay <any of the above> RAMP=frames
 ```
 
 | Argument | Meaning |
@@ -589,6 +672,9 @@ zz9k-voiceplay LOAD VOICES=n SECONDS=n [LINEAR] [STEREO] [RATE=hz] [LOWLAT]
 | `VOICES` | LOAD mode only: the number of voices, 1 to 32 (default 32) |
 | `STEREO` | LOAD mode only: the sample is interleaved stereo S16S instead of mono S16 |
 | `RATE` | LOAD mode only: the centre rate in Hz, 1 to 192000 (default 22050) |
+| `RAMP` | Any mode: send a `CONFIG` ramp record of this many frames (0 to 512) before any other record. Needs firmware with the `CONFIG` feature; the tool says when `RAMP` is not advertised yet and runs the ramp anyway, which is how the firmware is qualified |
+| `CHURN` | LOAD mode only: restart the voices continuously, see below |
+| `GROUPS` | With `CHURN`: restart groups, 1 to 32 (default 32) |
 | `LEAD` | The lead in 48 kHz frames; 0 or absent asks for the firmware floor |
 | `NTSC` | The module uses the NTSC Paula clock (PAL otherwise) |
 | `LINEAR` | Linear interpolation (nearest otherwise) |
@@ -622,6 +708,18 @@ for `SECONDS` (default 20) before it stops and closes. With a high `RATE`
 some voices step above 48 kHz. The stereo sample needs a firmware that plays
 the stereo formats.
 
+`CHURN` (load mode only) restarts the voices over and over, so that with `RAMP`
+the fade pool stays full. Each voice restarts every `RAMP` frames (256 without
+`RAMP`, and never below 32), a START and a LOOP over the full length of the sample, as a
+player does that retriggers a note. With a ramp every restart hands the old
+sound to a fade slot and each tail lasts one interval, so the 32 slots are in
+use all the time. `GROUPS` sets how many groups the voices restart in, spread
+evenly over the interval. The default is 32: one voice every interval / 32
+frames, which is also the most records and the most splits of the render.
+`GROUPS=1` restarts all voices together. A restart writes 2 records per voice,
+so the tool asks for an 8 KiB ring and falls back to the default ring when the
+shared memory does not have room.
+
 In live mode the keys `zsxdcvgbhnjm` play one octave from middle C and
 `q2w3er5t6y7u` the next, with `i` the top C; ESC stops. Each key writes a SET
 and a START at the status horizon on the next of eight voices, a decaying
@@ -643,6 +741,8 @@ tool resets the session unless the song ended, closes it and prints a report:
 | late, rejected, underruns, dropped | The firmware counters from the status block |
 | session | `low latency` or `standard`, with the granted lead floor in frames |
 | jitter | The two jitter words of the status block: the smallest wait of a rendered period for the audio interrupt and the largest gap between firmware polls, in microseconds |
+| engine features | The features word of the status block, with `CONFIG` and `RAMP` named when they are set |
+| ramp, churn | Only with `RAMP` or `CHURN`: the ramp length, the restarts written, the groups and the interval between restarts |
 | keys played | Live mode only |
 | smallest scheduling margin | The smallest stamp minus horizon at the moment a record was written, in frames and microseconds |
 | record latency | Minimum, average and maximum of each record's stamp minus the playing frame of the status read before its write, in frames and milliseconds: how far ahead of the sound the records were queued. Click records are included |
