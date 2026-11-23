@@ -88,8 +88,10 @@
 
 /*
  * Extended status. FEATURES is the features word, written in every status
- * write; the SDK reads it as ZZ9KVoiceExtStatus. ACTIVE_MASK, ENDS and
- * OUTPUT_DELAY are reserved for later units and stay zero.
+ * write; the SDK reads it as ZZ9KVoiceExtStatus. OUTPUT_DELAY is the delay
+ * of the output stage in frames at the engine horizon
+ * (audio_voice_output_delay(): 0, or 14 with 2x oversampling). ACTIVE_MASK
+ * and ENDS are reserved for a later unit and stay zero.
  */
 #define AUDIO_VOICE_STATUS_OFF_FEATURES     40U /* u32 */
 #define AUDIO_VOICE_STATUS_OFF_ACTIVE_MASK  44U /* u32 */
