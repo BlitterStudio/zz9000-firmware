@@ -696,11 +696,15 @@ for sample.
 
 Envelopes cost render time. A voice mixes in runs of at most 16 frames while
 its level changes (the attack, the decay and the release), so it costs more
-than a plain voice then and as much as one in the sustain, and a ramp on top
-of a changing level adds a scalar pass over the frames it covers. The cost has
-not been measured on the card. The builders in `zz9k/voice.h` are
-`zz9k_voice_build_envelope()`, `zz9k_voice_build_envelope_off()` and
-`zz9k_voice_build_stop_release()`.
+than a plain voice then and as much as one in the sustain. A ramp under a
+changing level uses the vector gain of the ramped voices with the envelope
+multiplier added: the volume of four frames at a time is
+`(((g >> 8) * m) >> 15)`, a 32-bit product because `g >> 8` is at most 65535
+and m at most 32767 below full level. The cubic reader does the same. Only the
+frames of a run that are not whole blocks of four, and the pass-edge frames,
+take the scalar form. The cost has not been measured on the card. The
+builders in `zz9k/voice.h` are `zz9k_voice_build_envelope()`,
+`zz9k_voice_build_envelope_off()` and `zz9k_voice_build_stop_release()`.
 
 ### The ring
 
@@ -1087,14 +1091,19 @@ their envelopes.
 For example:
 
 ```text
-zz9k-voiceplay LOAD VOICES=32 CHURN RAMP=256 ENV=2,3,50,3 STEREO LINEAR SECONDS=20
-zz9k-voiceplay LOAD VOICES=32 CHURN RAMP=256 LIMITER INTERP=cubic ENV=2,3,50,3 SECONDS=20
+zz9k-voiceplay LOAD VOICES=32 CHURN RAMP=256 HOLD=128 ENV=2,3,50,30 STEREO LINEAR SECONDS=20
+zz9k-voiceplay LOAD VOICES=32 CHURN RAMP=256 HOLD=128 LIMITER INTERP=cubic ENV=2,3,50,30 SECONDS=20
 zz9k-voiceplay LIVE ENV=10,40,25,200
 ```
 
-An envelope with a sustain of 100 percent and no attack or decay holds full
-level and works as no envelope at all, so a run that measures the cost of
-envelopes uses a shape that changes the level during the notes, as these do.
+The first two are the shape for the render budget: 32 voices, a restart of
+every voice every 256 frames, a key-off 128 frames after each start (during
+the decay of 144 frames) and a release of 30 ms (1440 frames), so that every
+restart hands a tail with a nonzero level and a release still running to a
+fade slot, and the pool holds 32 of them. A release as short as 3 ms ends
+before the next restart or leaves tails whose level has rounded to 0, which
+does not exercise that load. An envelope with a sustain of 100 percent and
+no attack or decay holds full level and works as no envelope at all.
 
 With `RAMP` or `LIMITER` the tool sends one `CONFIG` record at the granted
 lead, the same stamp as the first notes, and writes it first in the pending

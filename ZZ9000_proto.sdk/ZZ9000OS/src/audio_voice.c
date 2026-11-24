@@ -1176,7 +1176,11 @@ AV_INLINE int32x4_t blend4(const int wide, int32x4_t a, int32x4_t b,
  * Returns the frames done, a multiple of 4. With fuse the samples are not
  * stored: each four frames are multiplied by their gain, (gain + i * inc) >>
  * 8 per side as in apply_ramp(), and added to the sums at acc (left) and
- * acc + AUDIO_VOICE_MIX_FRAMES (right).
+ * acc + AUDIO_VOICE_MIX_FRAMES (right). With fuse 2 the volume of each frame
+ * is also scaled by the envelope multiplier em, ((g >> 8) * em) >> 15 as in
+ * env_vol(): g >> 8 is at most 65535 and em at most 32768, so the product
+ * stays below 2^31 and a 32-bit lane holds it. fuse is a constant of the
+ * caller, so the plain kernels carry nothing of it.
  */
 AV_INLINE uint32_t read_kernel_neon(const int wide, const int stereo,
                                     const int linear, const int fuse,
@@ -1185,7 +1189,8 @@ AV_INLINE uint32_t read_kernel_neon(const int wide, const int stereo,
                                     uint32_t n, int32_t *restrict out0,
                                     int32_t *restrict out1,
                                     int32_t *restrict acc, int32_t gl,
-                                    int32_t il, int32_t gr, int32_t ir)
+                                    int32_t il, int32_t gr, int32_t ir,
+                                    const int32_t em)
 {
 	const int fs = wide + stereo;
 	const int32_t lanes[4] = { 0, 1, 2, 3 };
@@ -1221,11 +1226,16 @@ AV_INLINE uint32_t read_kernel_neon(const int wide, const int stereo,
 			r = vshlq_n_s32(r, 8);
 		}
 		if (fuse) {
-			const int32x4_t pl = vshrq_n_s32(
-				vmulq_s32(l, vshrq_n_s32(gvl, 8)), 16);
-			const int32x4_t pr = vshrq_n_s32(
-				vmulq_s32(r, vshrq_n_s32(gvr, 8)), 16);
+			int32x4_t ul = vshrq_n_s32(gvl, 8);
+			int32x4_t ur = vshrq_n_s32(gvr, 8);
+			int32x4_t pl, pr;
 
+			if (fuse == 2) {
+				ul = vshrq_n_s32(vmulq_n_s32(ul, em), 15);
+				ur = vshrq_n_s32(vmulq_n_s32(ur, em), 15);
+			}
+			pl = vshrq_n_s32(vmulq_s32(l, ul), 16);
+			pr = vshrq_n_s32(vmulq_s32(r, ur), 16);
 			vst1q_s32(acc + i, vaddq_s32(vld1q_s32(acc + i), pl));
 			vst1q_s32(acc + AUDIO_VOICE_MIX_FRAMES + i,
 			          vaddq_s32(vld1q_s32(acc + AUDIO_VOICE_MIX_FRAMES + i),
@@ -1248,12 +1258,29 @@ AV_NOINLINE uint32_t run_read_fused(const struct audio_voice *v, int linear,
                                     const uint8_t *p, int32_t x, int32_t dx,
                                     int32_t nbytes, uint32_t n, int32_t *acc,
                                     int32_t gl, int32_t il, int32_t gr,
-                                    int32_t ir)
+                                    int32_t ir, uint32_t em)
 {
 #define AV_F(w, s, l) \
 	return read_kernel_neon(w, s, l, 1, p, x, dx, nbytes, n, NULL, NULL, acc, \
-	                        gl, il, gr, ir)
-	switch ((v->wide ? 4 : 0) | (v->stereo ? 2 : 0) | (linear ? 1 : 0)) {
+	                        gl, il, gr, ir, 0)
+#define AV_FE(w, s, l) \
+	return read_kernel_neon(w, s, l, 2, p, x, dx, nbytes, n, NULL, NULL, acc, \
+	                        gl, il, gr, ir, (int32_t)em)
+	const int kind = (v->wide ? 4 : 0) | (v->stereo ? 2 : 0) | (linear ? 1 : 0);
+
+	if (em != AV_ENV_UNITY) {
+		switch (kind) {
+		case 0: AV_FE(0, 0, 0);
+		case 1: AV_FE(0, 0, 1);
+		case 2: AV_FE(0, 1, 0);
+		case 3: AV_FE(0, 1, 1);
+		case 4: AV_FE(1, 0, 0);
+		case 5: AV_FE(1, 0, 1);
+		case 6: AV_FE(1, 1, 0);
+		default: AV_FE(1, 1, 1);
+		}
+	}
+	switch (kind) {
 	case 0: AV_F(0, 0, 0);
 	case 1: AV_F(0, 0, 1);
 	case 2: AV_F(0, 1, 0);
@@ -1264,16 +1291,17 @@ AV_NOINLINE uint32_t run_read_fused(const struct audio_voice *v, int linear,
 	default: AV_F(1, 1, 1);
 	}
 #undef AV_F
+#undef AV_FE
 }
 #else
 AV_NOINLINE uint32_t run_read_fused(const struct audio_voice *v, int linear,
                                     const uint8_t *p, int32_t x, int32_t dx,
                                     int32_t nbytes, uint32_t n, int32_t *acc,
                                     int32_t gl, int32_t il, int32_t gr,
-                                    int32_t ir)
+                                    int32_t ir, uint32_t em)
 {
 	(void)v; (void)linear; (void)p; (void)x; (void)dx; (void)nbytes;
-	(void)n; (void)acc; (void)gl; (void)il; (void)gr; (void)ir;
+	(void)n; (void)acc; (void)gl; (void)il; (void)gr; (void)ir; (void)em;
 	return 0;
 }
 #endif
@@ -1287,7 +1315,7 @@ AV_NOINLINE void run_read(const struct audio_voice *v, int linear,
 #define AV_R(w, s, l) \
 	do { \
 		const uint32_t d = read_kernel_neon(w, s, l, 0, p, x, dx, nbytes, \
-		                                    n, out0, out1, NULL, 0, 0, 0, 0); \
+		                                    n, out0, out1, NULL, 0, 0, 0, 0, 0); \
 		read_kernel(w, s, l, p, x + (int32_t)d * dx, dx, nbytes, n - d, \
 		            out0 + d, out1 + d); \
 	} while (0); \
@@ -1365,7 +1393,10 @@ AV_NOINLINE void apply_ramp(int32_t *restrict al, const int32_t *restrict sl,
 }
 
 /* apply_ramp() for a voice with an envelope: the volume of each frame is the
- * ramp's volume scaled by em, ((g >> 8) * em) >> 15. */
+ * ramp's volume scaled by em, ((g >> 8) * em) >> 15. The blocks of four
+ * frames of a run go through run_read_fused(), so this scalar form is the
+ * host path and the rest of a run (fewer than four frames, the pass-edge
+ * frames). */
 AV_NOINLINE void apply_ramp_env(int32_t *restrict al,
                                 const int32_t *restrict sl,
                                 const int32_t *restrict sr, uint32_t n,
@@ -1423,10 +1454,9 @@ AV_NOINLINE int mix_ramp(struct audio_voice_engine *e, struct audio_voice *v,
 		const int32_t nb = back ? -fb : fb;
 		/* whole blocks of four frames read and added in one go (NEON), the
 		 * rest through the scratch */
-		const uint32_t d = em != AV_ENV_UNITY ? 0U :
-		                   run_read_fused(v, linear, p, x, dx, nb, safe, al,
+		const uint32_t d = run_read_fused(v, linear, p, x, dx, nb, safe, al,
 		                                  v->gain_l, v->inc_l, v->gain_r,
-		                                  v->inc_r);
+		                                  v->inc_r, em);
 
 		if (d < safe) {
 			run_read(v, linear, p, x + (int32_t)d * dx, dx, nb, safe - d,
@@ -2035,7 +2065,8 @@ AV_INLINE uint32_t cubic_kernel_neon(const int wide, const int stereo,
                                      const uint8_t *restrict p, int32_t x,
                                      const int32_t dx, uint32_t n,
                                      int32_t *restrict al, int32_t gl,
-                                     int32_t il, int32_t gr, int32_t ir)
+                                     int32_t il, int32_t gr, int32_t ir,
+                                     const uint32_t em)
 {
 	static const int32_t lanes[4] = { 0, 1, 2, 3 };
 	static const int16_t ks[4] = { 3, 2, 0, 0 };
@@ -2049,8 +2080,8 @@ AV_INLINE uint32_t cubic_kernel_neon(const int wide, const int stereo,
 	int32x4_t xv = vmlaq_n_s32(vdupq_n_s32(x), lane, dx);
 	int32x4_t gvl = vmlaq_n_s32(vdupq_n_s32(gl), lane, il);
 	int32x4_t gvr = vmlaq_n_s32(vdupq_n_s32(gr), lane, ir);
-	int32x4_t vvl = vdupq_n_s32((gl >> 8) << 15);
-	int32x4_t vvr = vdupq_n_s32((gr >> 8) << 15);
+	int32x4_t vvl = vdupq_n_s32(env_vol(gl, em) << 15);
+	int32x4_t vvr = vdupq_n_s32(env_vol(gr, em) << 15);
 	int32_t tmpl[4] = { 0, 0, 0, 0 }, tmpr[4] = { 0, 0, 0, 0 };
 	uint32_t i;
 
@@ -2061,8 +2092,16 @@ AV_INLINE uint32_t cubic_kernel_neon(const int wide, const int stereo,
 		uint32_t k;
 
 		if (ramp) {
-			vvl = vshlq_n_s32(vshrq_n_s32(gvl, 8), 15);
-			vvr = vshlq_n_s32(vshrq_n_s32(gvr, 8), 15);
+			int32x4_t ul = vshrq_n_s32(gvl, 8);
+			int32x4_t ur = vshrq_n_s32(gvr, 8);
+
+			/* the envelope multiplier: at most 65535 * 32768 < 2^31 */
+			if (em != AV_ENV_UNITY) {
+				ul = vshrq_n_s32(vmulq_n_s32(ul, (int32_t)em), 15);
+				ur = vshrq_n_s32(vmulq_n_s32(ur, (int32_t)em), 15);
+			}
+			vvl = vshlq_n_s32(ul, 15);
+			vvr = vshlq_n_s32(ur, 15);
 			gvl = vaddq_s32(gvl, dgl);
 			gvr = vaddq_s32(gvr, dgr);
 		}
@@ -2094,13 +2133,14 @@ AV_INLINE uint32_t cubic_kernel_neon(const int wide, const int stereo,
 AV_NOINLINE uint32_t run_cubic(const struct audio_voice *v, int sides,
                                const uint8_t *p, int32_t x, int32_t dx,
                                int32_t nb, uint32_t n, int32_t *al,
-                               int32_t gl, int32_t il, int32_t gr, int32_t ir)
+                               int32_t gl, int32_t il, int32_t gr, int32_t ir,
+                               uint32_t em)
 {
 #define AV_CK(w, s, sd) \
 	return nb < 0 ? cubic_kernel_neon(w, s, sd, 1, p, x, dx, n, al, gl, il, \
-	                                  gr, ir) \
+	                                  gr, ir, em) \
 	              : cubic_kernel_neon(w, s, sd, 0, p, x, dx, n, al, gl, il, \
-	                                  gr, ir)
+	                                  gr, ir, em)
 	if (!v->stereo) {
 		if (v->wide)
 			AV_CK(1, 0, 3);
@@ -2124,10 +2164,10 @@ AV_NOINLINE uint32_t run_cubic(const struct audio_voice *v, int sides,
 static uint32_t run_cubic(const struct audio_voice *v, int sides,
                           const uint8_t *p, int32_t x, int32_t dx, int32_t nb,
                           uint32_t n, int32_t *al, int32_t gl, int32_t il,
-                          int32_t gr, int32_t ir)
+                          int32_t gr, int32_t ir, uint32_t em)
 {
 	(void)v; (void)sides; (void)p; (void)x; (void)dx; (void)nb; (void)n;
-	(void)al; (void)gl; (void)il; (void)gr; (void)ir;
+	(void)al; (void)gl; (void)il; (void)gr; (void)ir; (void)em;
 	return 0;
 }
 #endif
@@ -2216,9 +2256,8 @@ static void cubic_run(struct audio_voice_engine *e,
 		const int32_t x = (int32_t)v->frac + (int32_t)k * dx;
 		const int32_t g_l = gl + (int32_t)k * il;
 		const int32_t g_r = gr + (int32_t)k * ir;
-		const uint32_t d = em != AV_ENV_UNITY ? 0U :
-		                   run_cubic(v, sides, p, x, dx, nb, cnt, al + k, g_l,
-		                             il, g_r, ir);
+		const uint32_t d = run_cubic(v, sides, p, x, dx, nb, cnt, al + k, g_l,
+		                             il, g_r, ir, em);
 
 		if (d < cnt)
 			cubic_interior(v->wide, v->stereo, p, x + (int32_t)d * dx, dx, nb,

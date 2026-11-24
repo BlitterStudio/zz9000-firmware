@@ -1849,6 +1849,92 @@ static void test_full_pool(void)
 	}
 }
 
+/* The largest gain product: a ramp over the whole volume range (0 up to
+ * 65535 and back down to 1) under a multiplier of 32767, 16385 or 1, for
+ * every interpolation. The vector gain of the fused paths multiplies g >> 8
+ * by m in 32 bits ((65535 * 32767) < 2^31); every frame is compared with the
+ * formula ((g >> 8) * m) >> 15 on a constant sample, which every reader
+ * returns unchanged. */
+static void test_extreme_ramp_gain(void)
+{
+	static const uint32_t sustains[] = { 32767U, 16385U, 1U };
+	const int32_t up = (int32_t)((65535U << 8) / 512U);
+	const int32_t down = ((int32_t)(1U << 8) - (int32_t)(65535U << 8)) / 512;
+	uint32_t mode, s, f;
+
+	for (mode = 0; mode < 3; mode++) {
+		for (s = 0; s < 3; s++) {
+			struct audio_voice_cmd c[10];
+			uint32_t n;
+
+			dc_init();
+			g_e.interp = mode;
+			set_cmd(&c[0], 0, 0, AUDIO_VOICE_OP_CONFIG,
+			        AUDIO_VOICE_CONFIG_RAMP, 512, 0);
+			n = 1;
+			n += envelope(c + n, 0, 0, 0, 0, sustains[s], 3);
+			n += note(c + n, 3, 0, 65535);
+			set_cmd(&c[n++], 700, 0, AUDIO_VOICE_OP_SET,
+			        AUDIO_VOICE_SET_VOLUME, 0, (1U << 16) | 1U);
+			render_all(c, n, 1500);
+			for (f = 3; f < 1500; f++) {
+				int32_t gain;
+
+				if (f < 515)
+					gain = up * (int32_t)(f - 3);
+				else if (f < 700)
+					gain = (int32_t)(65535U << 8);
+				else if (f < 1212)
+					gain = (int32_t)(65535U << 8) + down * (int32_t)(f - 700);
+				else
+					gain = (int32_t)(1U << 8);
+				CHECK(g_buf[2 * f] == dc_out(vol_of((uint32_t)(gain >> 8),
+				                                    sustains[s])),
+				      "interp %u sustain %u frame %u: %d, want %d", mode,
+				      sustains[s], f, g_buf[2 * f],
+				      dc_out(vol_of((uint32_t)(gain >> 8), sustains[s])));
+				if (g_buf[2 * f] != dc_out(vol_of((uint32_t)(gain >> 8),
+				                                  sustains[s])))
+					break;
+			}
+		}
+	}
+}
+
+/* A ramp whose per-frame step truncates to 0 (a volume change of 1 over 512
+ * frames) keeps the old gain until its end and then jumps to the target, as
+ * without an envelope; the envelope multiplier must apply to that constant
+ * gain too, in every reader. */
+static void test_zero_increment_ramp(void)
+{
+	uint32_t mode, f;
+
+	for (mode = 0; mode < 3; mode++) {
+		struct audio_voice_cmd c[10];
+		uint32_t n;
+
+		dc_init();
+		g_e.interp = mode;
+		set_cmd(&c[0], 0, 0, AUDIO_VOICE_OP_CONFIG, AUDIO_VOICE_CONFIG_RAMP,
+		        512, 0);
+		n = 1;
+		n += envelope(c + n, 0, 0, 0, 0, 20000, 3);
+		n += note(c + n, 3, 0, 40000);
+		set_cmd(&c[n++], 700, 0, AUDIO_VOICE_OP_SET, AUDIO_VOICE_SET_VOLUME,
+		        0, (40001U << 16) | 40001U);
+		render_all(c, n, 1500);
+		for (f = 520; f < 1300; f++) {
+			const uint32_t base = f < 1212 ? 40000U : 40001U;
+
+			CHECK(g_buf[2 * f] == dc_out(vol_of(base, 20000U)),
+			      "interp %u frame %u: %d, want %d", mode, f, g_buf[2 * f],
+			      dc_out(vol_of(base, 20000U)));
+			if (g_buf[2 * f] != dc_out(vol_of(base, 20000U)))
+				break;
+		}
+	}
+}
+
 int main(void)
 {
 	const char *env;
@@ -1879,6 +1965,8 @@ int main(void)
 	test_records();
 	test_split_boundaries();
 	test_cubic_scaling();
+	test_extreme_ramp_gain();
+	test_zero_increment_ramp();
 	test_full_pool();
 	test_without_envelope_is_baseline();
 	for (seq = 0; seq < seqs && failures < 5; seq++) {
