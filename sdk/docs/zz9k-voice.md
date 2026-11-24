@@ -37,6 +37,9 @@ and the firmware side of the mixing path in
 - Per-voice interpolation: a `MODE` record gives a voice nearest, linear or
   cubic reading, and a `CONFIG` record changes the session default. Off by
   default; see [Interpolation](#interpolation).
+- Optional per-voice ADSR envelopes: an `ENVELOPE` record sets the attack,
+  decay, sustain level and release of a voice, START is the key-on and STOP
+  with flag 1 the key-off. Not advertised yet; see [Envelopes](#envelopes).
 
 The engine is integer only. Each voice contributes `sample * volume >> 16` to
 the left and right sums, so a volume of 65535 is close to unity. The sums are
@@ -294,11 +297,11 @@ helper `ZZ9KVoiceWrite()` encodes records to the wire form.
 | START | 1 | Sample id, 0 to 255 | Start offset in bytes from the sample start | First-pass length in bytes, 0 for to the end of the sample |
 | LOOP | 2 | Unused | Loop start in bytes from the sample start | Loop length in bytes, 0 for no loop |
 | SET | 3 | 1 sets the rate, 2 sets the volume, 4 makes the rate Hz | The rate: a Paula period, or Hz with flag 4 | Left volume in the high 16 bits, right volume in the low 16 bits, each 0 to 65535 |
-| STOP | 4 | Unused | Unused | Unused |
+| STOP | 4 | 1 makes it a key-off: a voice with an envelope releases instead of stopping. Other bits are ignored | Unused | Unused |
 | MASTER | 5 | Unused | Gain in Q8.8, 256 is unity, at most 0xFFFF | Unused |
 | DIRECTION | 6 | 1 plays backward, 0 plays forward | Unused | Unused |
 | MODE | 7 | 1 sets the interpolation of the voice | The selector, 0 (the session default) to 3 | 0 |
-| ENVELOPE | 8 | Reserved | Reserved | Reserved |
+| ENVELOPE | 8 | 1 sets the envelope of the voice for its next START, 0 removes it | With flag 1, the attack in ms in the high 16 bits and the decay in ms in the low 16 bits. With flag 0, 0 | With flag 1, the sustain level in the high 16 bits (Q15, 0 to 32768) and the release in ms in the low 16 bits. With flag 0, 0 |
 | CONFIG | 9 | 1 sets the ramp length, 2 sets the limiter, 3 sets both, 4 sets the default interpolation | With flag 1, the ramp length in frames, 0 to 512. With flag 2 alone, 0. With flag 4, the selector, 1 to 3 | With flag 2, 0 (off) or 1 (on). Ignored with flag 1 alone. With flag 4, 0 |
 
 Behaviour of each op:
@@ -319,7 +322,8 @@ Behaviour of each op:
   received a rate has step 0: it outputs nothing and does not advance. The
   engine divides the Paula clock by the period in integer arithmetic.
 - STOP silences the voice; with a ramp length set it fades the voice out, see
-  [Ramps and CONFIG](#ramps-and-config).
+  [Ramps and CONFIG](#ramps-and-config). With flag 1 (`ZZ9K_VOICE_STOP_RELEASE`)
+  it is the key-off of the voice's envelope, see [Envelopes](#envelopes).
 - MASTER sets the gain of the final mix, after all voices are summed; the
   voice field is ignored.
 - DIRECTION sets the direction of a playing voice and does nothing to a
@@ -353,8 +357,8 @@ flag, with a selector outside 1 to 3 or with a nonzero arg1. A setting that
 the record does not name keeps its value. Firmware without CONFIG counts
 every CONFIG record as rejected, so a client checks the `CONFIG` bit of the
 features word first. MODE (op 7) is described under
-[Interpolation](#interpolation). ENVELOPE (8) is an op number kept for a
-later feature; the engine rejects it.
+[Interpolation](#interpolation) and ENVELOPE (op 8) under
+[Envelopes](#envelopes).
 
 The builders in `zz9k/voice.h` fill these records:
 `zz9k_voice_build_config_ramp()` (flag 1, arg1 0),
@@ -543,6 +547,160 @@ The builders in `zz9k/voice.h` are `zz9k_voice_build_mode_interp()` (voice,
 selector) and `zz9k_voice_build_config_interp()` (selector). The generic
 builders write any flags and arguments, which is how a test sends a record the
 firmware must reject.
+
+### Envelopes
+
+An envelope gives a voice an attack, a decay, a sustain level and a release,
+for synthesiser and MIDI style clients. The `ENVELOPE` record (op 8) sets it
+for the voice's next START, START is the key-on and STOP with flag 1
+(`ZZ9K_VOICE_STOP_RELEASE`) is the key-off. The `ENVELOPE` bit of the
+features word is clear: the firmware has the records, and the bit is set
+only after its render time with 32 voices, a full fade pool and envelopes in
+every stage has been measured on the card inside the 5 ms budget. A client
+that wants envelopes before then sends the records for testing, as
+`zz9k-voiceplay ENV=a,d,s,r` does and says. A firmware without the records
+counts every `ENVELOPE` as rejected and plays the voice at its volume, with
+the key-off as a plain STOP.
+
+The record names the voice and carries the setting in its arguments:
+
+| flags | arg0 | arg1 | Effect |
+| --- | --- | --- | --- |
+| 1 | Attack in ms in the high 16 bits, decay in ms in the low 16 bits | Sustain level in the high 16 bits (Q15: 0 to 32768, where 32768 is full level), release in ms in the low 16 bits | Sets the envelope |
+| 0 | 0 | 0 | Removes the envelope |
+
+A record with another flag, with flag 0 and a nonzero argument, or with a
+sustain above 32768, is rejected, counted in `rejected`, and the voice keeps
+its previous setting. The setting acts at the next START of the voice. A
+voice that is sounding keeps the envelope it started with, or none, so
+an `ENVELOPE` record belongs before the START it is meant for. The setting
+stays across START, STOP and RESET, like a voice's rate and volume.
+
+The envelope multiplies the voice's volume by a level L from 0 to 1. The
+volume a frame plays at is `((g >> 8) * m) >> 15`, where g is the gain the
+volume or the [ramp](#ramps-and-config) gives that frame (the volume times
+256) and m is L in Q15, so 32768 is full level. The envelope and the volume
+are independent: SET with a volume changes the base level only, a ramp keeps
+its linear shape under the envelope, and a voice without an envelope plays
+exactly as before. The sample is then multiplied by that volume as always,
+`sample * volume >> 16`, so the output of a quiet tail rounds to 0 well
+before the release has ended.
+
+The engine changes L once every 16 output frames, a block, counted from the
+frame of the START (from the frame of the key-off during the release). A
+millisecond is 48 frames, which is 3 blocks, so a time converts exactly and
+a stage of t ms lasts 3 t blocks, 48 t frames. Every time is therefore a
+multiple of one third of a millisecond, and the level is constant inside a
+block. `zz9k_voice_envelope_steps()` gives the blocks of a time in ms.
+
+- Attack: the level rises linearly from 0. Block j of an attack of A blocks
+  has L = floor(j * 2^30 / A) in the engine's Q30, and the decay starts at
+  block A at full level. An attack of 0 ms starts the decay at the first
+  frame.
+- Decay: L falls exponentially from full level toward the sustain level S
+  (a fraction, S = sustain / 32768) over D blocks. Block k has
+  L = S + (1 - S) * 2^(-16 k / D), a curve of 96 dB, and from block D on L is
+  exactly S. The curve is read from a table by integer interpolation and
+  agrees with that formula to within 3 units of a full-scale 16-bit sample. About
+  62% of the time passes before the curve has fallen 60 dB. A decay of 0 ms
+  skips to the sustain level, and an attack that ends in a decay of 0 ms
+  never plays the full level.
+- Sustain: L = S until the key-off. A sustain of 32768 with no attack and no
+  decay holds full level.
+- Release: a key-off starts a new block at its own frame. L starts at the
+  level the voice has then, L0, which is the level of the block in progress
+  in whatever stage the voice is in, not the sustain level and not the
+  level a restarted envelope would have. Block k of R blocks has
+  L = L0 * 2^(-16 k / R), 96 dB over the release, and the voice deactivates
+  after block R - 1. A release of 0 ms ends the voice at the key-off frame,
+  a hard cut: send a short release for a soft one.
+
+The release lasts its time whatever the level. It does not end when L
+becomes too small to hear or when `sample * volume >> 16` rounds to 0, so a
+10 s release of a volume of 1 ends on the same frame as the same release of
+a volume of 65535, 480000 frames after the key-off.
+
+Other cases:
+
+- START on a sounding voice restarts the attack from silence. With a ramp
+  length set the old sound goes to a fade slot first, as for any restart, and
+  the slot carries the envelope state with it: the old envelope keeps running
+  there on its own, and the voice's own envelope starts again. No slot is
+  taken for a sound whose gain or envelope level is 0. Same-stamp records
+  apply in ring order, so STOP with flag 1 and then START at one frame hand
+  the releasing sound to the slot, and START and then STOP with flag 1 release
+  the new note from the first block of its attack, which is silent when the
+  attack is not 0.
+- A fade slot is frozen as for ramps: later ENVELOPE, LOOP, DIRECTION, SET
+  and STOP records for the voice number never touch it, including a key-off.
+  A release that ends inside a slot frees the slot and counts no end.
+- A plain STOP on a voice with an envelope fades the base gain out over the
+  ramp length, or silences the voice at once without a ramp, and counts no
+  end; the envelope runs on under it. STOP with flag 1 on a voice
+  without an envelope is a plain STOP. A second key-off changes nothing, and
+  a key-off of a voice that a plain STOP is fading out changes nothing.
+- A voice with an envelope plays at its rate and its pass rules unchanged:
+  a voice that reaches the end of its sample stops, whatever the stage.
+  A stage runs whether or not the voice is audible, so a muted or rate-less
+  voice keeps its time.
+- The engine counts every release that ends by itself in an internal counter,
+  once, for a voice and not for a fade slot. A plain STOP, a pass end and a
+  stop ramp that finishes first count nothing. A pass end, a stop ramp end and
+  a release end on one frame apply in that order. Nothing publishes the
+  counter yet: the `ends` word of the status block reads 0.
+
+A worked example. A voice at 22050 Hz and volume 40000 on a looping sample of
+`sample_bytes` bytes, with an envelope of attack 10 ms, decay 40 ms, sustain
+25% (8192) and release 200 ms, keyed off 3000 frames after the start:
+
+```c
+ZZ9KVoiceRecord rec[5];
+uint32_t t = status.horizon + 960U;
+
+zz9k_voice_build_envelope(&rec[0], t, 2U, 10U, 40U, 8192U, 200U);
+zz9k_voice_build_set(&rec[1], t, 2U,
+                     ZZ9K_VOICE_SET_RATE | ZZ9K_VOICE_SET_RATE_HZ |
+                         ZZ9K_VOICE_SET_VOLUME,
+                     22050U, 40000U, 40000U);
+zz9k_voice_build_start(&rec[2], t, 2U, 0U, 0U, 0U);
+zz9k_voice_build_loop(&rec[3], t, 2U, 0U, sample_bytes);
+zz9k_voice_build_stop_release(&rec[4], t + 3000U, 2U);
+ZZ9KVoiceWrite(&session, rec, 5U);
+```
+
+The attack is 30 blocks, the decay 120 and the release 600. With f the frame
+counted from t, the level is:
+
+| Frames | Multiplier m (Q15) |
+| --- | --- |
+| 0 to 15 | 0, silent |
+| 16 j to 16 j + 15, j = 1 to 29 | floor(j * 2^30 / 30) >> 15, rising linearly; 16384 for j = 15 |
+| 480 to 495 | 32768, the decay starts at full level |
+| 480 + 16 k, k = 0 to 119 | the decay curve toward 8192 |
+| 2400 on | 8192, the sustain; the volume is (40000 * 8192) >> 15 = 10000 |
+| 3000 to 3015 | 8192, the first block of the release |
+| 3000 + 16 k, k = 1 to 599 | 8192 * 2^(-16 k / 600); 2048 at k = 75, frame 4200 |
+| 12600 on | the release has ended and the voice is inactive |
+
+A key-off at frame 245 instead lands in block 15 of the attack, where L is
+one half, so the release starts from 16384 and holds it until frame 261, then
+falls from there over 200 ms; it does not start from the sustain level of
+8192. A client sends SET with a volume at any frame in between: the volume
+changes at that frame and the multiplier keeps its schedule.
+
+The engine's tests, `test/audio/audio_voice_envelope_test.c`, check these
+rules against a frame-by-frame model that evaluates each block's level
+directly, against the real-valued curves and against the frozen baseline
+engine: without an `ENVELOPE` record the output is the same as before, sample
+for sample.
+
+Envelopes cost render time. A voice mixes in runs of at most 16 frames while
+its level changes (the attack, the decay and the release), so it costs more
+than a plain voice then and as much as one in the sustain, and a ramp on top
+of a changing level adds a scalar pass over the frames it covers. The cost has
+not been measured on the card. The builders in `zz9k/voice.h` are
+`zz9k_voice_build_envelope()`, `zz9k_voice_build_envelope_off()` and
+`zz9k_voice_build_stop_release()`.
 
 ### The ring
 
@@ -826,8 +984,10 @@ cubic interpolation, and `VOICE_INTERP` of the `MODE` record and the `CONFIG`
 default interpolation, see [Interpolation](#interpolation). The firmware
 advertises all of them once their card timing gates have passed; cubic
 reading is used only when a client asks for it.
-The other bits (`OVERSAMPLE`, `ENVELOPE`, `EVENTS`) belong to features that
-are not in the firmware yet and stay clear.
+The `ENVELOPE` bit says that the `ENVELOPE` record and the key-off are
+qualified, see [Envelopes](#envelopes). The firmware has the records but the
+bit is clear until the card timing gate has passed. `OVERSAMPLE` and `EVENTS`
+belong to features that are not in the firmware yet and stay clear.
 
 ## zz9k-voiceplay
 
@@ -839,8 +999,8 @@ revision 43 for `LOWLAT`, and `timer.device`.
 ```text
 zz9k-voiceplay MODULE [LEAD=frames] [NTSC] [LINEAR] [SECONDS=n] [LOWLAT]
 zz9k-voiceplay CLICK [LEAD=frames] [SECONDS=n] [LOWLAT]
-zz9k-voiceplay LIVE [LEAD=frames] [SECONDS=n] [LOWLAT]
-zz9k-voiceplay LOAD VOICES=n SECONDS=n [LINEAR] [STEREO] [RATE=hz] [GAIN=n] [CHURN] [GROUPS=n] [LOWLAT]
+zz9k-voiceplay LIVE [LEAD=frames] [SECONDS=n] [LOWLAT] [ENV=a,d,s,r] [HOLD=frames]
+zz9k-voiceplay LOAD VOICES=n SECONDS=n [LINEAR] [STEREO] [RATE=hz] [GAIN=n] [CHURN] [GROUPS=n] [ENV=a,d,s,r] [HOLD=frames] [LOWLAT]
 zz9k-voiceplay <any of the above> [RAMP=frames] [LIMITER] [INTERP=nearest|linear|cubic] [PERVOICE]
 ```
 
@@ -857,6 +1017,8 @@ zz9k-voiceplay <any of the above> [RAMP=frames] [LIMITER] [INTERP=nearest|linear
 | `GAIN` | LOAD mode only: the volume of every voice on each side, 0 to 65535, in place of 65535 divided by the voice count |
 | `CHURN` | LOAD mode only: restart the voices continuously, see below |
 | `GROUPS` | With `CHURN`: restart groups, 1 to 32 (default 32) |
+| `ENV` | LIVE and LOAD mode: an envelope on every voice, `a,d,s,r`: the attack, decay and release in ms (0 to 65535) and the sustain in percent (0 to 100), for example `ENV=20,100,60,300`. Sent as an `ENVELOPE` record at the lead stamp ahead of every note, with a key-off after every note, see below. When the firmware does not advertise `ENVELOPE` the tool prints a warning that the records are unqualified and runs them anyway, which is how the firmware is qualified. It exits with code 20 on a firmware without the voice features word |
+| `HOLD` | With `ENV`: the frames from the start of a note to its key-off, 1 or more. 24000 by default; with `CHURN` three quarters of the interval between the restarts of a voice, and it must be below that interval |
 | `LEAD` | The lead in 48 kHz frames; 0 or absent asks for the firmware floor |
 | `NTSC` | The module uses the NTSC Paula clock (PAL otherwise) |
 | `LINEAR` | Linear interpolation (nearest otherwise) |
@@ -902,6 +1064,38 @@ frames, which is also the most records and the most splits of the render.
 so the tool asks for an 8 KiB ring and falls back to the default ring when the
 shared memory does not have room.
 
+`ENV` (live and load mode) sends an `ENVELOPE` record for every voice at the
+granted lead, after the `CONFIG` and `MODE` records and before the MASTER
+record and every note, and ends every note with a key-off, a STOP with flag 1,
+`HOLD` frames after its start. A load without `CHURN` plays one note per
+voice and keys every voice off once. With `CHURN` every restart is a note, so
+each voice gets a key-off `HOLD` frames after each of its starts, and the
+first note of a voice that restarts before its key-off is due has none. The
+key-offs go into the ring between the restarts of the other groups in the
+order of their frames, the key-off first when a start has the same frame:
+the ring takes stamps in order, so a key-off that waited for later starts
+would be written behind them. Each note then writes three records instead of
+two, so a `CHURN` run with `ENV` asks for an 8208 byte ring. That is the
+smallest request that grants 512 records, because the 16-byte header leaves
+8192 bytes with room for only 256; the tool prints the records granted at
+open, falls back to the default ring when the memory is short, and the
+ring-full waits in the report still count. The schedule is
+`sdk/tools/zz9k-voice-load.h`, which the host test `audio_voice_load_test`
+checks against a per-voice enumeration and drives through the engine. The run
+keeps 32 voices and, with `RAMP`, a full pool of fade slots whose copies carry
+their envelopes.
+For example:
+
+```text
+zz9k-voiceplay LOAD VOICES=32 CHURN RAMP=256 ENV=2,3,50,3 STEREO LINEAR SECONDS=20
+zz9k-voiceplay LOAD VOICES=32 CHURN RAMP=256 LIMITER INTERP=cubic ENV=2,3,50,3 SECONDS=20
+zz9k-voiceplay LIVE ENV=10,40,25,200
+```
+
+An envelope with a sustain of 100 percent and no attack or decay holds full
+level and works as no envelope at all, so a run that measures the cost of
+envelopes uses a shape that changes the level during the notes, as these do.
+
 With `RAMP` or `LIMITER` the tool sends one `CONFIG` record at the granted
 lead, the same stamp as the first notes, and writes it first in the pending
 queue, ahead of the MASTER record and of every START. The ring keeps that
@@ -943,7 +1137,10 @@ audio path are in `docs/audio-saturation-ceiling.md`.
 In live mode the keys `zsxdcvgbhnjm` play one octave from middle C and
 `q2w3er5t6y7u` the next, with `i` the top C; ESC stops. Each key writes a SET
 and a START at the status horizon on the next of eight voices, a decaying
-triangle wave of 4096 bytes whose pitch follows the key. It needs an
+triangle wave of 4096 bytes whose pitch follows the key. With `ENV` the note
+loops one 32-sample cycle of the triangle at constant level instead, so the
+envelope alone shapes it, and a key-off follows `HOLD` frames after the start,
+written at the horizon of the first pass that finds it due. It needs an
 interactive console, and it reports the keys played and the records the engine
 found late. It is for the ear test of a low-latency session next to a
 standard one.
@@ -961,9 +1158,9 @@ tool resets the session unless the song ended, closes it and prints a report:
 | late, rejected, underruns, dropped | The firmware counters from the status block |
 | session | `low latency` or `standard`, with the granted lead floor in frames |
 | jitter | The two jitter words of the status block: the smallest wait of a rendered period for the audio interrupt and the largest gap between firmware polls, in microseconds |
-| engine features | The features word of the status block, with `CONFIG`, `RAMP`, `LIMITER`, `CUBIC` and `VOICE_INTERP` named when they are set |
+| engine features | The features word of the status block, with `CONFIG`, `RAMP`, `LIMITER`, `CUBIC`, `VOICE_INTERP` and `ENVELOPE` named when they are set |
 | load | LOAD mode only: the voices, sample type, interpolation, rate range and the volume per side (65535 divided by the voice count unless `GAIN` is given) |
-| ramp, limiter, interpolation, churn | Only with `RAMP`, `LIMITER`, `INTERP` or `CHURN`: the ramp length, the limiter state, the interpolation and how it was set, the restarts written, the groups and the interval between restarts |
+| ramp, limiter, interpolation, churn, envelope | Only with `RAMP`, `LIMITER`, `INTERP`, `CHURN` or `ENV`: the ramp length, the limiter state, the interpolation and how it was set, the restarts written, the groups and the interval between restarts, and the envelope with its times in blocks, the key-offs written, the hold and whether the firmware advertises `ENVELOPE`, with a warning when the firmware refused records |
 | keys played | Live mode only |
 | smallest scheduling margin | The smallest stamp minus horizon at the moment a record was written, in frames and microseconds |
 | record latency | Minimum, average and maximum of each record's stamp minus the playing frame of the status read before its write, in frames and milliseconds: how far ahead of the sound the records were queued. Click records are included |

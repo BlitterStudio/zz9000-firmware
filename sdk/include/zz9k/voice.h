@@ -185,8 +185,10 @@ typedef struct ZZ9KVoiceRingHeader {
  * firmware). START: flags = sample id, arg0 = start offset, arg1 =
  * first-pass length (0 = to the sample end). LOOP: arg0/arg1 = loop
  * start/length. SET: flags select rate, volume and rate-in-Hz; arg0 = rate,
- * arg1 = (left << 16) | right. STOP silences the voice. MASTER: arg0 = Q8.8
- * gain. DIRECTION: flags bit 0 = backward. Stamps must not decrease.
+ * arg1 = (left << 16) | right. STOP silences the voice, or with
+ * ZZ9K_VOICE_STOP_RELEASE in flags releases its envelope (see ENVELOPE
+ * below). MASTER: arg0 = Q8.8 gain. DIRECTION: flags bit 0 = backward.
+ * Stamps must not decrease.
  *
  * MODE sets a per-voice setting: the voice field names the voice and flags
  * name the settings the record holds. ZZ9K_VOICE_MODE_INTERP: arg0 = the
@@ -196,8 +198,25 @@ typedef struct ZZ9KVoiceRingHeader {
  * nonzero arg1 is rejected and the voice keeps its setting. The setting
  * applies from the record's frame and stays across START, STOP and RESET. A
  * sound that a restart hands to a fade slot keeps the interpolation it had.
- * ENVELOPE is an op number of a later feature; the firmware rejects it until
- * it has it. CONFIG (ZZ9K_VOICE_FEATURE_CONFIG) carries
+ * ENVELOPE (ZZ9K_VOICE_FEATURE_ENVELOPE) gives a voice an ADSR envelope for
+ * its next START: flags 0 removes it (arg0 and arg1 must be 0), flags
+ * ZZ9K_VOICE_ENVELOPE_SET sets it from arg0 = (attack ms << 16) | decay ms
+ * and arg1 = (sustain << 16) | release ms. Times are 0 to
+ * ZZ9K_VOICE_ENVELOPE_MS_MAX; sustain is a Q15 level, 0 to
+ * ZZ9K_VOICE_ENVELOPE_SUSTAIN_UNITY (32768, full scale). Another flag or a
+ * larger sustain rejects the record and the voice keeps its setting. A
+ * sounding voice keeps the envelope it started with. The engine changes the
+ * level every ZZ9K_VOICE_ENVELOPE_STEP_FRAMES (16) output frames, so a time
+ * of t ms is 3 t steps. The attack is linear from 0 to full level; the
+ * decay and the release are 96 dB exponentials, the decay from full level
+ * toward the sustain level, which it reaches at its end; the sustain holds
+ * until the key-off. START is the key-on, and STOP with
+ * ZZ9K_VOICE_STOP_RELEASE the key-off: the release runs from the level the
+ * voice has at that frame, not from the sustain level, and the voice
+ * deactivates when it ends (a release of 0 ms ends it at once). Without an
+ * envelope the flag makes a plain STOP. SET volume changes the base level
+ * only; the envelope multiplies it. sdk/docs/zz9k-voice.md has the rules in
+ * full and a worked example. CONFIG (ZZ9K_VOICE_FEATURE_CONFIG) carries
  * session-wide settings: flags name the settings the record holds, the voice
  * field is ignored, and every named setting is validated before any is
  * applied, so a record that holds a bad value changes nothing.
@@ -232,6 +251,7 @@ typedef struct ZZ9KVoiceRingHeader {
 #define ZZ9K_VOICE_SET_VOLUME   0x0002U
 #define ZZ9K_VOICE_SET_RATE_HZ  0x0004U /* rate is Hz, else a Paula period */
 #define ZZ9K_VOICE_DIR_BACKWARD 0x0001U
+#define ZZ9K_VOICE_STOP_RELEASE 0x0001U /* STOP flag: key-off */
 
 #define ZZ9K_VOICE_CONFIG_RAMP    0x0001U
 #define ZZ9K_VOICE_CONFIG_LIMITER 0x0002U
@@ -239,6 +259,13 @@ typedef struct ZZ9KVoiceRingHeader {
 
 /* MODE flags: the settings a MODE record holds. */
 #define ZZ9K_VOICE_MODE_INTERP    0x0001U
+
+/* ENVELOPE flags and ranges. A record with flags 0 removes the envelope. */
+#define ZZ9K_VOICE_ENVELOPE_SET            0x0001U
+#define ZZ9K_VOICE_ENVELOPE_STEP_FRAMES    16U
+#define ZZ9K_VOICE_ENVELOPE_STEPS_PER_MS   3U /* 48 frames per ms / 16 */
+#define ZZ9K_VOICE_ENVELOPE_MS_MAX         65535U
+#define ZZ9K_VOICE_ENVELOPE_SUSTAIN_UNITY  0x8000U
 
 /* Interpolation selectors of MODE (arg0) and of the CONFIG default (arg0).
  * INHERIT is MODE only: the voice follows the session default, which is
@@ -322,7 +349,8 @@ typedef struct ZZ9KVoiceRecord {
  * budget. LIMITER says the same of the soft knee set with
  * ZZ9K_VOICE_CONFIG_LIMITER. CUBIC says that cubic interpolation, the
  * session default or a voice's, is qualified the same way, and VOICE_INTERP
- * that the MODE record and the CONFIG default interpolation are. A firmware
+ * that the MODE record and the CONFIG default interpolation are, and ENVELOPE
+ * that the ENVELOPE record and the key-off are. A firmware
  * may accept a setting before it advertises the bit, so that the setting can
  * be qualified; a client uses the setting outside a qualification run only
  * once the bit is set. The firmware sets a bit only for a feature it has. */
@@ -739,6 +767,52 @@ static inline void zz9k_voice_build_stop(ZZ9KVoiceRecord *record,
 {
   zz9k_voice_build_record(record, stamp, voice, ZZ9K_VOICE_OP_STOP, 0U, 0U,
                           0U);
+}
+
+/* A key-off: STOP with ZZ9K_VOICE_STOP_RELEASE. A voice with an envelope
+ * enters its release from its current level; a voice without one is stopped
+ * as by zz9k_voice_build_stop(). Check ZZ9K_VOICE_FEATURE_ENVELOPE first:
+ * firmware without it ignores the flag and stops the voice as a plain STOP
+ * does. */
+static inline void zz9k_voice_build_stop_release(ZZ9KVoiceRecord *record,
+                                                 uint32_t stamp, uint8_t voice)
+{
+  zz9k_voice_build_record(record, stamp, voice, ZZ9K_VOICE_OP_STOP,
+                          ZZ9K_VOICE_STOP_RELEASE, 0U, 0U);
+}
+
+/* An ENVELOPE record: the attack and decay in ms, the sustain as a Q15 level
+ * (ZZ9K_VOICE_ENVELOPE_SUSTAIN_UNITY is full scale) and the release in ms,
+ * for the voice's next START. The firmware rejects a sustain above the unity
+ * and counts the record as rejected. Check ZZ9K_VOICE_FEATURE_ENVELOPE
+ * first: firmware without it counts the record as rejected and plays the
+ * voice at its volume. */
+static inline void zz9k_voice_build_envelope(ZZ9KVoiceRecord *record,
+                                             uint32_t stamp, uint8_t voice,
+                                             uint16_t attack_ms,
+                                             uint16_t decay_ms,
+                                             uint16_t sustain,
+                                             uint16_t release_ms)
+{
+  zz9k_voice_build_record(record, stamp, voice, ZZ9K_VOICE_OP_ENVELOPE,
+                          ZZ9K_VOICE_ENVELOPE_SET,
+                          ((uint32_t)attack_ms << 16) | decay_ms,
+                          ((uint32_t)sustain << 16) | release_ms);
+}
+
+/* Removes the voice's envelope for its next START. */
+static inline void zz9k_voice_build_envelope_off(ZZ9KVoiceRecord *record,
+                                                 uint32_t stamp, uint8_t voice)
+{
+  zz9k_voice_build_record(record, stamp, voice, ZZ9K_VOICE_OP_ENVELOPE, 0U, 0U,
+                          0U);
+}
+
+/* Envelope steps of a time in ms: the engine's resolution, 16 output frames
+ * (1/3 ms). A stage of t ms lasts 3 t steps, 48 t frames. */
+static inline uint32_t zz9k_voice_envelope_steps(uint32_t ms)
+{
+  return ms * ZZ9K_VOICE_ENVELOPE_STEPS_PER_MS;
 }
 
 /* gain is Q8.8, 256 = unity. */

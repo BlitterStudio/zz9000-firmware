@@ -873,7 +873,7 @@ static uint32_t gen_cmds(uint32_t frame, uint32_t frames, uint32_t r,
 				}
 			}
 		} else {
-			c->op = (uint8_t)(rnd(2) ? AUDIO_VOICE_OP_ENVELOPE : 10 + rnd(200));
+			c->op = (uint8_t)(10 + rnd(200));
 			c->flags = (uint16_t)rnd(65536);
 		}
 	}
@@ -1975,7 +1975,7 @@ static void test_records(void)
 	x[n++] = mk(0, 3, AUDIO_VOICE_OP_MODE, AUDIO_VOICE_MODE_INTERP, 3, 1);
 	x[n++] = mk(0, 32, AUDIO_VOICE_OP_MODE, AUDIO_VOICE_MODE_INTERP, 3, 0);
 	x[n++] = mk(0, 200, AUDIO_VOICE_OP_MODE, AUDIO_VOICE_MODE_INTERP, 3, 0);
-	x[n++] = mk(0, 3, AUDIO_VOICE_OP_ENVELOPE, 1, 1, 0);
+	x[n++] = mk(0, 3, 10, 1, 1, 0);                               /* unknown */
 	x[n++] = mk(0, 0, AUDIO_VOICE_OP_CONFIG, AUDIO_VOICE_CONFIG_INTERP, 0, 0);
 	x[n++] = mk(0, 0, AUDIO_VOICE_OP_CONFIG, AUDIO_VOICE_CONFIG_INTERP, 4, 0);
 	x[n++] = mk(0, 0, AUDIO_VOICE_OP_CONFIG, AUDIO_VOICE_CONFIG_INTERP, 3, 1);

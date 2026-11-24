@@ -29,6 +29,20 @@
  * side, 0 to 65535), for SECONDS (default 20). The AUDIO_VOICE_BENCH
  * firmware prints its per-period render times when the session closes.
  *
+ * ENV=a,d,s,r (LIVE and LOAD) gives every voice an ADSR envelope: the
+ * attack, decay and release in ms and the sustain in percent, sent as an
+ * ENVELOPE record at the lead stamp, ahead of every note. Every note is
+ * keyed off (STOP with the release flag) HOLD frames after its start. LIVE
+ * notes then loop one 32-sample cycle at constant level while held. A LOAD
+ * with CHURN restarts the voices as before and schedules the key-offs
+ * between the restarts of the other groups in frame order; it asks for a
+ * ring of 512 records (8208 bytes, the smallest request that grants that:
+ * 8192 grants 256) because each note then costs three records. Without
+ * CHURN each voice plays one note and is keyed off once. The schedule of the
+ * CHURN restarts and key-offs is zz9k-voice-load.h, which the host test runs
+ * too. A firmware that does not advertise ENVELOPE is run unqualified, with
+ * a warning.
+ *
  * LOWLAT opens a low-latency session: the firmware shortens its audio
  * fill-ahead while it runs and the lead floor drops from 8 periods to 3. The
  * tool falls back to the standard floor, and says so, when zz9k.library is
@@ -69,11 +83,12 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "zz9k-voice-load.h"
 #include "zz9k-voice-pt4.h"
 
 #define TEMPLATE "MODULE,LEAD/K/N,NTSC/S,LINEAR/S,SECONDS/K/N,LOWLAT/S," \
                  "VOICES/K/N,STEREO/S,RATE/K/N,RAMP/K/N,CHURN/S,GROUPS/K/N," \
-                 "LIMITER/S,GAIN/K/N,INTERP/K,PERVOICE/S"
+                 "LIMITER/S,GAIN/K/N,INTERP/K,PERVOICE/S,ENV/K,HOLD/K/N"
 #define OPT_MODULE 0
 #define OPT_LEAD 1
 #define OPT_NTSC 2
@@ -90,13 +105,22 @@
 #define OPT_GAIN 13
 #define OPT_INTERP 14
 #define OPT_PERVOICE 15
-#define OPT_COUNT 16
+#define OPT_ENV 16
+#define OPT_HOLD 17
+#define OPT_COUNT 18
 
 /* CHURN: a restart interval of the ramp length, but not below 32 frames (a
  * shorter one would write a record for every frame). */
 #define CHURN_MIN_INTERVAL 32U
 #define CHURN_DEFAULT_INTERVAL 256U
 #define CHURN_RING_BYTES 8192U
+/* With ENV every note adds a key-off record, so a CHURN run writes three
+ * records per voice and restart instead of two. The request is the smallest
+ * one that grants 512 records: (8208 - 16) / 16 = 512, where 8192 grants
+ * 256 because of the 16-byte header. The grant is printed at open. */
+#define CHURN_ENV_RING_BYTES 8208U
+/* The frames from the start of a note to its key-off without HOLD. */
+#define ENV_DEFAULT_HOLD 24000U
 
 /* The lead floor of a session without the low-latency flag. */
 #define STANDARD_FLOOR_FRAMES 7680U
@@ -221,8 +245,8 @@ static void usage(void)
   puts("zz9k-voiceplay: plays a module, a click or the keyboard through the ZZ9000AX voice engine");
   puts("usage: zz9k-voiceplay MODULE [LEAD=frames] [NTSC] [LINEAR] [SECONDS=n] [LOWLAT]");
   puts("       zz9k-voiceplay CLICK [LEAD=frames] [SECONDS=n] [LOWLAT]");
-  puts("       zz9k-voiceplay LIVE [LEAD=frames] [SECONDS=n] [LOWLAT]");
-  puts("       zz9k-voiceplay LOAD VOICES=n SECONDS=n [LINEAR] [STEREO] [RATE=hz] [GAIN=n] [CHURN] [GROUPS=n] [LOWLAT]");
+  puts("       zz9k-voiceplay LIVE [LEAD=frames] [SECONDS=n] [LOWLAT] [ENV=a,d,s,r] [HOLD=frames]");
+  puts("       zz9k-voiceplay LOAD VOICES=n SECONDS=n [LINEAR] [STEREO] [RATE=hz] [GAIN=n] [CHURN] [GROUPS=n] [ENV=a,d,s,r] [HOLD=frames] [LOWLAT]");
   puts("       every mode also takes RAMP=frames, LIMITER, INTERP=nearest|linear|cubic and PERVOICE");
   puts("  MODULE   ProTracker module to play (DYN envelopes and EFx funk are refused)");
   puts("  CLICK    a short pulse once per second at 48000 Hz, for listening and");
@@ -266,6 +290,22 @@ static void usage(void)
   puts("           firmware that does not advertise CUBIC and VOICE_INTERP");
   puts("  PERVOICE with INTERP: one MODE record per voice instead of the CONFIG");
   puts("           default");
+  puts("  ENV      LIVE and LOAD: an ADSR envelope on every voice, ENV=a,d,s,r with");
+  puts("           the attack, decay and release in ms (0 to 65535 each) and the");
+  puts("           sustain level in percent (0 to 100), sent as an ENVELOPE record");
+  puts("           before the first note. The engine changes the level every 16");
+  puts("           frames, so a time is a multiple of 1/3 ms. Every note ends with a");
+  puts("           key-off (STOP with the release flag) HOLD frames after its start;");
+  puts("           LIVE notes loop one cycle at constant level while they are held,");
+  puts("           and LOAD notes are the looped sine. With CHURN the key-offs are");
+  puts("           scheduled between the restarts of the other groups in frame order,");
+  puts("           and the ring is 512 records instead of 256. A firmware that does");
+  puts("           not advertise ENVELOPE runs it unqualified, with a warning; one");
+  puts("           without the record counts it as rejected and the report says so");
+  puts("  HOLD     with ENV: frames from a note's start to its key-off, 1 and up.");
+  puts("           24000 unless CHURN, where it is 3/4 of the restart interval and");
+  puts("           must stay below it, so that a key-off never meets the next start");
+  puts("           of the same voice");
   puts("  SECONDS  stop after this many seconds of engine time");
   puts("  LOWLAT   low-latency session: shorter audio fill-ahead while it runs and");
   puts("           a lead floor of 3 periods (2880 frames) instead of 8. Without");
@@ -534,6 +574,75 @@ static int interp_set;
 static int interp_pervoice;
 static uint32_t interp_value;
 
+/* ENV: the envelope of every voice, sent before the first note, and HOLD:
+ * the frames from the start of a note to its key-off. */
+static int env_set;
+static uint32_t env_attack_ms;
+static uint32_t env_decay_ms;
+static uint32_t env_sustain_percent;
+static uint32_t env_release_ms;
+static uint32_t env_hold;
+static uint32_t stat_keyoffs;
+static int env_advertised;
+
+/* ENV=a,d,s,r: four integers, the times 0 to 65535 ms and the sustain 0 to
+ * 100 percent. Nothing else is accepted. */
+static int parse_env(const char *text)
+{
+  uint32_t value[4];
+  uint32_t i;
+
+  for (i = 0U; i < 4U; i++) {
+    uint32_t n = 0U;
+    uint32_t digits = 0U;
+
+    while (*text >= '0' && *text <= '9') {
+      n = n * 10U + (uint32_t)(*text - '0');
+      if (n > ZZ9K_VOICE_ENVELOPE_MS_MAX) {
+        return 0;
+      }
+      text++;
+      digits++;
+    }
+    if (digits == 0U) {
+      return 0;
+    }
+    value[i] = n;
+    if (i < 3U) {
+      if (*text != ',') {
+        return 0;
+      }
+      text++;
+    }
+  }
+  if (*text != '\0' || value[2] > 100U) {
+    return 0;
+  }
+  env_attack_ms = value[0];
+  env_decay_ms = value[1];
+  env_sustain_percent = value[2];
+  env_release_ms = value[3];
+  env_set = 1;
+  return 1;
+}
+
+/* The sustain as the Q15 level of the record. */
+static uint32_t env_sustain_level(void)
+{
+  return env_sustain_percent * ZZ9K_VOICE_ENVELOPE_SUSTAIN_UNITY / 100U;
+}
+
+/* One key-off at stamp. */
+static void env_keyoff(uint32_t stamp, uint32_t voice)
+{
+  ZZ9KVoiceRecord *record = pending_next(stamp, voice, ZZ9K_VOICE_OP_STOP);
+
+  if (record) {
+    zz9k_voice_build_stop_release(record, stamp, (uint8_t)voice);
+    stat_keyoffs++;
+  }
+}
+
 static int parse_interp(const char *text)
 {
   if (is_word(text, "NEAREST")) {
@@ -562,8 +671,7 @@ static uint32_t load_volume;
 static uint32_t churn_groups;
 static uint32_t churn_interval;
 static uint32_t churn_step;
-static uint32_t churn_slot;
-static uint32_t stat_restarts;
+/* the restart and key-off counts of CHURN are in load_sched */
 static int load_started;
 
 /* A sine of LOAD_PEAK at phase (0 to LOAD_FRAMES - 1 is one cycle), by
@@ -649,6 +757,13 @@ static void load_start(Source *source)
       record->arg1 = load_bytes;
     }
   }
+  /* One shot: every voice is keyed off HOLD frames after its start. The
+   * stamps are later than the starts above, so the ring stays in order. */
+  if (env_set && churn_groups == 0U) {
+    for (voice = 0U; voice < load_voices; voice++) {
+      env_keyoff(stamp + env_hold, voice);
+    }
+  }
 }
 
 /* CHURN: every churn_step frames one group of voices (voice number modulo
@@ -657,34 +772,38 @@ static void load_start(Source *source)
  * sound to a fade slot, and since each voice restarts every churn_interval
  * frames (the ramp length) the slots stay in use all the time. Restarts are
  * written a batch at a time, as many as the pending array holds, up to a
- * lead ahead of the playing frame. */
+ * lead ahead of the playing frame.
+ *
+ * With ENV every note also gets a key-off env_hold frames after its start.
+ * The schedule, and why the key-offs are written in the order of their frames
+ * between the starts of the other groups, is in zz9k-voice-load.h, which the
+ * host test runs as well. */
+static ZZ9KVoiceLoad load_sched;
+
 static void load_churn(Source *source)
 {
-  uint32_t per_slot = 2U * ((load_voices + churn_groups - 1U) / churn_groups);
+  const uint32_t room = zz9k_voice_load_room(&load_sched);
+  ZZ9KVoiceRecord batch[ZZ9K_VOICE_LOAD_MAX_RECORDS];
 
-  while (source->next_frame < status.playing_frame + lead_frames &&
-         pending_count + per_slot <= MAX_PENDING) {
-    uint32_t stamp = lead_frames + source->next_frame;
-    uint32_t voice;
+  for (;;) {
+    const uint32_t next = zz9k_voice_load_next(&load_sched, NULL);
+    uint32_t n;
+    uint32_t i;
 
-    for (voice = churn_slot % churn_groups; voice < load_voices;
-         voice += churn_groups) {
-      ZZ9KVoiceRecord *record = pending_next(stamp, voice, ZZ9K_VOICE_OP_START);
-
-      if (record) {
-        record->flags = 0U;
-        record->arg0 = 0U;
-        record->arg1 = 0U;
-      }
-      record = pending_next(stamp, voice, ZZ9K_VOICE_OP_LOOP);
-      if (record) {
-        record->arg0 = 0U;
-        record->arg1 = load_bytes;
-      }
-      stat_restarts++;
+    if (next >= status.playing_frame + lead_frames ||
+        pending_count + room > MAX_PENDING) {
+      source->next_frame = next;
+      return;
     }
-    churn_slot++;
-    source->next_frame += churn_step;
+    n = zz9k_voice_load_emit(&load_sched, lead_frames, batch);
+    for (i = 0U; i < n; i++) {
+      ZZ9KVoiceRecord *record =
+          pending_next(batch[i].stamp, batch[i].voice, batch[i].op);
+
+      if (record) {
+        *record = batch[i];
+      }
+    }
   }
 }
 
@@ -695,8 +814,13 @@ static void load_produce(Source *source)
   if (!load_started) {
     load_started = 1;
     load_start(source);
-    source->next_frame = churn_groups != 0U ? churn_step : LOAD_DONE_FRAME;
-    churn_slot = 1U;
+    if (churn_groups != 0U) {
+      zz9k_voice_load_init(&load_sched, load_voices, churn_groups,
+                           churn_step, env_set ? env_hold : 0U, load_bytes);
+      source->next_frame = zz9k_voice_load_next(&load_sched, NULL);
+    } else {
+      source->next_frame = LOAD_DONE_FRAME;
+    }
     return;
   }
   load_churn(source);
@@ -726,8 +850,13 @@ static uint8_t live_sample[LIVE_BYTES];
 static uint32_t live_next_voice;
 static uint32_t stat_keys;
 static int live_mode;
+/* With ENV: the horizon at which the note of a voice is keyed off, and
+ * whether one is waiting. */
+static uint32_t live_off_frame[LIVE_VOICES];
+static int live_off_due[LIVE_VOICES];
 
-/* A decaying triangle wave, 32 samples to the cycle. */
+/* A decaying triangle wave, 32 samples to the cycle. With ENV the cycle does
+ * not decay: the note loops it, and the envelope alone shapes the level. */
 static void make_live_sample(void)
 {
   uint32_t i;
@@ -737,7 +866,9 @@ static void make_live_sample(void)
     long tri = phase < 16L ? phase : 32L - phase;
     long value = (tri - 8L) * 15L;
 
-    value = value * (long)(LIVE_BYTES - i) / (long)LIVE_BYTES;
+    if (!env_set) {
+      value = value * (long)(LIVE_BYTES - i) / (long)LIVE_BYTES;
+    }
     live_sample[i] = (uint8_t)(int8_t)value;
   }
 }
@@ -788,6 +919,32 @@ static void live_start(int note, uint32_t stamp)
     record->arg0 = 0U;
     record->arg1 = 0U;
   }
+  if (env_set) {
+    /* the note loops its first 32-sample cycle until the key-off */
+    record = pending_next(stamp, voice, ZZ9K_VOICE_OP_LOOP);
+    if (record) {
+      record->arg0 = 0U;
+      record->arg1 = 32U;
+    }
+    live_off_frame[voice] = stamp + env_hold;
+    live_off_due[voice] = 1;
+  }
+}
+
+/* The key-offs of the held notes whose time has come, at the horizon of the
+ * status read: LIVE stamps everything at the horizon, so a key-off is
+ * never earlier than the starts before it. */
+static void live_keyoffs(uint32_t horizon)
+{
+  uint32_t voice;
+
+  for (voice = 0U; voice < LIVE_VOICES; voice++) {
+    if (live_off_due[voice] &&
+        (int32_t)(horizon - live_off_frame[voice]) >= 0) {
+      live_off_due[voice] = 0;
+      env_keyoff(horizon, voice);
+    }
+  }
 }
 
 /* Runs until ESC, SECONDS, Ctrl-C, or the engine stops advancing. Every
@@ -830,6 +987,9 @@ static const char *live_play(uint32_t limit_frames)
     }
 
     flush_pending();
+    if (env_set && status.state == ZZ9K_VOICE_STATE_LIVE) {
+      live_keyoffs(status.horizon);
+    }
     while (status.state == ZZ9K_VOICE_STATE_LIVE &&
            WaitForChar(input, 0L) != 0) {
       char key;
@@ -964,9 +1124,27 @@ static void report(const char *reason)
   }
   if (churn_groups != 0U) {
     printf("  churn: %lu restarts, %lu group%s, a restart every %lu frames "
-           "(each voice every %lu)\n", (unsigned long)stat_restarts,
+           "(each voice every %lu)\n", (unsigned long)load_sched.restarts,
            (unsigned long)churn_groups, churn_groups == 1U ? "" : "s",
            (unsigned long)churn_step, (unsigned long)churn_interval);
+  }
+  if (env_set) {
+    printf("  envelope: attack %lu ms, decay %lu ms, sustain %lu%%, release "
+           "%lu ms (%lu, %lu and %lu steps of 16 frames), %lu key-offs, each "
+           "%lu frames after its start; the firmware %s ENVELOPE\n",
+           (unsigned long)env_attack_ms, (unsigned long)env_decay_ms,
+           (unsigned long)env_sustain_percent, (unsigned long)env_release_ms,
+           (unsigned long)zz9k_voice_envelope_steps(env_attack_ms),
+           (unsigned long)zz9k_voice_envelope_steps(env_decay_ms),
+           (unsigned long)zz9k_voice_envelope_steps(env_release_ms),
+           (unsigned long)(stat_keyoffs + load_sched.keyoffs),
+           (unsigned long)env_hold,
+           env_advertised ? "advertises" : "does not advertise");
+    if (status.rejected != 0U) {
+      printf("  WARNING: the firmware refused %lu records: with ENV that "
+             "usually means it has no ENVELOPE record, and the voices played "
+             "without an envelope\n", (unsigned long)status.rejected);
+    }
   }
   printf("  session: %s, lead floor %lu frames\n",
          session.grant.lead_floor_frames < STANDARD_FLOOR_FRAMES
@@ -1100,6 +1278,12 @@ int main(void)
     usage();
     return 10;
   }
+  if ((options[OPT_ENV] || options[OPT_HOLD]) && !load && !live) {
+    puts("zz9k-voiceplay: ENV and HOLD belong to LIVE and LOAD mode");
+    FreeArgs(rdargs);
+    usage();
+    return 10;
+  }
   load_voices = LOAD_DEFAULT_VOICES;
   load_rate = LOAD_DEFAULT_RATE;
   if (options[OPT_VOICES]) {
@@ -1142,6 +1326,20 @@ int main(void)
       FreeArgs(rdargs);
       return 10;
     }
+  }
+  if (options[OPT_ENV]) {
+    if (!parse_env((const char *)options[OPT_ENV])) {
+      puts("zz9k-voiceplay: ENV is four integers: the attack, decay and "
+           "release in ms (0 to 65535) and the sustain in percent (0 to 100), "
+           "for example ENV=20,100,60,300");
+      FreeArgs(rdargs);
+      return 10;
+    }
+  }
+  if (options[OPT_HOLD] && !env_set) {
+    puts("zz9k-voiceplay: HOLD belongs to ENV");
+    FreeArgs(rdargs);
+    return 10;
   }
   if (options[OPT_PERVOICE] && !options[OPT_INTERP]) {
     puts("zz9k-voiceplay: PERVOICE belongs to INTERP");
@@ -1215,6 +1413,31 @@ int main(void)
     churn_step = churn_interval / churn_groups;
     if (churn_step == 0U) {
       churn_step = 1U;
+    }
+  }
+  env_hold = churn_groups != 0U ? churn_step * churn_groups * 3U / 4U
+                                : ENV_DEFAULT_HOLD;
+  if (options[OPT_HOLD]) {
+    LONG value = *(LONG *)options[OPT_HOLD];
+
+    if (value < 1) {
+      puts("zz9k-voiceplay: HOLD is 1 frame or more");
+      FreeArgs(rdargs);
+      return 10;
+    }
+    env_hold = (uint32_t)value;
+  }
+  if (env_set && churn_groups != 0U) {
+    ZZ9KVoiceLoad fit;
+
+    zz9k_voice_load_init(&fit, load_voices, churn_groups, churn_step, env_hold,
+                         0U);
+    if (!zz9k_voice_load_hold_ok(&fit)) {
+      printf("zz9k-voiceplay: HOLD must stay below the restart interval of a "
+             "voice (%lu frames) so that a key-off never meets the next "
+             "start\n", (unsigned long)zz9k_voice_load_period(&fit));
+      FreeArgs(rdargs);
+      return 10;
     }
   }
 
@@ -1335,8 +1558,10 @@ int main(void)
   open_desc.bank_bytes = bank_bytes;
   open_desc.lead_frames = lead_request;
   open_desc.flags = flags;
-  /* CHURN writes a restart every few frames: a deeper ring. */
-  open_desc.ring_bytes = churn_groups != 0U ? CHURN_RING_BYTES : 0U;
+  /* CHURN writes a restart every few frames: a deeper ring, and with ENV
+   * one that also takes the key-off of every note. */
+  open_desc.ring_bytes = churn_groups == 0U ? 0U
+                         : env_set ? CHURN_ENV_RING_BYTES : CHURN_RING_BYTES;
   result = ZZ9KVoiceOpen(&open_desc, &session);
   if (result == ZZ9K_STATUS_BAD_REQUEST &&
       (flags & ZZ9K_VOICE_OPEN_FLAG_LOW_LATENCY) != 0U) {
@@ -1388,14 +1613,23 @@ int main(void)
     ZZ9KVoiceExtStatus ext;
 
     zz9k_voice_ext_status_read(session.status, &ext);
-    printf("  engine features 0x%lx%s%s%s%s%s%s\n", (unsigned long)ext.features,
+    printf("  engine features 0x%lx%s%s%s%s%s%s%s\n", (unsigned long)ext.features,
            (ext.features & ZZ9K_VOICE_FEATURE_CONFIG) ? " CONFIG" : "",
            (ext.features & ZZ9K_VOICE_FEATURE_RAMP) ? " RAMP" : "",
            (ext.features & ZZ9K_VOICE_FEATURE_LIMITER) ? " LIMITER" : "",
            (ext.features & ZZ9K_VOICE_FEATURE_CUBIC) ? " CUBIC" : "",
            (ext.features & ZZ9K_VOICE_FEATURE_VOICE_INTERP) ? " VOICE_INTERP"
                                                             : "",
+           (ext.features & ZZ9K_VOICE_FEATURE_ENVELOPE) ? " ENVELOPE" : "",
            ext.features == 0U ? " (none: an older firmware)" : "");
+    env_advertised = (ext.features & ZZ9K_VOICE_FEATURE_ENVELOPE) != 0U;
+    if (env_set && ext.features == 0U) {
+      puts("zz9k-voiceplay: ENV needs a firmware with the voice features "
+           "word; an older firmware refuses the ENVELOPE record and would "
+           "play without the envelope");
+      code = 20;
+      goto close_session;
+    }
     if ((ramp_set || limiter_set || (interp_set && !interp_pervoice)) &&
         (ext.features & ZZ9K_VOICE_FEATURE_CONFIG) == 0U) {
       puts("zz9k-voiceplay: RAMP, LIMITER and INTERP need a firmware with the "
@@ -1426,6 +1660,13 @@ int main(void)
            "the cubic interpolation is unqualified, running it for its "
            "qualification only. Keep the volume low and the speakers "
            "protected");
+    }
+    if (env_set && !env_advertised) {
+      puts("zz9k-voiceplay: WARNING: the firmware does not advertise "
+           "ENVELOPE: the ENVELOPE records and key-offs are unqualified, "
+           "running them for their qualification only. A firmware without "
+           "the record counts every one as rejected and plays the voices at "
+           "their volume, without an envelope");
     }
   }
 
@@ -1490,6 +1731,22 @@ int main(void)
         record = pending_next(lead_frames, 0U, ZZ9K_VOICE_OP_CONFIG);
         if (record) {
           zz9k_voice_build_config_interp(record, lead_frames, interp_value);
+        }
+      }
+    }
+    if (env_set) {
+      /* The envelope of every voice goes out at the lead stamp too, ahead
+       * of every note: it is the setting of a voice's next START. */
+      uint32_t v;
+
+      for (v = 0U; v < voice_count; v++) {
+        record = pending_next(lead_frames, v, ZZ9K_VOICE_OP_ENVELOPE);
+        if (record) {
+          zz9k_voice_build_envelope(record, lead_frames, (uint8_t)v,
+                                    (uint16_t)env_attack_ms,
+                                    (uint16_t)env_decay_ms,
+                                    (uint16_t)env_sustain_level(),
+                                    (uint16_t)env_release_ms);
         }
       }
     }

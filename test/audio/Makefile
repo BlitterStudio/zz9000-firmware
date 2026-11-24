@@ -31,6 +31,8 @@ VOICE_PT4_TARGET := $(BUILD_DIR)/audio_voice_pt4_test
 VOICE_SESSION_TARGET := $(BUILD_DIR)/audio_voice_session_test
 VOICE_BASELINE_TARGET := $(BUILD_DIR)/audio_voice_baseline_test
 VOICE_RAMP_TARGET := $(BUILD_DIR)/audio_voice_ramp_test
+VOICE_ENVELOPE_TARGET := $(BUILD_DIR)/audio_voice_envelope_test
+VOICE_LOAD_TARGET := $(BUILD_DIR)/audio_voice_load_test
 VOICE_LIMITER_TARGET := $(BUILD_DIR)/audio_voice_limiter_test
 VOICE_CUBIC_TARGET := $(BUILD_DIR)/audio_voice_cubic_test
 VOICE_CUBIC_GUARD_TARGET := $(BUILD_DIR)/audio_voice_cubic_guard_test
@@ -44,6 +46,8 @@ TARGETS := $(CONVERT_TARGET) $(CONVERT_EXACT_TARGET) $(CAPTURE_TARGET) $(PROFILE
 	$(REDUCE_TARGET) $(VOICE_TARGET) $(VOICE_PT4_TARGET) \
 	$(VOICE_BASELINE_TARGET) \
 	$(VOICE_RAMP_TARGET) $(VOICE_LIMITER_TARGET) $(VOICE_CUBIC_TARGET) \
+	$(VOICE_ENVELOPE_TARGET) \
+	$(VOICE_LOAD_TARGET) \
 	$(VOICE_CUBIC_GUARD_TARGET) \
 	$(VOICE_PARITY_TARGET) \
 	$(VOICE_SESSION_TARGET)
@@ -84,6 +88,8 @@ test: $(TARGETS)
 	$(VOICE_PT4_TARGET)
 	$(VOICE_SESSION_TARGET)
 	$(VOICE_RAMP_TARGET)
+	$(VOICE_ENVELOPE_TARGET)
+	$(VOICE_LOAD_TARGET)
 	$(VOICE_PARITY_TARGET)
 	$(VOICE_LIMITER_TARGET)
 	$(VOICE_CUBIC_TARGET)
@@ -336,6 +342,26 @@ $(VOICE_RAMP_TARGET): audio_voice_ramp_test.c \
 	$(CC) $(CPPFLAGS) -Ibaseline $(CFLAGS) -o $@ audio_voice_ramp_test.c \
 		baseline/audio_voice_baseline.c $(SRC_DIR)/audio_voice.c
 
+# Envelopes (ENVELOPE, STOP_RELEASE) against a frame-by-frame model with
+# closed-form levels, directed cases and the frozen baseline. Needs -lm for
+# the model's 2^x table and the real-valued reference curves.
+# ZZ9K_VOICE_ENV_SEQS sets the random sequences (default 6000).
+$(VOICE_ENVELOPE_TARGET): audio_voice_envelope_test.c \
+	baseline/audio_voice_baseline.c baseline/audio_voice_baseline.h \
+	$(SRC_DIR)/audio_voice.c $(SRC_DIR)/audio_voice.h
+	@mkdir -p $(BUILD_DIR)
+	$(CC) $(CPPFLAGS) -Ibaseline $(CFLAGS) -o $@ audio_voice_envelope_test.c \
+		baseline/audio_voice_baseline.c $(SRC_DIR)/audio_voice.c -lm
+
+# The CHURN and ENV record schedule of zz9k-voiceplay LOAD (the tool's own
+# header) against a per-voice enumeration, and driven through the engine.
+$(VOICE_LOAD_TARGET): audio_voice_load_test.c \
+	$(SRC_DIR)/audio_voice.c $(SRC_DIR)/audio_voice.h \
+	../../sdk/tools/zz9k-voice-load.h $(SDK_INC)/zz9k/voice.h
+	@mkdir -p $(BUILD_DIR)
+	$(CC) $(CPPFLAGS) -I$(SDK_INC) -I../../sdk/tools $(CFLAGS) -o $@ \
+		audio_voice_load_test.c $(SRC_DIR)/audio_voice.c
+
 # The optional static soft knee (CONFIG limiter) against an independent
 # model of the mix and the rational curve: dense sweeps, segment edges, the
 # maximum master with 32 voices and 32 fade tails, CONFIG timing and split
@@ -429,6 +455,7 @@ check-tables:
 	git diff --exit-code -- ../../ZZ9000_proto.sdk/ZZ9000OS/src/audio_convert_tables.c \
 		../../ZZ9000_proto.sdk/ZZ9000OS/src/audio_convert_tables.h
 	python3 ../../util/gen_voice_limiter_table.py --check $(SRC_DIR)/audio_voice.c
+	python3 ../../util/gen_voice_envelope_table.py --check $(SRC_DIR)/audio_voice.c
 
 clean:
 	rm -rf $(BUILD_DIR)

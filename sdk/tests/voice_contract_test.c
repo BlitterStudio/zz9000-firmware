@@ -548,6 +548,46 @@ static void test_records(void)
   zz9k_voice_build_config(&r, 23U, ZZ9K_VOICE_CONFIG_INTERP |
                                        ZZ9K_VOICE_CONFIG_RAMP, 3U, 0U);
   CHECK(r.flags == 5U && r.arg0 == 3U);
+  /* ENVELOPE: attack and decay in the high and low half of arg0, sustain and
+   * release in arg1; the key-off is a STOP with the release flag. */
+  memset(&r, 0xA5, sizeof(r));
+  zz9k_voice_build_envelope(&r, 30U, 5U, 10U, 20U, 0x4000U, 300U);
+  CHECK(r.stamp == 30U && r.voice == 5U && r.op == ZZ9K_VOICE_OP_ENVELOPE &&
+        r.flags == ZZ9K_VOICE_ENVELOPE_SET &&
+        r.arg0 == ((10UL << 16) | 20UL) &&
+        r.arg1 == ((0x4000UL << 16) | 300UL));
+  zz9k_voice_record_encode(&w, &r);
+  CHECK(b[0] == 0 && b[1] == 0 && b[2] == 0 && b[3] == 30U);
+  CHECK(b[4] == 5U && b[5] == 8U && b[6] == 0x00 && b[7] == 0x01);
+  CHECK(b[8] == 0 && b[9] == 10U && b[10] == 0 && b[11] == 20U);
+  CHECK(b[12] == 0x40U && b[13] == 0 && b[14] == 0x01U && b[15] == 0x2cU);
+  zz9k_voice_record_decode(&back, &w);
+  CHECK(memcmp(&back, &r, sizeof(r)) == 0);
+  zz9k_voice_build_envelope(&r, 31U, 0U, 0xFFFFU, 0xFFFFU,
+                            ZZ9K_VOICE_ENVELOPE_SUSTAIN_UNITY, 0xFFFFU);
+  CHECK(r.arg0 == 0xFFFFFFFFUL && r.arg1 == 0x8000FFFFUL);
+  zz9k_voice_build_envelope_off(&r, 32U, 7U);
+  CHECK(r.stamp == 32U && r.voice == 7U && r.op == ZZ9K_VOICE_OP_ENVELOPE &&
+        r.flags == 0U && r.arg0 == 0U && r.arg1 == 0U);
+  memset(&r, 0xA5, sizeof(r));
+  zz9k_voice_build_stop_release(&r, 33U, 9U);
+  CHECK(r.stamp == 33U && r.voice == 9U && r.op == ZZ9K_VOICE_OP_STOP &&
+        r.flags == ZZ9K_VOICE_STOP_RELEASE && r.arg0 == 0U && r.arg1 == 0U);
+  zz9k_voice_record_encode(&w, &r);
+  CHECK(b[4] == 9U && b[5] == 4U && b[6] == 0x00 && b[7] == 0x01);
+  zz9k_voice_build_stop(&r, 34U, 9U);
+  CHECK(r.flags == 0U);
+  CHECK(ZZ9K_VOICE_STOP_RELEASE == 1U && ZZ9K_VOICE_ENVELOPE_SET == 1U &&
+        ZZ9K_VOICE_ENVELOPE_STEP_FRAMES == 16U &&
+        ZZ9K_VOICE_ENVELOPE_STEPS_PER_MS == 3U &&
+        ZZ9K_VOICE_ENVELOPE_MS_MAX == 65535U &&
+        ZZ9K_VOICE_ENVELOPE_SUSTAIN_UNITY == 0x8000U);
+  /* a millisecond is 48 output frames, three steps of 16 */
+  CHECK(zz9k_voice_envelope_steps(0U) == 0U &&
+        zz9k_voice_envelope_steps(1U) == 3U &&
+        zz9k_voice_envelope_steps(65535U) == 196605U);
+  CHECK(ZZ9K_VOICE_ENVELOPE_STEP_FRAMES * ZZ9K_VOICE_ENVELOPE_STEPS_PER_MS *
+            1000U == ZZ9K_VOICE_OUTPUT_RATE);
 }
 
 /* ---- Status reader ---- */

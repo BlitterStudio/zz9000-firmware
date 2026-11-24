@@ -124,6 +124,16 @@ rejected record, underrun or drop. That is a timing result; the cubic output
 has not been listened to. The contract is in
 [zz9k-voice.md](../sdk/docs/zz9k-voice.md#interpolation).
 
+A voice can have an ADSR envelope, set by an `ENVELOPE` record for its next
+START and keyed off with a STOP that carries the release flag. The engine
+multiplies the volume of each frame by the envelope's level, which changes
+every 16 frames, and ends the render runs of a voice at those changes; a
+voice in its sustain, or without an envelope, mixes in the same long runs as
+before. The output without an `ENVELOPE` record is the same as before, and the
+features word stays 0x8F: the `ENVELOPE` bit is clear until the card timing
+gate (32 voices, a full fade pool, every stage) has been measured. The
+contract is in [zz9k-voice.md](../sdk/docs/zz9k-voice.md#envelopes).
+
 Closing a session detaches the slot, and a reset clears it. Both drop the
 periods already queued in the TX ring and request a rebuild from the
 remaining producers, so at most the period the DMA is playing still carries

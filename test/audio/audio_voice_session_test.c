@@ -2735,12 +2735,99 @@ static void scenario_interp_records(int use_config)
 	      "interp: close", "");
 }
 
+/*
+ * ENVELOPE and the key-off through the ring. A looping ramp at full volume
+ * starts with a sustain of one half (no attack or decay), is keyed off 200
+ * frames later and ends after a 2 ms release: the period holding it carries
+ * the half-level sound up to the key-off, the first 16-frame block of the
+ * release at the same level, the next block at 0.5 * 2^(-16/6), and silence
+ * after 6 blocks. Three bad records are counted (a sustain above 1, a voice
+ * the grant does not have, an unknown flag). The features word stays 0x8F:
+ * the envelope is not advertised.
+ */
+static void scenario_envelope_records(void)
+{
+	const uint32_t start = 4900U;
+	const uint32_t index = start % AUDIO_VOICE_PERIOD_FRAMES;
+	uint32_t i;
+	int found = 0, wrong = 0;
+
+	fresh();
+	check(open_session(7680U, 4U) == SDK_STATUS_OK, "envelope: open", "");
+	check(upload_ramp(g_grant.session) == SDK_STATUS_OK, "envelope: upload",
+	      "");
+	rec(start, 0U, AUDIO_VOICE_OP_ENVELOPE, AUDIO_VOICE_ENV_SET, 0U,
+	    (0x4000U << 16) | 2U);
+	rec_start_ramp(start, 0U);
+	rec(start + 200U, 0U, AUDIO_VOICE_OP_STOP, AUDIO_VOICE_STOP_RELEASE, 0U,
+	    0U);
+	rec(start + 2000U, 0U, AUDIO_VOICE_OP_ENVELOPE, AUDIO_VOICE_ENV_SET, 0U,
+	    0x8001U << 16);
+	rec(start + 2000U, 7U, AUDIO_VOICE_OP_ENVELOPE, AUDIO_VOICE_ENV_SET, 0U,
+	    0U);
+	rec(start + 2000U, 0U, AUDIO_VOICE_OP_ENVELOPE, 2U, 0U, 0U);
+	publish();
+	for (i = 0U; i < 14U; i++) {
+		uint32_t p;
+
+		period(1);
+		for (p = 0U; p < AUDIO_NUM_PERIODS; p++) {
+			const int16_t *t = tx_period(p);
+			uint32_t k;
+			int ok = 1;
+
+			if (!(t[0] == 0 && t[1] == 0 && t[2U * (index + 10U)] != 0))
+				continue;
+			for (k = 0U; k < 400U; k++) {
+				const int32_t s = ramp(k % LOOP_SAMPLES);
+				const int16_t *o = t + 2U * (index + k);
+				int want;
+
+				if (k < 216U)
+					want = (int)((s * 32767) >> 16);
+				else if (k < 232U)
+					want = (int)((s * 5160) >> 16);
+				else
+					want = -1;
+				if (k >= 288U)
+					want = 0;
+				if (want >= 0 && (o[0] < want - 3 || o[0] > want + 3 ||
+				    o[1] != o[0]))
+					ok = 0;
+				if (k < 216U && (o[0] != want || o[1] != want))
+					ok = 0;
+			}
+			if (t[2U * (index + 296U)] != 0 || t[2U * (index + 500U)] != 0)
+				ok = 0;
+			if (ok)
+				found = 1;
+			else
+				wrong = 1;
+		}
+	}
+	check(found && !wrong,
+	      "envelope: half-level sound, release from that level, silence "
+	      "after the release", fmt("found %d, wrong %d", found, wrong));
+	check(st_rejected() == 3U && st_late() == 0U && st_dropped() == 0U,
+	      "envelope: the three bad records are counted, nothing else",
+	      fmt("rejected=%u late=%u dropped=%u", st_rejected(), st_late(),
+	      st_dropped()));
+	check(st32(AUDIO_VOICE_STATUS_OFF_FEATURES) == 0x8FU &&
+	      st32(AUDIO_VOICE_STATUS_OFF_FEATURES) == AUDIO_VOICE_FEATURES &&
+	      (AUDIO_VOICE_FEATURES & AUDIO_VOICE_FEATURE_ENVELOPE) == 0U,
+	      "envelope: the features word does not advertise ENVELOPE, 0x8F",
+	      fmt("features=%x", st32(AUDIO_VOICE_STATUS_OFF_FEATURES)));
+	check(audio_voice_session_close(g_grant.session) == SDK_STATUS_OK,
+	      "envelope: close", "");
+}
+
 int main(void)
 {
 	scenario_config();
 	scenario_limiter_order();
 	scenario_interp_records(0);
 	scenario_interp_records(1);
+	scenario_envelope_records();
 	scenario_open();
 	scenario_open_refused();
 	scenario_ring_geometry();

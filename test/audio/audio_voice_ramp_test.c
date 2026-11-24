@@ -699,7 +699,7 @@ static int run_sequence(uint32_t seq, uint64_t seed)
 				c->flags = rnd(12) ? 1 : (uint16_t)(rnd(4) << 3);
 				c->arg0 = rnd(20) ? pick_ramp() : 513 + rnd(1000);
 			} else {
-				c->op = (uint8_t)(rnd(2) ? AUDIO_VOICE_OP_ENVELOPE : 10 + rnd(200));
+				c->op = (uint8_t)(10 + rnd(200));
 				c->flags = (uint16_t)rnd(65536);
 			}
 		}
@@ -1036,7 +1036,7 @@ static void test_config(void)
 	c[4] = mk(0, 9, AUDIO_VOICE_OP_CONFIG, 5, 100, 0);
 	c[5] = mk(0, 200, AUDIO_VOICE_OP_CONFIG, 1, 7, 0);
 	c[6] = mk(0, 0, AUDIO_VOICE_OP_MODE, 1, 7, 0);
-	c[7] = mk(0, 0, AUDIO_VOICE_OP_ENVELOPE, 1, 7, 0);
+	c[7] = mk(0, 0, 10, 1, 7, 0);
 	audio_voice_render(&e, out, 8, c, 8);
 	CHECK(e.ramp_frames == 7, "config: the voice field is ignored, last good "
 	      "ramp wins (%u)", e.ramp_frames);
