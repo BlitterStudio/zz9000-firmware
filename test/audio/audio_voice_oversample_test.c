@@ -39,6 +39,12 @@
 #include "audio_voice.h"
 #include "zz9k/voice.h"
 
+/* The selectors of a random scenario: nearest and linear, and cubic only in
+ * the build where the engine accepts it under 2x (the compat build, see the
+ * Makefile); the product rejects cubic with 2x, which
+ * audio_voice_oversample_cubic_test.c covers. */
+#define RANDOM_INTERPS (AUDIO_VOICE_OVERSAMPLE_CUBIC ? 3U : 2U)
+
 static int failures;
 
 #define CHECK(cond, ...) do { \
@@ -492,7 +498,7 @@ static void gen_scenario(struct scenario *sc)
 		    0);
 	}
 	if (rnd(2U) != 0U) {
-		const uint32_t interp = 1U + rnd(3U);
+		const uint32_t interp = 1U + rnd(RANDOM_INTERPS);
 
 		add(sc, 0, 0, AUDIO_VOICE_OP_CONFIG, AUDIO_VOICE_CONFIG_INTERP,
 		    interp, 0, 0);
@@ -567,7 +573,7 @@ static void gen_scenario(struct scenario *sc)
 			const uint32_t badflags = rnd(20U);
 			const uint32_t flagv = rnd(4U);
 			const uint32_t badsel = rnd(20U);
-			const uint32_t sel = rnd(4U);
+			const uint32_t sel = rnd(RANDOM_INTERPS + 1U);
 
 			add(sc, stamp, v, AUDIO_VOICE_OP_MODE,
 			    badflags == 0U ? flagv : AUDIO_VOICE_MODE_INTERP,
@@ -583,7 +589,7 @@ static void gen_scenario(struct scenario *sc)
 			add(sc, stamp, 0, AUDIO_VOICE_OP_CONFIG,
 			    AUDIO_VOICE_CONFIG_LIMITER, 0, on, 0);
 		} else if (pick < 94U) {
-			const uint32_t interp = 1U + rnd(3U);
+			const uint32_t interp = 1U + rnd(RANDOM_INTERPS);
 
 			add(sc, stamp, 0, AUDIO_VOICE_OP_CONFIG,
 			    AUDIO_VOICE_CONFIG_INTERP, interp, 0, 0);

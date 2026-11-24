@@ -35,6 +35,10 @@ VOICE_LIMITER_TARGET := $(BUILD_DIR)/audio_voice_limiter_test
 VOICE_CUBIC_TARGET := $(BUILD_DIR)/audio_voice_cubic_test
 VOICE_CUBIC_GUARD_TARGET := $(BUILD_DIR)/audio_voice_cubic_guard_test
 VOICE_OVERSAMPLE_TARGET := $(BUILD_DIR)/audio_voice_oversample_test
+VOICE_LINEAR_GUARD_TARGET := $(BUILD_DIR)/audio_voice_linear_guard_test
+VOICE_OS_CUBIC_TARGET := $(BUILD_DIR)/audio_voice_oversample_cubic_test
+VOICE_OS_CUBIC_COMPAT_TARGET := $(BUILD_DIR)/audio_voice_oversample_cubic_compat_test
+VOICE_OS_COMPAT_TARGET := $(BUILD_DIR)/audio_voice_oversample_compat_test
 VOICE_PARITY_TARGET := $(BUILD_DIR)/audio_voice_abi_parity_test
 TARGETS := $(CONVERT_TARGET) $(CONVERT_EXACT_TARGET) $(CAPTURE_TARGET) $(PROFILE_TARGET) \
 	$(PLAYBACK_TARGET) $(RATE_TARGET) $(PRECONVERT_TARGET) \
@@ -46,6 +50,8 @@ TARGETS := $(CONVERT_TARGET) $(CONVERT_EXACT_TARGET) $(CAPTURE_TARGET) $(PROFILE
 	$(VOICE_BASELINE_TARGET) \
 	$(VOICE_RAMP_TARGET) $(VOICE_LIMITER_TARGET) $(VOICE_CUBIC_TARGET) \
 	$(VOICE_CUBIC_GUARD_TARGET) $(VOICE_OVERSAMPLE_TARGET) \
+	$(VOICE_LINEAR_GUARD_TARGET) $(VOICE_OS_CUBIC_TARGET) \
+	$(VOICE_OS_CUBIC_COMPAT_TARGET) $(VOICE_OS_COMPAT_TARGET) \
 	$(VOICE_PARITY_TARGET) \
 	$(VOICE_SESSION_TARGET)
 
@@ -90,6 +96,10 @@ test: $(TARGETS)
 	$(VOICE_CUBIC_TARGET)
 	$(VOICE_CUBIC_GUARD_TARGET)
 	$(VOICE_OVERSAMPLE_TARGET)
+	$(VOICE_LINEAR_GUARD_TARGET)
+	$(VOICE_OS_CUBIC_TARGET)
+	$(VOICE_OS_CUBIC_COMPAT_TARGET)
+	$(VOICE_OS_COMPAT_TARGET)
 
 # U2 fabric compositor: the characterization golden (pump_golden.c, a
 # verbatim capture of the pre-fabric pump) drives the parity scenarios
@@ -378,6 +388,43 @@ $(VOICE_OVERSAMPLE_TARGET): audio_voice_oversample_test.c \
 	@mkdir -p $(BUILD_DIR)
 	$(CC) $(CPPFLAGS) -I$(SDK_INC) $(CFLAGS) -o $@ audio_voice_oversample_test.c \
 		$(SRC_DIR)/audio_voice.c -lm
+
+# The same test built with AUDIO_VOICE_OVERSAMPLE_CUBIC=1, the engine that
+# accepts the cubic interpolation under 2x (qualification only): its random
+# scenarios then draw the cubic selectors too, against the 96 kHz time base.
+$(VOICE_OS_COMPAT_TARGET): audio_voice_oversample_test.c \
+	$(SRC_DIR)/audio_voice.c $(SRC_DIR)/audio_voice.h \
+	$(SRC_DIR)/audio_reduce_table.h $(SDK_INC)/zz9k/voice.h
+	@mkdir -p $(BUILD_DIR)
+	$(CC) $(CPPFLAGS) -I$(SDK_INC) $(CFLAGS) -DAUDIO_VOICE_OVERSAMPLE_CUBIC=1 \
+		-o $@ audio_voice_oversample_test.c $(SRC_DIR)/audio_voice.c -lm
+
+# The linear reader reads only the two frames of each blend (the bank is a
+# page between two protected pages, flush with the sample or exactly the
+# sample) and mixes what an independent model of the documented rules says,
+# also under 2x oversampling (Linux only). Its vector path runs on ARM only.
+$(VOICE_LINEAR_GUARD_TARGET): audio_voice_linear_guard_test.c \
+	$(SRC_DIR)/audio_voice.c $(SRC_DIR)/audio_voice.h \
+	$(SRC_DIR)/audio_reduce_table.h
+	@mkdir -p $(BUILD_DIR)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ audio_voice_linear_guard_test.c \
+		$(SRC_DIR)/audio_voice.c
+
+# 2x oversampling and the cubic interpolation: the records that combine them
+# are rejected atomically (the product, AUDIO_VOICE_OVERSAMPLE_CUBIC 0), and
+# with the macro at 1 (this second build, for qualification only) they are
+# accepted and the cubic voice mixes under 2x.
+$(VOICE_OS_CUBIC_TARGET): audio_voice_oversample_cubic_test.c \
+	$(SRC_DIR)/audio_voice.c $(SRC_DIR)/audio_voice.h
+	@mkdir -p $(BUILD_DIR)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ audio_voice_oversample_cubic_test.c \
+		$(SRC_DIR)/audio_voice.c
+
+$(VOICE_OS_CUBIC_COMPAT_TARGET): audio_voice_oversample_cubic_test.c \
+	$(SRC_DIR)/audio_voice.c $(SRC_DIR)/audio_voice.h
+	@mkdir -p $(BUILD_DIR)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -DAUDIO_VOICE_OVERSAMPLE_CUBIC=1 -o $@ \
+		audio_voice_oversample_cubic_test.c $(SRC_DIR)/audio_voice.c
 
 # The voice constants of the SDK header and of the firmware headers agree.
 $(VOICE_PARITY_TARGET): audio_voice_abi_parity_test.c \
