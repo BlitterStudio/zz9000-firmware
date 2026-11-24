@@ -1091,27 +1091,29 @@ their envelopes.
 For example:
 
 ```text
-zz9k-voiceplay LOAD VOICES=32 CHURN RAMP=250 HOLD=128 ENV=0,3,50,30 STEREO LINEAR SECONDS=20
-zz9k-voiceplay LOAD VOICES=32 CHURN RAMP=250 HOLD=128 LIMITER INTERP=cubic ENV=0,3,50,30 SECONDS=20
+zz9k-voiceplay LOAD VOICES=32 CHURN GROUPS=1 RAMP=256 HOLD=128 ENV=2,3,50,30 STEREO LINEAR SECONDS=20
+zz9k-voiceplay LOAD VOICES=32 CHURN GROUPS=1 RAMP=256 HOLD=128 LIMITER INTERP=cubic ENV=2,3,50,30 SECONDS=20
 zz9k-voiceplay LIVE ENV=10,40,25,200
 ```
 
-The first two are the shape for the render budget: 32 voices restarting in 32
-groups every 224 frames (the interval is the ramp, 250, divided into 32 steps
-of 7), a key-off 128 frames after each start, during the decay of 144 frames,
-and a release of 30 ms (1440 frames). Every restart hands a tail with a
-nonzero level and a release still running to a fade slot, the tails last 250
-frames, so the pool of 32 is full and the oldest tail is cut. The choices
-matter for that load. A release as short as 3 ms ends before the next restart
-or leaves tails whose level has rounded to 0. An attack above 0 leaves the
-voices that restarted in the last 16 frames at level 0, so fewer than 32
-primaries sound at any frame. A ramp of 256 puts one restart on the frame
-where the tool's period boundary falls, so one voice has no tail and no running
-ramp there. A run of the engine on the host with these settings, sampled at
-every 960-frame period, has 32 primaries with a nonzero volume under a
-changing level and a base ramp, and 32 releasing fade slots with a nonzero
-volume, in every period. An envelope with a sustain of 100 percent and no
-attack or decay holds full level and works as no envelope at all.
+The first two are the shape for the render budget. `GROUPS=1` restarts all 32
+voices on one frame every 256 frames (the ramp), so every restart hands 32
+tails to the fade slots and the pool holds 32 old tails while the 32 new
+voices ramp up. A key-off 128 frames after each start falls in the decay of
+144 frames and starts a release of 30 ms (1440 frames), so the tails carry a
+nonzero level and a release still running. With the default 32 groups the
+restarts are spread over the interval, and a host run with the sampling below
+never found all 32 voices and all 32 tails nonzero in one sample. A release as
+short as 3 ms ends before the
+next restart or leaves tails whose level has rounded to 0. A run of the engine
+on the host with these settings, sampled where each 960-frame render ends
+(frame positions 0, 192, 128 and 64 of the 256-frame restart cycle), has 32
+primaries with a nonzero volume under a changing level and a base ramp and 32
+nonzero fade slots at the ends that fall at 64, 128 and 192, and not at 0,
+where the restart is about to apply. The sample says what the state was at
+those frames; it does not measure the mixing of the frames between. An
+envelope with a sustain of 100 percent and no attack or decay holds full level
+and works as no envelope at all.
 
 With `RAMP` or `LIMITER` the tool sends one `CONFIG` record at the granted
 lead, the same stamp as the first notes, and writes it first in the pending
