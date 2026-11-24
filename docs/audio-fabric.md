@@ -132,8 +132,10 @@ to the fabric's 48 kHz before the one limiter or clamp. The sound is late by
 exactly 14 frames, which the status block publishes as `output_delay_frames`;
 stamps, the horizon and every client frame number stay at 48 kHz. A change of
 the setting needs a silent engine (no voice and no fade tail sounding), and
-a reset clears the filter's history. The `OVERSAMPLE` feature bit stays clear
-until the card timing gate for it has passed. The contract is in
+a reset clears the filter's history. The cubic interpolation is not offered
+with it: the records that would combine the two are rejected whole. The
+`OVERSAMPLE` feature bit stays clear until the card timing gate for it has
+passed. The contract is in
 [zz9k-voice.md](../sdk/docs/zz9k-voice.md#oversampling).
 
 Closing a session detaches the slot, and a reset clears it. Both drop the

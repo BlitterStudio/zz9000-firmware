@@ -265,6 +265,9 @@ static void usage(void)
   puts("           advertise OVERSAMPLE runs it unqualified, for its");
   puts("           qualification only. The firmware refuses it while a voice");
   puts("           sounds, so it goes out ahead of the first note");
+  puts("           The cubic interpolation is not offered with it: INTERP=cubic");
+  puts("           with OVERSAMPLE is refused here when the firmware advertises");
+  puts("           OVERSAMPLE, and the firmware rejects the records");
   puts("  LEAD     lead in 48 kHz frames; 0 or absent is the firmware floor");
   puts("  NTSC     Paula clock of the module is NTSC (else PAL)");
   puts("  LINEAR   linear interpolation (else nearest)");
@@ -1424,6 +1427,14 @@ int main(void)
       code = 20;
       goto close_session;
     }
+    if (oversample_set && interp_set && interp_value == ZZ9K_VOICE_INTERP_CUBIC &&
+        (ext.features & ZZ9K_VOICE_FEATURE_OVERSAMPLE) != 0U) {
+      puts("zz9k-voiceplay: OVERSAMPLE and INTERP=cubic cannot be combined: "
+           "the firmware does not offer the cubic interpolation with 2x "
+           "oversampling");
+      code = 20;
+      goto close_session;
+    }
     if (ramp_set && ramp_frames != 0U &&
         (ext.features & ZZ9K_VOICE_FEATURE_RAMP) == 0U) {
       puts("  the firmware does not advertise RAMP yet: running the ramp "
@@ -1543,6 +1554,12 @@ int main(void)
     reason = play(&source, seconds * ZZ9K_VOICE_OUTPUT_RATE);
   }
   report(reason);
+  if (load_mode && status.rejected != 0U) {
+    printf("zz9k-voiceplay: the firmware rejected %lu records of a LOAD run: "
+           "a load run has nothing to reject, the measurement is void\n",
+           (unsigned long)status.rejected);
+    code = 20;
+  }
   if (strcmp(reason, "song end") != 0) {
     ZZ9KVoiceReset(&session);
   }

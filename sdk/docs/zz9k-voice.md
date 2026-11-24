@@ -562,8 +562,9 @@ builds the record.
 
 What the engine does with it:
 
-- Each voice reads its sample at 96 kHz, nearest, linear or cubic as without
-  oversampling, moving by `(hz << 16) / 96000` per 96 kHz frame (the 48 kHz
+- Each voice reads its sample at 96 kHz, nearest or linear as without
+  oversampling (the cubic interpolation is not offered with it, see below),
+  moving by `(hz << 16) / 96000` per 96 kHz frame (the 48 kHz
   step halved, rounded down; `zz9k_voice_rate_step_oversampled()`). A rate
   below 1.5 Hz gives a step of 0, so the voice does not move. A record applies
   at the first 96 kHz frame of its output frame.
@@ -608,6 +609,18 @@ sound (up to 29 output frames of its tail), so a client turns it off after
 the voices have faded. `ZZ9KVoiceReset()` clears the history too and keeps the
 setting. A session that never sends the record renders exactly as before,
 byte for byte.
+
+The cubic interpolation is not offered with 2x oversampling: its reader costs
+more than the render period leaves at 96 kHz. These records are rejected
+whole, counted, with nothing else changed (the engine is checked before it
+syncs or cuts anything): the `OVERSAMPLE` record while the session default is
+cubic or any voice has a cubic `MODE` selector of its own, even an idle one
+(a selector stays across `STOP`), and a `CONFIG` default or a `MODE` record
+naming cubic while oversampling is on. A record for the value in force is
+still accepted and does nothing, and a client may set a cubic selector while
+oversampling is off and take it back before it switches oversampling on. A
+firmware build for engine qualification can lift the rule with
+`AUDIO_VOICE_OVERSAMPLE_CUBIC=1`; the product has it at 0.
 
 Oversampling doubles the mixing work of every voice and fade slot; the
 filter costs little in comparison. The `OVERSAMPLE` feature bit stays clear:
@@ -929,7 +942,7 @@ zz9k-voiceplay <any of the above> [RAMP=frames] [LIMITER] [INTERP=nearest|linear
 | `LIMITER` | Any mode: switch the static soft knee on with a `CONFIG` record (flag 2, arg1 1) before any other record. Needs firmware with the `CONFIG` feature, otherwise the tool exits with code 20. When `LIMITER` is not advertised it prints a warning that the knee is unqualified and runs it anyway, which is how the firmware is qualified. There is no option to send arg1 0 |
 | `INTERP` | Any mode: `nearest`, `linear` or `cubic`, the interpolation of the session, in place of `LINEAR`. Sent as a `CONFIG` default (flag 4) before any note, or with `PERVOICE` as a `MODE` record for each voice. When the firmware does not advertise `VOICE_INTERP` (or `CUBIC` with `cubic`) the tool prints a warning that the setting is unqualified and runs it anyway, which is how the firmware is qualified |
 | `PERVOICE` | With `INTERP`: send a `MODE` record for each voice in place of the `CONFIG` default |
-| `OVERSAMPLE` | Any mode: switch 2x oversampling on with a `CONFIG` record (flag 8, arg0 2) at the lead stamp, before every other record. Needs firmware with the `CONFIG` feature, otherwise the tool exits with code 20. When `OVERSAMPLE` is not advertised it prints a warning that it is unqualified and runs it anyway, which is how the firmware is qualified. The report prints the output delay the firmware published |
+| `OVERSAMPLE` | Any mode: switch 2x oversampling on with a `CONFIG` record (flag 8, arg0 2) at the lead stamp, before every other record. Needs firmware with the `CONFIG` feature, otherwise the tool exits with code 20. When `OVERSAMPLE` is not advertised it prints a warning that it is unqualified and runs it anyway, which is how the firmware is qualified. With `INTERP=cubic` it exits with code 20 when `OVERSAMPLE` is advertised, because the firmware does not offer the two together (see [Oversampling](#oversampling)). The report prints the output delay the firmware published |
 | `GAIN` | LOAD mode only: the volume of every voice on each side, 0 to 65535, in place of 65535 divided by the voice count |
 | `CHURN` | LOAD mode only: restart the voices continuously, see below |
 | `GROUPS` | With `CHURN`: restart groups, 1 to 32 (default 32) |
@@ -1050,7 +1063,9 @@ tool resets the session unless the song ended, closes it and prints a report:
 Exit codes: 0 after a normal run, 5 when no module was named, 10 for a bad
 argument or a module the tool cannot play, and 20 for a failure to open the
 library, the timer or the session, or for an upload, status, closed-session or
-stall failure.
+stall failure, for `OVERSAMPLE` with `INTERP=cubic` on firmware that advertises
+`OVERSAMPLE`, and for a `LOAD` run in which the firmware rejected any record
+(a load run has nothing to reject: the measurement is void).
 
 ## For tracker authors
 

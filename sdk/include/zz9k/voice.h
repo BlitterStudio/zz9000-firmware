@@ -232,7 +232,10 @@ typedef struct ZZ9KVoiceRingHeader {
  * while no voice and no fade tail is sounding, otherwise it is rejected
  * and nothing changes; a record that sets the value already in force is
  * accepted and changes nothing. Enabling it clears the decimator's history;
- * disabling it drops what the filter still holds. */
+ * disabling it drops what the filter still holds. The cubic interpolation is
+ * not offered with it: the product rejects the record while the session
+ * default or any voice, an idle one too, selects cubic, and rejects a cubic
+ * default or MODE record while it is on. */
 #define ZZ9K_VOICE_OP_START     1U
 #define ZZ9K_VOICE_OP_LOOP      2U
 #define ZZ9K_VOICE_OP_SET       3U
