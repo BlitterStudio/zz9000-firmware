@@ -981,13 +981,103 @@ AV_INLINE int32x4_t blend4(const int wide, int32x4_t a, int32x4_t b,
 }
 
 /*
+ * The linear read of four frames. The frame at the position and its blend
+ * partner (the neighbour in the direction of play) are adjacent in memory,
+ * so each frame is one exact-size load of the pair at q, the lower address
+ * of the two: [a b] forward and [b a] backward, in whole frames. q0..q3
+ * point at those lower frames. The loads read the two frames and nothing
+ * else; the caller guarantees both lie inside the sample. The big-endian
+ * bytes are swapped as a vector and the four pairs are transposed into the
+ * sides of the lower and the higher frame, which are a and b or b and a. The
+ * result equals two gather4() calls, one at the position and one at the
+ * partner.
+ */
+AV_INLINE int16x4_t widen8(const int8x8_t x)
+{
+	return vget_low_s16(vmovl_s8(x));
+}
+
+AV_INLINE void gather4_pair(const int wide, const int stereo, const int back,
+                            const uint8_t *q0, const uint8_t *q1,
+                            const uint8_t *q2, const uint8_t *q3,
+                            int32x4_t *al, int32x4_t *ar, int32x4_t *bl,
+                            int32x4_t *br)
+{
+	int16x4_t lol, lor, hil, hir; /* lower and higher frame, left and right */
+
+	if (wide && stereo) {
+		/* one d register a frame: the transposes then run in place */
+		const int16x4_t f0 = vreinterpret_s16_u8(vrev16_u8(vld1_u8(q0)));
+		const int16x4_t f1 = vreinterpret_s16_u8(vrev16_u8(vld1_u8(q1)));
+		const int16x4_t f2 = vreinterpret_s16_u8(vrev16_u8(vld1_u8(q2)));
+		const int16x4_t f3 = vreinterpret_s16_u8(vrev16_u8(vld1_u8(q3)));
+		const int16x4x2_t t0 = vtrn_s16(f0, f1);
+		const int16x4x2_t t1 = vtrn_s16(f2, f3);
+		const int32x2x2_t e = vtrn_s32(vreinterpret_s32_s16(t0.val[0]),
+		                               vreinterpret_s32_s16(t1.val[0]));
+		const int32x2x2_t o = vtrn_s32(vreinterpret_s32_s16(t0.val[1]),
+		                               vreinterpret_s32_s16(t1.val[1]));
+
+		lol = vreinterpret_s16_s32(e.val[0]);
+		hil = vreinterpret_s16_s32(e.val[1]);
+		lor = vreinterpret_s16_s32(o.val[0]);
+		hir = vreinterpret_s16_s32(o.val[1]);
+	} else if (wide) {
+		const uint32x4_t g = vcombine_u32(
+			vld1_lane_u32((const uint32_t *)(const void *)q1,
+			              vld1_dup_u32((const uint32_t *)(const void *)q0), 1),
+			vld1_lane_u32((const uint32_t *)(const void *)q3,
+			              vld1_dup_u32((const uint32_t *)(const void *)q2), 1));
+		const int16x8_t s = vreinterpretq_s16_u8(
+			vrev16q_u8(vreinterpretq_u8_u32(g)));
+		const int16x4x2_t u = vuzp_s16(vget_low_s16(s), vget_high_s16(s));
+
+		lol = lor = u.val[0];
+		hil = hir = u.val[1];
+	} else if (stereo) {
+		/* The pair [lowL lowR highL highR] of each frame is four bytes: a
+		 * structure load puts them in lane j of four d registers, so the
+		 * four frames come out already as columns. */
+		int8x8x4_t g = vld4_dup_s8((const int8_t *)(const void *)q0);
+
+		g = vld4_lane_s8((const int8_t *)(const void *)q1, g, 1);
+		g = vld4_lane_s8((const int8_t *)(const void *)q2, g, 2);
+		g = vld4_lane_s8((const int8_t *)(const void *)q3, g, 3);
+		lol = widen8(g.val[0]);
+		lor = widen8(g.val[1]);
+		hil = widen8(g.val[2]);
+		hir = widen8(g.val[3]);
+	} else {
+		/* The pair [low high] of each frame is two bytes, split the same
+		 * way into two d registers. */
+		int8x8x2_t g = vld2_dup_s8((const int8_t *)(const void *)q0);
+
+		g = vld2_lane_s8((const int8_t *)(const void *)q1, g, 1);
+		g = vld2_lane_s8((const int8_t *)(const void *)q2, g, 2);
+		g = vld2_lane_s8((const int8_t *)(const void *)q3, g, 3);
+		lol = lor = widen8(g.val[0]);
+		hil = hir = widen8(g.val[1]);
+	}
+	*al = vmovl_s16(back ? hil : lol);
+	*bl = vmovl_s16(back ? lol : hil);
+	if (stereo) {
+		*ar = vmovl_s16(back ? hir : lor);
+		*br = vmovl_s16(back ? lor : hir);
+	} else {
+		*ar = *al;
+		*br = *bl;
+	}
+}
+
+/*
  * Returns the frames done, a multiple of 4. With fuse the samples are not
  * stored: each four frames are multiplied by their gain, (gain + i * inc) >>
  * 8 per side as in apply_ramp(), and added to the sums at acc (left) and
  * acc + AUDIO_VOICE_MIX_FRAMES (right).
  */
 AV_INLINE uint32_t read_kernel_neon(const int wide, const int stereo,
-                                    const int linear, const int fuse,
+                                    const int linear, const int back,
+                                    const int fuse,
                                     const uint8_t *restrict p, int32_t x,
                                     const int32_t dx, const int32_t nbytes,
                                     uint32_t n, int32_t *restrict out0,
@@ -1004,29 +1094,37 @@ AV_INLINE uint32_t read_kernel_neon(const int wide, const int stereo,
 	int32x4_t gvr = vmlaq_n_s32(vdupq_n_s32(gr), lane, ir);
 	const int32x4_t dl = vdupq_n_s32(4 * il);
 	const int32x4_t dr = vdupq_n_s32(4 * ir);
+	/* The fractions of the four frames of a block, kept as a vector that
+	 * moves by four steps per block (the 32-bit wrap of x + k * dx). */
+	int32x4_t xv = vmlaq_n_s32(vdupq_n_s32(x), lane, dx);
+	const int32x4_t dx4 = vdupq_n_s32(4 * dx);
+	/* A linear read loads the pair at the lower of the two frames. */
+	const uint8_t *const pb = (linear && back) ? p - (1 << fs) : p;
 	uint32_t i;
 
+	(void)nbytes;
 	for (i = 0; i + 4U <= n; i += 4U) {
-		const uint8_t *q0 = p + (x >> 16) * (1 << fs);
-		const uint8_t *q1 = p + ((x + dx) >> 16) * (1 << fs);
-		const uint8_t *q2 = p + ((x + 2 * dx) >> 16) * (1 << fs);
-		const uint8_t *q3 = p + ((x + 3 * dx) >> 16) * (1 << fs);
+		const uint8_t *q0 = pb + (x >> 16) * (1 << fs);
+		const uint8_t *q1 = pb + ((x + dx) >> 16) * (1 << fs);
+		const uint8_t *q2 = pb + ((x + 2 * dx) >> 16) * (1 << fs);
+		const uint8_t *q3 = pb + ((x + 3 * dx) >> 16) * (1 << fs);
 		int32x4_t l, r;
 
-		gather4(wide, stereo, q0, q1, q2, q3, &l, &r);
 		if (linear) {
-			const int32x4_t fr = vandq_s32(
-				vmlaq_n_s32(vdupq_n_s32(x), lane, dx), mask);
+			const int32x4_t fr = vandq_s32(xv, mask);
 			const int32x4_t w0 = vsubq_s32(one, fr);
 			int32x4_t bl, br;
 
-			gather4(wide, stereo, q0 + nbytes, q1 + nbytes, q2 + nbytes,
-			        q3 + nbytes, &bl, &br);
+			gather4_pair(wide, stereo, back, q0, q1, q2, q3, &l, &r, &bl,
+			             &br);
 			l = blend4(wide, l, bl, w0, fr);
 			r = stereo ? blend4(wide, r, br, w0, fr) : l;
-		} else if (!wide) {
-			l = vshlq_n_s32(l, 8);
-			r = vshlq_n_s32(r, 8);
+		} else {
+			gather4(wide, stereo, q0, q1, q2, q3, &l, &r);
+			if (!wide) {
+				l = vshlq_n_s32(l, 8);
+				r = vshlq_n_s32(r, 8);
+			}
 		}
 		if (fuse) {
 			const int32x4_t pl = vshrq_n_s32(
@@ -1046,6 +1144,7 @@ AV_INLINE uint32_t read_kernel_neon(const int wide, const int stereo,
 				vst1q_s32(out1 + i, r);
 		}
 		x += 4 * dx;
+		xv = vaddq_s32(xv, dx4);
 	}
 	return i;
 }
@@ -1059,8 +1158,11 @@ AV_NOINLINE uint32_t run_read_fused(const struct audio_voice *v, int linear,
                                     int32_t ir)
 {
 #define AV_F(w, s, l) \
-	return read_kernel_neon(w, s, l, 1, p, x, dx, nbytes, n, NULL, NULL, acc, \
-	                        gl, il, gr, ir)
+	return (l) && nbytes < 0 ? \
+	       read_kernel_neon(w, s, l, 1, 1, p, x, dx, nbytes, n, NULL, NULL, \
+	                        acc, gl, il, gr, ir) : \
+	       read_kernel_neon(w, s, l, 0, 1, p, x, dx, nbytes, n, NULL, NULL, \
+	                        acc, gl, il, gr, ir)
 	switch ((v->wide ? 4 : 0) | (v->stereo ? 2 : 0) | (linear ? 1 : 0)) {
 	case 0: AV_F(0, 0, 0);
 	case 1: AV_F(0, 0, 1);
@@ -1094,8 +1196,11 @@ AV_NOINLINE void run_read(const struct audio_voice *v, int linear,
 #ifdef AV_NEON_READ
 #define AV_R(w, s, l) \
 	do { \
-		const uint32_t d = read_kernel_neon(w, s, l, 0, p, x, dx, nbytes, \
-		                                    n, out0, out1, NULL, 0, 0, 0, 0); \
+		const uint32_t d = (l) && nbytes < 0 ? \
+			read_kernel_neon(w, s, l, 1, 0, p, x, dx, nbytes, n, out0, out1, \
+			                 NULL, 0, 0, 0, 0) : \
+			read_kernel_neon(w, s, l, 0, 0, p, x, dx, nbytes, n, out0, out1, \
+			                 NULL, 0, 0, 0, 0); \
 		read_kernel(w, s, l, p, x + (int32_t)d * dx, dx, nbytes, n - d, \
 		            out0 + d, out1 + d); \
 	} while (0); \
