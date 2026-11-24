@@ -186,6 +186,16 @@
  * persists across render calls: any split of a render gives the same output
  * as one render, and a stretch of silence runs the filter until its history
  * is zero before the output is written without it.
+ *   The cubic interpolation is not offered with 2x oversampling (it costs
+ * more than the period allows there, and the cubic voice runs at 48 kHz
+ * only): while AUDIO_VOICE_OVERSAMPLE_CUBIC is 0 these records are rejected
+ * whole, each with the rejected count raised and no other change, checked
+ * before the engine's state or position is touched: CONFIG OVERSAMPLE 2x
+ * while the session default is cubic or any voice has the cubic selector of
+ * its own (an idle voice included: the selector stays across STOP), CONFIG
+ * INTERP cubic and MODE cubic while 2x is on. A record of the value in
+ * force is still accepted and changes nothing, and a cubic selector may be
+ * set while 2x is off, to be changed before 2x is switched on.
  *
  * Interpolation. Each voice reads its sample nearest, linear or with the
  * 4-point Catmull-Rom cubic. The session default is AUDIO_VOICE_INTERP_*
@@ -286,6 +296,13 @@
 /* Output frames the decimator of 2x oversampling delays the sound by, the
  * value of audio_voice_output_delay(): (AUDIO_REDUCE_TAPS - 1) / 4. */
 #define AUDIO_VOICE_OVERSAMPLE_DELAY_FRAMES 14U
+
+/* 1 lets 2x oversampling and the cubic interpolation be on together (the
+ * engine mixes it; only a qualification test builds it so). 0, the product,
+ * rejects the records that would combine them: see "Oversampling". */
+#ifndef AUDIO_VOICE_OVERSAMPLE_CUBIC
+#define AUDIO_VOICE_OVERSAMPLE_CUBIC 0
+#endif
 
 #define AUDIO_VOICE_MODE_INTERP  0x0001U
 #define AUDIO_VOICE_MODE_KNOWN   AUDIO_VOICE_MODE_INTERP

@@ -268,6 +268,22 @@ static uint32_t voice_interp(const struct audio_voice_engine *e,
 	       i : AUDIO_VOICE_INTERP_NEAREST;
 }
 
+/* Whether the session default or any voice, an idle one too, selects the
+ * cubic interpolation. With AUDIO_VOICE_OVERSAMPLE_CUBIC 0 that blocks
+ * switching 2x oversampling on, and 2x oversampling blocks selecting it. */
+static int cubic_selected(const struct audio_voice_engine *e)
+{
+	uint32_t k;
+
+	if (e->interp == AUDIO_VOICE_INTERP_CUBIC)
+		return 1;
+	for (k = 0; k < AUDIO_VOICE_MAX_VOICES; k++) {
+		if (voice_interp(e, &e->voice[k]) == AUDIO_VOICE_INTERP_CUBIC)
+			return 1;
+	}
+	return 0;
+}
+
 
 /* Frames a voice that never loops plays before its pass ends for good; a
  * looping voice never ends by itself. */
@@ -401,6 +417,11 @@ static int set_oversample(struct audio_voice_engine *e,
 	on = c->arg0 == AUDIO_VOICE_OVERSAMPLE_2X ? 1U : 0U;
 	if (on == e->oversample)
 		return 0;
+	/* Refused before anything is synced, cut or changed. */
+	if (on != 0U && AUDIO_VOICE_OVERSAMPLE_CUBIC == 0 && cubic_selected(e)) {
+		e->rejected++;
+		return 0;
+	}
 	sync_all(e, e->chunk_off);
 	for (k = 0; k < AUDIO_VOICE_MAX_VOICES; k++) {
 		if (is_sounding(&e->voice[k])) {
@@ -445,6 +466,11 @@ static int apply_config(struct audio_voice_engine *e,
 		if (c->flags != AUDIO_VOICE_CONFIG_INTERP ||
 		    c->arg0 < AUDIO_VOICE_INTERP_MODE_NEAREST ||
 		    c->arg0 > AUDIO_VOICE_INTERP_MODE_CUBIC || c->arg1 != 0U) {
+			e->rejected++;
+			return 0;
+		}
+		if (e->oversample != 0U && AUDIO_VOICE_OVERSAMPLE_CUBIC == 0 &&
+		    c->arg0 == AUDIO_VOICE_INTERP_MODE_CUBIC) {
 			e->rejected++;
 			return 0;
 		}
@@ -538,7 +564,9 @@ static int apply(struct audio_voice_engine *e,
 		break;
 	case AUDIO_VOICE_OP_MODE:
 		if (c->flags != AUDIO_VOICE_MODE_INTERP ||
-		    c->arg0 > AUDIO_VOICE_INTERP_MODE_CUBIC || c->arg1 != 0U)
+		    c->arg0 > AUDIO_VOICE_INTERP_MODE_CUBIC || c->arg1 != 0U ||
+		    (e->oversample != 0U && AUDIO_VOICE_OVERSAMPLE_CUBIC == 0 &&
+		     c->arg0 == AUDIO_VOICE_INTERP_MODE_CUBIC))
 			e->rejected++;
 		else
 			v->vinterp = (uint8_t)c->arg0;
@@ -1074,12 +1102,16 @@ AV_INLINE void gather4_pair(const int wide, const int stereo, const int back,
  * stored: each four frames are multiplied by their gain, (gain + i * inc) >>
  * 8 per side as in apply_ramp(), and added to the sums at acc (left) and
  * acc + AUDIO_VOICE_MIX_FRAMES (right).
+ *
+ * The caller guarantees what kernel() states: with linear every frame of the
+ * run and its neighbour in the direction of play are inside the sample, and
+ * the run has at least one frame; n below 4 does no frame.
  */
 AV_INLINE uint32_t read_kernel_neon(const int wide, const int stereo,
                                     const int linear, const int back,
                                     const int fuse,
                                     const uint8_t *restrict p, int32_t x,
-                                    const int32_t dx, const int32_t nbytes,
+                                    const int32_t dx,
                                     uint32_t n, int32_t *restrict out0,
                                     int32_t *restrict out1,
                                     int32_t *restrict acc, int32_t gl,
@@ -1098,11 +1130,15 @@ AV_INLINE uint32_t read_kernel_neon(const int wide, const int stereo,
 	 * moves by four steps per block (the 32-bit wrap of x + k * dx). */
 	int32x4_t xv = vmlaq_n_s32(vdupq_n_s32(x), lane, dx);
 	const int32x4_t dx4 = vdupq_n_s32(4 * dx);
-	/* A linear read loads the pair at the lower of the two frames. */
+	/* A linear read loads the pair at the lower of the two frames. p is the
+	 * frame at the voice position, and backward the lower frame of the pair
+	 * of the first frame is the one before it: the callers run a linear read
+	 * only with a span whose frames all have their partner in the sample
+	 * (see "safe" in render), and for backward play that needs the position
+	 * above the loop start, so p - one frame is a frame of the sample. */
 	const uint8_t *const pb = (linear && back) ? p - (1 << fs) : p;
 	uint32_t i;
 
-	(void)nbytes;
 	for (i = 0; i + 4U <= n; i += 4U) {
 		const uint8_t *q0 = pb + (x >> 16) * (1 << fs);
 		const uint8_t *q1 = pb + ((x + dx) >> 16) * (1 << fs);
@@ -1159,9 +1195,9 @@ AV_NOINLINE uint32_t run_read_fused(const struct audio_voice *v, int linear,
 {
 #define AV_F(w, s, l) \
 	return (l) && nbytes < 0 ? \
-	       read_kernel_neon(w, s, l, 1, 1, p, x, dx, nbytes, n, NULL, NULL, \
+	       read_kernel_neon(w, s, l, 1, 1, p, x, dx, n, NULL, NULL, \
 	                        acc, gl, il, gr, ir) : \
-	       read_kernel_neon(w, s, l, 0, 1, p, x, dx, nbytes, n, NULL, NULL, \
+	       read_kernel_neon(w, s, l, 0, 1, p, x, dx, n, NULL, NULL, \
 	                        acc, gl, il, gr, ir)
 	switch ((v->wide ? 4 : 0) | (v->stereo ? 2 : 0) | (linear ? 1 : 0)) {
 	case 0: AV_F(0, 0, 0);
@@ -1197,9 +1233,9 @@ AV_NOINLINE void run_read(const struct audio_voice *v, int linear,
 #define AV_R(w, s, l) \
 	do { \
 		const uint32_t d = (l) && nbytes < 0 ? \
-			read_kernel_neon(w, s, l, 1, 0, p, x, dx, nbytes, n, out0, out1, \
+			read_kernel_neon(w, s, l, 1, 0, p, x, dx, n, out0, out1, \
 			                 NULL, 0, 0, 0, 0) : \
-			read_kernel_neon(w, s, l, 0, 0, p, x, dx, nbytes, n, out0, out1, \
+			read_kernel_neon(w, s, l, 0, 0, p, x, dx, n, out0, out1, \
 			                 NULL, 0, 0, 0, 0); \
 		read_kernel(w, s, l, p, x + (int32_t)d * dx, dx, nbytes, n - d, \
 		            out0 + d, out1 + d); \
