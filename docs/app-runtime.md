@@ -94,9 +94,10 @@ Measured on one card with 231 records, no app and the same bench build with
 and without this change (one boot of each, a 30 s ZZPlay clip, default task
 priorities, no audio underruns in either): the idle poll fell from 7.8 us to
 3.3 us per pass, the scheduler section from 8.5 us to 4.0 us and the
-main-loop pass from 12.7 us to 8.0 us. The mailbox request ring is still
-scanned on every 256th idle pass, as before, so the steady gap between scans
-fell from about 3.63 ms to 2.31 ms. ZZPlay's SDK write average fell from
+main-loop pass from 12.7 us to 8.0 us. In that build the mailbox request ring
+was scanned only on register events and every 256th idle pass, so the steady
+gap between scans fell from about 3.63 ms to 2.31 ms. ZZPlay's SDK write
+average fell from
 8593 us to 7697 us and its SDK retire average (the presentation and
 retirement path) from 3209 us to 2240 us. The core 1 write (308 us to 319 us)
 and decode (about 9.5 ms) times did not change. This removes part of the
@@ -104,6 +105,25 @@ latency added since v2.9.1 and does not restore it. The SDK retire average
 was reported as about 0.7 ms on v2.9.1, but that comparison does not isolate
 the backend, so it does not say how much of the difference is left in the
 firmware or in fixed overhead.
+
+The request ring is now also scanned on a time basis. Besides a register
+event (IRQ acknowledge, doorbell and so on) and every 256th idle pass, an
+idle pass scans it once 250 us have passed since the last scan, whichever
+trigger made that scan; every scan restarts the 250 us. An idle pass is a
+main-loop pass with no Zorro read or write in service, and only those pass
+the check. Events and the periodic scan do not add deadline scans, they
+restart it. Both ends of the interval are the timer read at the top of a
+pass, so a scan comes after 250 us give or take one pass, plus any long work
+in the passes between: a pass that runs for several milliseconds costs one
+scan, not one per missed interval. It is not a hard real-time bound. The
+deadline scan counts in the scan count of the SDK diagnostic register
+(`REG_ZZ_SDK_DIAG_WRITE`, bits 11:4), like the periodic one. The 250 us is the compile-time define
+`MAILBOX_POLL_DEADLINE_US` in `main.c`; a build can override it
+(`EXTRA_CFLAGS='-DMAILBOX_POLL_DEADLINE_US=500'`) or turn the deadline scan
+off with `-DMAILBOX_POLL_DEADLINE_US=0`, which leaves the events and the
+every-256th-idle-pass scan. The decision is `mailbox_poll_deadline.h`, which
+`test/scheduler/mailbox_poll_deadline_test.c` drives through a model of the
+poll site (`make -C test/scheduler poll_deadline`).
 
 Every mailbox request except `QUERY`, `CLAIM` and `LIST` names its record by
 handle at byte 40 of the payload, and the lookup (`zzapp_rec_by_handle`)

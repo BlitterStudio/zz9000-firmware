@@ -56,14 +56,25 @@ LZH_DECODE_CONTRACT_CPPFLAGS := -I$(SRC_DIR)/lzh -DHAVE_CONFIG_H -I$(SRC_DIR)
 LZH_DECODE_CONTRACT_SOURCES := lzh_decode_contract_test.c $(SRC_DIR)/lzh/sdk_decompress_lzh.c
 LZH_DECODE_CONTRACT_DEPS := $(SRC_DIR)/lzh/zz9k_lzh.h
 
-.PHONY: test clean host smp_lock l2_maint offload_params decode_reclaim lzh_dtext_reclaim lzh_decode_contract fallback_recovery quiesce_post
+# The MAILBOX_POLL_DEADLINE_US decision, driven through a model of the poll site.
+POLL_DEADLINE_TARGET := $(BUILD_DIR)/mailbox_poll_deadline_test
 
-test: $(TARGET) $(HOST_TARGET) $(L2_MAINT_TARGET) $(FALLBACK_RECOVERY_TARGET) $(QUIESCE_POST_TARGET)
+.PHONY: test clean host smp_lock l2_maint offload_params decode_reclaim lzh_dtext_reclaim lzh_decode_contract fallback_recovery quiesce_post poll_deadline
+
+test: $(TARGET) $(HOST_TARGET) $(L2_MAINT_TARGET) $(FALLBACK_RECOVERY_TARGET) $(QUIESCE_POST_TARGET) $(POLL_DEADLINE_TARGET)
 	$(TARGET)
 	$(HOST_TARGET)
 	$(L2_MAINT_TARGET)
 	$(FALLBACK_RECOVERY_TARGET)
 	$(QUIESCE_POST_TARGET)
+	$(POLL_DEADLINE_TARGET)
+
+poll_deadline: $(POLL_DEADLINE_TARGET)
+	$(POLL_DEADLINE_TARGET)
+
+$(POLL_DEADLINE_TARGET): mailbox_poll_deadline_test.c $(SRC_DIR)/mailbox_poll_deadline.h
+	@mkdir -p $(BUILD_DIR)
+	$(CC) -I$(SRC_DIR) $(CFLAGS) -Werror -o $@ mailbox_poll_deadline_test.c
 
 fallback_recovery: $(FALLBACK_RECOVERY_TARGET)
 	$(FALLBACK_RECOVERY_TARGET)
