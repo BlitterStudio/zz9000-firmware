@@ -1148,9 +1148,11 @@ static const void *api_ext(uint32_t platform_id, uint32_t ext_id)
 
 /* Slot order is aar_api's. audio_stats is NULL (the runtime keeps no
  * underrun count): the standard allows it, and the app then sees a NULL
- * slot. `groups` follows the runtime's group mask. */
-static aar_api g_api = {
-    .size = sizeof(g_api), .version = AAR_API_VERSION,
+ * slot. This is the table with every group filled in; zzapp_api_table()
+ * hands out a copy in which the slots of the groups the runtime does not
+ * declare are NULL (spec 3.3 rule 2). */
+static const aar_api g_api_full = {
+    .size = sizeof(g_api_full), .version = AAR_API_VERSION,
     .platform_id = AAR_PLATFORM_ZZ9000,
     /* core */
     .exit = api_exit, .yield = api_yield, .should_stop = api_stop,
@@ -1192,11 +1194,38 @@ static aar_api g_api = {
     .audio_decode_close = api_audio_close_decode
 };
 
+/* The table the apps see: `groups` follows the runtime's group mask, and
+ * every slot of a group whose bit is clear is NULL, so a clear bit is as
+ * reliable as a set one. The copy is rebuilt only when the mask changes (it
+ * never does on a card; the host tests change it). */
+static aar_api g_api_out;
+static int g_api_out_valid;
+
+#define CLEAR_SLOTS(first, last) \
+    memset(&g_api_out.first, 0, \
+           offsetof(aar_api, last) + sizeof(g_api_out.last) - \
+           offsetof(aar_api, first))
+
+static void api_build_table(uint32_t groups)
+{
+    memcpy(&g_api_out, &g_api_full, sizeof(g_api_out));
+    g_api_out.groups = groups;
+    if ((groups & AAR_GROUP_DISPLAY) == 0u)
+        CLEAR_SLOTS(display_open, display_latest_dropped);
+    if ((groups & AAR_GROUP_AUDIO) == 0u)
+        CLEAR_SLOTS(audio_open, audio_stats);
+    if ((groups & AAR_GROUP_GL) == 0u)
+        CLEAR_SLOTS(gl_bind, gl_unbind);
+    if ((groups & AAR_GROUP_SERVICES) == 0u)
+        CLEAR_SLOTS(sha256, audio_decode_close);
+    g_api_out_valid = 1;
+}
+
 const aar_api *zzapp_api_table(void)
 {
     uint32_t groups = zzapp_runtime_groups();
 
-    if (g_api.groups != groups)
-        g_api.groups = groups;
-    return &g_api;
+    if (!g_api_out_valid || g_api_out.groups != groups)
+        api_build_table(groups);
+    return &g_api_out;
 }

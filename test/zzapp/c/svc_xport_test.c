@@ -962,11 +962,53 @@ static void test_files(void)
 	CHECK(data.bytes == ZZAPP_XPORT_DATA_MAX);
 	free(big);
 
+	/* An id remembers how it was opened (spec 7.1): a write through an id
+	 * opened without WRITE and a read through one opened without READ are
+	 * AAR_E_BADF, and nothing reaches the client. */
+	{
+		uint32_t reads = cl.nreq[AAR_OP_FILE_READ];
+		uint32_t writes = cl.nreq[AAR_OP_FILE_WRITE];
+		int wfd, rwfd;
+
+		CHECK(fd == ZZAPP_FD_BASE);
+		n = 77U;
+		CHECK(zzapp_svc_file_write(fd, buf, 16U, &n) == AAR_E_BADF && n == 0U);
+		CHECK(zzapp_svc_file_write(fd, buf, 0U, &n) == AAR_E_BADF);
+		wfd = zzapp_svc_file_open("Work:w.txt", AAR_FILE_WRITE | AAR_FILE_CREATE);
+		CHECK(wfd == ZZAPP_FD_BASE + 1);
+		n = 77U;
+		CHECK(zzapp_svc_file_read(wfd, buf, 16U, &n) == AAR_E_BADF && n == 0U);
+		CHECK(zzapp_svc_file_read(wfd, buf, 0U, &n) == AAR_E_BADF);
+		CHECK(cl.nreq[AAR_OP_FILE_READ] == reads);
+		CHECK(cl.nreq[AAR_OP_FILE_WRITE] == writes);
+		CHECK(zzapp_svc_file_write(wfd, buf, 16U, &n) == AAR_OK && n == 16U);
+		CHECK(cl.nreq[AAR_OP_FILE_WRITE] == writes + 1U);
+		CHECK(zzapp_svc_file_close(wfd) == AAR_OK);
+		/* The flags belong to the open, not to the number: the same id
+		 * reopened read-only refuses writes. */
+		wfd = zzapp_svc_file_open("Work:w.txt", AAR_FILE_READ);
+		CHECK(wfd == ZZAPP_FD_BASE + 1);
+		CHECK(zzapp_svc_file_write(wfd, buf, 16U, &n) == AAR_E_BADF);
+		CHECK(zzapp_svc_file_read(wfd, buf, 16U, &n) == AAR_OK);
+		CHECK(zzapp_svc_file_close(wfd) == AAR_OK);
+		rwfd = zzapp_svc_file_open("Work:rw.txt", AAR_FILE_READ | AAR_FILE_WRITE);
+		CHECK(rwfd == ZZAPP_FD_BASE + 1);
+		CHECK(zzapp_svc_file_read(rwfd, buf, 16U, &n) == AAR_OK);
+		CHECK(zzapp_svc_file_write(rwfd, buf, 16U, &n) == AAR_OK && n == 16U);
+		CHECK(zzapp_svc_file_close(rwfd) == AAR_OK);
+		cl.written_len = 0U;
+	}
+
 	/* Write, seek, stat, close. */
 	for (i = 0U; i < sizeof(buf); i++)
 		buf[i] = (uint8_t)(i * 3U);
-	CHECK(zzapp_svc_file_write(fd, buf, sizeof(buf), &n) == AAR_OK && n == sizeof(buf));
-	CHECK(cl.written_len == sizeof(buf) && memcmp(cl.written, buf, sizeof(buf)) == 0);
+	{
+		int wfd = zzapp_svc_file_open("Work:w.txt", AAR_FILE_WRITE);
+
+		CHECK(zzapp_svc_file_write(wfd, buf, sizeof(buf), &n) == AAR_OK && n == sizeof(buf));
+		CHECK(cl.written_len == sizeof(buf) && memcmp(cl.written, buf, sizeof(buf)) == 0);
+		CHECK(zzapp_svc_file_close(wfd) == AAR_OK);
+	}
 	CHECK(zzapp_svc_file_seek(fd, 0x100000010LL, AAR_SEEK_SET, &pos) == AAR_OK);
 	CHECK(pos == 0x100000011LL);
 	CHECK(cl.last[AAR_OP_FILE_SEEK].arg[AAR_A_FILE_WHENCE] == (uint32_t)AAR_SEEK_SET);

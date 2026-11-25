@@ -401,9 +401,8 @@ int main(int argc, char **argv)
     ok &= expect_contains("clib", clib, expected[i].proto_decl);
     ok &= expect_contains("proto", proto, expected[i].lvo_token);
   }
-  /* The ZZ9KApp* calls were removed in revision 41: no trace of them in the
-   * metadata. Revision 42 reuses their vectors from -354 for the voice calls,
-   * and the table ends at ZZ9KVoiceGetStatus (-384). */
+  /* The table ends at ZZ9KVoiceGetStatus (-384): no app client calls and
+   * nothing above that vector in the metadata. */
   ok &= expect_absent("fd", fd, "ZZ9KApp");
   ok &= expect_absent("clib", clib, "ZZ9KApp");
   ok &= expect_absent("clib", clib, "app_client");

@@ -47,7 +47,9 @@ static void rt_put32(uint8_t *p, uint32_t n)
 }
 
 /* A minimal ELF32 ARM image with a valid note and one relocation; a test
- * changes a note word with test_note_set(image + TEST_NOTE_OFF, ...). */
+ * changes a note word with test_note_set(image + TEST_NOTE_OFF, ...). The one
+ * PT_LOAD maps the file from offset 0, so the DT_RELA table at 0xd0 has a
+ * virtual address; the dynamic section is at 0xe0. */
 static void rt_image(uint8_t image[RT_IMAGE_BYTES], uint32_t heap_mib)
 {
     uint8_t *ph;
@@ -56,21 +58,26 @@ static void rt_image(uint8_t image[RT_IMAGE_BYTES], uint32_t heap_mib)
     memcpy(image, "\177ELF\1\1\1", 7);
     rt_put16(image + 16, 3); rt_put16(image + 18, 40);
     rt_put32(image + 24, RT_LOAD_OFF); rt_put32(image + 28, 52);
-    rt_put32(image + 32, 0x180); rt_put32(image + 36, 0x05000400);
+    rt_put32(image + 36, 0x05000400);
     rt_put16(image + 40, 52); rt_put16(image + 42, 32);
-    rt_put16(image + 44, 2); rt_put16(image + 46, 40); rt_put16(image + 48, 1);
+    rt_put16(image + 44, 3); rt_put16(image + 46, 40);
     ph = image + 52;
-    rt_put32(ph, 1); rt_put32(ph + 4, RT_LOAD_OFF); rt_put32(ph + 8, RT_LOAD_OFF);
-    rt_put32(ph + 16, 4); rt_put32(ph + 20, 8); rt_put32(ph + 24, 1);
+    rt_put32(ph, 1);
+    rt_put32(ph + 16, RT_LOAD_OFF + 4U); rt_put32(ph + 20, RT_LOAD_OFF + 8U);
+    rt_put32(ph + 24, 1);
     ph += 32;
     rt_put32(ph, 4); rt_put32(ph + 4, TEST_NOTE_OFF);
     rt_put32(ph + 16, TEST_NOTE_BYTES);
+    ph += 32;
+    rt_put32(ph, 2); rt_put32(ph + 4, 0xe0); rt_put32(ph + 8, 0xe0);
+    rt_put32(ph + 16, 32); rt_put32(ph + 20, 32); rt_put32(ph + 24, 4);
     test_note_init(image + TEST_NOTE_OFF);
     test_note_set(image + TEST_NOTE_OFF, TEST_NOTE_W_MIN_HEAP_MIB, heap_mib);
     rt_put32(image + 0xd0, RT_LOAD_OFF); rt_put32(image + 0xd4, 23);
     rt_put32(image + 0xd8, RT_LOAD_OFF);
-    rt_put32(image + 0x184, 4); rt_put32(image + 0x190, 0xd0);
-    rt_put32(image + 0x194, 12); rt_put32(image + 0x1a4, 12);
+    rt_put32(image + 0xe0, 7); rt_put32(image + 0xe4, 0xd0);   /* DT_RELA */
+    rt_put32(image + 0xe8, 8); rt_put32(image + 0xec, 12);     /* DT_RELASZ */
+    rt_put32(image + 0xf0, 9); rt_put32(image + 0xf4, 12);     /* DT_RELAENT */
 }
 
 /* ---- The clients and the mailbox ------------------------------------------ */

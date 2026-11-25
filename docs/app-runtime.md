@@ -569,26 +569,33 @@ The firmware implements the AAR 0.5 app table (`aar_api`, `aar/app.h`), the GL
 table (`aar_gl`, `aar/gl.h`) and the ZZ9000 extension table
 (`aar_ext_zz9000`, `aar/ext_zz9000.h`) on the process records and the
 transport described below. Calls are `aar_*`, constants `AAR_*`, status
-codes `AAR_E_*`. The `zz_*`, `ZZ_*` and `zzapp_*` names of the 0.4 header are
-gone with no compatibility layer; `docs/zzapp-to-aar.md` in the aar repository
-maps them. The firmware's hardware names (`ZZ_*` audio, Ethernet, RasterIX and
-MiniGL registers) are unchanged. `QUERY` reports 0.5 in its ABI major and
-minor words (`ZZAPP_ABI_MAJOR`, `ZZAPP_ABI_MINOR`).
+codes `AAR_E_*`. The firmware's hardware names (`ZZ_*` audio, Ethernet,
+RasterIX and MiniGL registers) are unchanged. `QUERY` reports 0.5 in its ABI
+major and minor words (`ZZAPP_ABI_MAJOR`, `ZZAPP_ABI_MINOR`).
 
 **Groups.** `aar_api.groups` and `aar_info.groups` report the same mask:
 `AAR_GROUP_INPUT` and `AAR_GROUP_SERVICES` always, and `AAR_GROUP_DISPLAY`,
 `AAR_GROUP_AUDIO`, `AAR_GROUP_GL` when the client capability word has the
-matching bit. `audio_stats` is `NULL`. On the card route the runtime counts
+matching bit. The mask is authoritative in both directions (spec 3.3 rule 2):
+every slot of a group whose bit is clear is `NULL` in the table the app gets,
+and `zzapp_api_table()` builds that table from the runtime mask. `INPUT` has
+no slots. `audio_stats` is `NULL`. On the card route the runtime counts
 played underruns in the ring header (`AAR_AUDIO_RING_UNDERRUNS`, a
 little-endian word beside `read_frame`), where the app and the client read
 them; on the AHI route the client consumes the ring and the word stays 0.
 
 **Image rules.** The loader reads an ELF32 ARM `ET_DYN` image. `e_flags` must
 say EABI version 5 and hard float, and must not say soft float; any other
-value is `AAR_E_INVAL`. A dynamic section that names `DT_RELR`, `DT_RELRSZ`
-or `DT_RELRENT` is `AAR_E_INVAL`: only `R_ARM_RELATIVE` entries from `DT_REL`
-and `DT_RELA` are applied. `e_entry` must be even and inside a `PF_X` segment
-(`AAR_E_INVAL`).
+value is `AAR_E_INVAL`. The image has exactly one `PT_DYNAMIC`, even when it
+has no relocations; without one, or with two, the load is `AAR_E_INVAL`. A
+dynamic section that names `DT_RELR`, `DT_RELRSZ` or `DT_RELRENT` is
+`AAR_E_INVAL`: only `R_ARM_RELATIVE` entries from `DT_REL` and `DT_RELA` are
+applied. The target of each entry (`r_offset`) must be a whole, 4-byte aligned
+word inside the memory of one `PT_LOAD` segment (`p_vaddr` up to `p_vaddr +
+p_memsz`); a target in a gap between segments, past the last segment's end, or
+straddling it is `AAR_E_INVAL`, and the check runs while the tables are
+extracted, before any byte is copied. `e_entry` must be even and inside a
+`PF_X` segment (`AAR_E_INVAL`).
 
 **Note v1.** An image must carry exactly one AAR note (owner `AAR`, type 1, a
 40-byte descriptor of ten little-endian words), found in a `PT_NOTE` segment.
@@ -607,8 +614,7 @@ or `AAR_E_NOGROUP` from a missing call, so the refusal reply carries the code
 too (see `LOAD_END` below). A profile or group refusal prints its reason in
 the `[app] reject op` line. The groups a note names (required and optional)
 set the display, audio and GL bits of `AAR_CB_FLAGS`, which the client reads.
-An image without a v1 note, including one that carries a 0.4 note, does not
-load.
+An image without a v1 note does not load.
 
 **Events.** `aar_event_poll` always delivers `AAR_EV_STOP` and
 `AAR_EV_LOW_MEMORY`, and delivers the client's key, mouse, joystick and
@@ -630,7 +636,12 @@ neither `READ` nor `WRITE`, `CREATE` or `TRUNCATE` without `WRITE`, or `EXCL`
 without `CREATE`. Create-or-replace is `CREATE | TRUNCATE`. Paths and names
 travel as NUL-terminated bytes in the 1 KiB scratch area of the service block.
 Reads and writes move through the data block, one request per chunk of at
-most 256 KiB.
+most 256 KiB. The firmware keeps the `READ` and `WRITE` bits of each open
+(`file_access` in the services state, one byte per id). `aar_file_write`
+through an id opened without `WRITE` and `aar_file_read` through an id opened
+without `READ` return `AAR_E_BADF` before any request is posted, and the
+count out is 0, also for a length of 0. A reused id number takes the flags of
+its new open.
 
 **Shared buffers.** `aar_shared_alloc` takes flags 0 and returns a block from
 the host-visible heap, rounded to the 4096-byte granule, with at most 64 live
@@ -885,8 +896,12 @@ kick costs latency only.
 `LOAD_BEGIN` reads `AAR_CB_PRIVATE_MIB`, `AAR_CB_SHARED_MIB` and
 `AAR_CB_WEIGHT` from the control block. A memory limit above 4095 MiB returns
 `BAD_REQUEST`; a shared limit the card cannot grant (the smaller of the
-surface heap and one app's alias window of 62 MiB) returns
-`SDK_STATUS_NO_MEMORY` at once and leaves the claim as it was. Zero selects
+surface heap, about 78 MiB, and one app's alias window of 62 MiB, so the
+window) returns `SDK_STATUS_NO_MEMORY` at once and leaves the claim as it
+was. That 62 MiB is `ZZAPP_SHARED_MAX_MIB`: `aar.library` reports it as
+`AARInfo.shared_max_mib` and `AARSetTagList` refuses a larger
+`AAR_TAG_SHARED_MIB` with `AAR_E_INVAL`, so a client that stays within
+`shared_max_mib` never meets the `NO_MEMORY` refusal. Zero selects
 the pool for the private limit and 16 MiB for the shared one
 (`ZZAPP_HOST_VISIBLE_DEFAULT_BYTES`). The limits cap the image, stack and
 minimum heap commit as well as later growth, and a shared cap is not a

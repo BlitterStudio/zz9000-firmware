@@ -199,6 +199,13 @@
  * writes 0 to AAR_CB_SHARED_MIB. */
 #define ZZAPP_HOST_VISIBLE_DEFAULT_BYTES (16u << 20)
 
+/* The largest shared limit LOAD_BEGIN grants, in MiB: the 62 MiB alias window
+ * one app maps its shared blocks through (ZZAPP_AS_ALIAS_BASE to
+ * ZZAPP_AS_ALIAS_END; the host-visible heap is larger). zzapp_host.c checks
+ * it against both. aar.library reports it as AARInfo.shared_max_mib and
+ * refuses a larger AAR_TAG_SHARED_MIB. */
+#define ZZAPP_SHARED_MAX_MIB             62u
+
 /* ---- STOP, RELEASE ------------------------------------------------------ */
 
 /* STOP: the handle alone. An unconditional stop of the named claim. RELEASE:

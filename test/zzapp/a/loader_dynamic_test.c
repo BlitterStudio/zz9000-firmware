@@ -197,8 +197,9 @@ static void test_section_headers_are_not_the_source(void)
     uint8_t image[IMAGE_BYTES];
     uint8_t *sh = image + SHOFF;
 
-    /* An SHT_RELA section that names a relocation, but no PT_DYNAMIC: the
-     * old section walk would have applied it; the loader now ignores it. */
+    /* An SHT_RELA section that names a relocation, beside a PT_DYNAMIC that
+     * names none: the old section walk would have applied it; the loader
+     * ignores it. */
     make_image(image);
     rela(image, 0, DATA_OFF, 23U, 0x1000U);
     put32(image + DATA_OFF, 0xdeadbeefU);
@@ -209,10 +210,14 @@ static void test_section_headers_are_not_the_source(void)
     put32(sh + 16, RELA_OFF);
     put32(sh + 20, 12);
     put32(sh + 36, 12);
-    put16(image + 44, 2);                 /* drop the PT_DYNAMIC header */
     assert(load(image) == AAR_OK);
     assert(get32(zzapp_test_arena_mem() + DATA_OFF) == 0xdeadbeefU);
     zzapp_loader_release();
+
+    /* Without a PT_DYNAMIC the image is refused, whatever the sections say
+     * (spec 2.2 rule 4). */
+    put16(image + 44, 2);                 /* drop the PT_DYNAMIC header */
+    expect_refused(image);
 }
 
 static void test_bad_sizes_and_entry_sizes(void)

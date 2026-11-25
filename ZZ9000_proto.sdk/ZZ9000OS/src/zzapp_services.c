@@ -229,6 +229,10 @@ struct zzapp_deferred {
 struct zzapp_service_runtime {
 	struct zzapp_deferred defer;
 	int file_open[ZZAPP_FD_COUNT];
+	/* AAR_FILE_READ and AAR_FILE_WRITE of the open that made the id: a
+	 * read through an id opened without READ, or a write through one
+	 * opened without WRITE, is AAR_E_BADF (spec 7.1). */
+	uint8_t file_access[ZZAPP_FD_COUNT];
 	int list_open[ZZAPP_FD_COUNT];
 	volatile int display_bound;
 	int display_back_owned;
@@ -1603,6 +1607,7 @@ void zzapp_services_on_app_end(void)
 	zzapp_xport_abandon(rec, ZZAPP_XPORT_REQ_PALETTE);
 	wait_end();
 	memset(state->file_open, 0, sizeof(state->file_open));
+	memset(state->file_access, 0, sizeof(state->file_access));
 	memset(state->list_open, 0, sizeof(state->list_open));
 	(void)zzapp_xport_block_free(rec, ZZAPP_XPORT_BLOCK_LOAD);
 	/* Console output the app wrote before it ended still goes out. */
@@ -1949,6 +1954,8 @@ int zzapp_svc_file_open(const char *path, uint32_t flags)
 	fd = alloc_fd(state->file_open);
 	if (fd < 0)
 		return AAR_E_NOMEM;
+	state->file_access[fd_index(fd)] =
+		(uint8_t)(flags & (AAR_FILE_READ | AAR_FILE_WRITE));
 	args[AAR_A_FILE_OPEN_FD] = (uint32_t)fd;
 	args[AAR_A_FILE_OPEN_FLAGS] = flags;
 	rc = file_request(AAR_OP_FILE_OPEN, args, 2U, &buf, len, NULL);
@@ -1986,6 +1993,9 @@ int zzapp_svc_file_read(int fd, void *buf, uint32_t len, uint32_t *out_n)
 		return AAR_E_INVAL;
 	*out_n = 0U;
 	if (!slot_live(state->file_open, fd) || !dst)
+		return AAR_E_BADF;
+	/* The id was opened without READ (spec 7.1). */
+	if ((state->file_access[fd_index(fd)] & AAR_FILE_READ) == 0U)
 		return AAR_E_BADF;
 	while (got < len) {
 		zzapp_xport_buf_t data;
@@ -2029,6 +2039,9 @@ int zzapp_svc_file_write(int fd, const void *buf, uint32_t len, uint32_t *out_n)
 		return AAR_E_INVAL;
 	*out_n = 0U;
 	if (!slot_live(state->file_open, fd) || (!src && len != 0U))
+		return AAR_E_BADF;
+	/* The id was opened without WRITE (spec 7.1). */
+	if ((state->file_access[fd_index(fd)] & AAR_FILE_WRITE) == 0U)
 		return AAR_E_BADF;
 	while (got < len) {
 		zzapp_xport_buf_t data;

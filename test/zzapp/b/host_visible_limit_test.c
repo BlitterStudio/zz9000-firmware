@@ -163,6 +163,17 @@ static void test_request_beyond_the_card_is_refused(void)
     assert(host_limit() == 24U * MIB);
     finish();
 
+    /* The largest limit is ZZAPP_SHARED_MAX_MIB, the figure aar.library
+     * reports as AARInfo.shared_max_mib: granted at the card's heap size,
+     * refused one MiB above. */
+    claimed();
+    assert(ZZAPP_SHARED_MAX_MIB == 62U);
+    assert(load_begin(0U, ZZAPP_SHARED_MAX_MIB + 1U) == SDK_STATUS_NO_MEMORY);
+    assert(RT_STATE(0U) == AAR_STATE_CLAIMED);
+    assert(load_begin(0U, ZZAPP_SHARED_MAX_MIB) == SDK_STATUS_OK);
+    assert(host_limit() == ZZAPP_SHARED_MAX_MIB * MIB);
+    finish();
+
     /* The ceiling follows the heap the allocator manages. */
     claimed();
     zzapp_test_set_host_visible_heap(20U * MIB);
