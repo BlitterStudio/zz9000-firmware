@@ -3121,7 +3121,8 @@ static int zzplay_restart_session(struct ZZPlayRuntime *runtime,
  * the card's input up while the loop is between frames. The reader process
  * reads the disk and copies to the card while the player waits on the
  * card: a blocking 16 KB read here cost up to a frame period, and the copy
- * 10 ms per 64 KB. */
+ * 8.6 ms per 64 KB. The copy is chunked and yields to a waiting player (see
+ * zzplay-reader.c). */
 typedef enum ZZPlayFeedResult {
   ZZPLAY_FEED_MORE = 0,        /* chunk fully accepted; ring may take more */
   ZZPLAY_FEED_BACKPRESSURE,    /* ring full or almost full (partial accept) */
