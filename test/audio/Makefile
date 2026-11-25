@@ -20,6 +20,7 @@ CONTROL_TARGET := $(BUILD_DIR)/audio_control_test
 CONFIG_TARGET := $(BUILD_DIR)/audio_config_test
 MP3_PROBE_TARGET := $(BUILD_DIR)/mp3_frame_probe_test
 MPEG_LAYER2_TARGET := $(BUILD_DIR)/mpeg_layer2_decode_test
+MP3_END_TARGET := $(BUILD_DIR)/mp3_oneshot_end_test
 FABRIC_TARGET := $(BUILD_DIR)/audio_fabric_test
 RING_TARGET := $(BUILD_DIR)/audio_fabric_ring_test
 BENCH_SMOKE_TARGET := $(BUILD_DIR)/bench_smoke_test
@@ -39,7 +40,8 @@ TARGETS := $(CONVERT_TARGET) $(CONVERT_EXACT_TARGET) $(CAPTURE_TARGET) $(PROFILE
 	$(PLAYBACK_TARGET) $(RATE_TARGET) $(PRECONVERT_TARGET) \
 	$(MEDIA_VIEW_TARGET) $(DRAIN_TARGET) $(CLOSE_TARGET) $(RECLAIM_TARGET) \
 	$(SCENE_TARGET) $(METER_TARGET) $(CONTROL_TARGET) $(CONFIG_TARGET) \
-	$(MP3_PROBE_TARGET) $(MPEG_LAYER2_TARGET) $(FABRIC_TARGET) \
+	$(MP3_PROBE_TARGET) $(MPEG_LAYER2_TARGET) $(MP3_END_TARGET) \
+	$(FABRIC_TARGET) \
 	$(RING_TARGET) $(BENCH_SMOKE_TARGET) $(STREAM_DECODE_TARGET) \
 	$(REDUCE_TARGET) $(VOICE_TARGET) $(VOICE_PT4_TARGET) \
 	$(VOICE_BASELINE_TARGET) \
@@ -73,6 +75,7 @@ test: $(TARGETS)
 	$(METER_TARGET)
 	$(CONTROL_TARGET)
 	$(MPEG_LAYER2_TARGET)
+	$(MP3_END_TARGET) fixtures $(SRC_DIR)/sdk_mailbox.c
 	$(FABRIC_TARGET) --srcdir $(SRC_DIR)
 	$(MEDIA_VIEW_TARGET)
 	$(RING_TARGET)
@@ -280,6 +283,17 @@ $(MP3_PROBE_TARGET): mp3_frame_probe_test.c \
 	$(SRC_DIR)/mp3/minimp3.h $(SRC_DIR)/mp3/minimp3_ex.h
 	@mkdir -p $(BUILD_DIR)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ mp3_frame_probe_test.c \
+		$(SRC_DIR)/mp3/decode_mp3.c
+
+# DECODE_MP3 end of input: tags, truncation, junk and output limits over the
+# committed MP3 fixtures. Reads sdk_mailbox.c to pin the compute wiring.
+$(MP3_END_TARGET): mp3_oneshot_end_test.c \
+	$(SRC_DIR)/mp3/decode_mp3.c $(SRC_DIR)/mp3/mp3.h \
+	$(SRC_DIR)/mp3/minimp3.h $(SRC_DIR)/mp3/minimp3_ex.h \
+	fixtures/tone.mp3 fixtures/tone_vbr_mono_48k.mp3 \
+	fixtures/tone_noxing_44k.mp3 $(SRC_DIR)/sdk_mailbox.c
+	@mkdir -p $(BUILD_DIR)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ mp3_oneshot_end_test.c \
 		$(SRC_DIR)/mp3/decode_mp3.c
 
 $(MPEG_LAYER2_TARGET): mpeg_layer2_decode_test.c \

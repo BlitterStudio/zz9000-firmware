@@ -134,6 +134,8 @@ int main(int argc, char **argv)
   ok &= expect_contains(source, "bytes_consumed");
   ok &= expect_contains(source, "bytes_written");
   ok &= expect_contains(source, "input=%lu");
+  ok &= expect_contains(source, "status == ZZ9K_STATUS_BAD_REQUEST");
+  ok &= expect_contains(source, "not a complete MP3 stream");
 
   free(source);
   return ok ? 0 : 1;
