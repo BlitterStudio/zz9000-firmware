@@ -10,7 +10,7 @@ CFLAGS += -std=c99 -Wall -Wextra -Werror -I$(SRC)
 
 TARGETS := build/service_discovery_test build/mailbox_memory_test \
 	build/client_release_test build/internal_completion_test \
-	build/voice_handlers_test
+	build/voice_handlers_test build/media_pump_release_test
 build/service_discovery_test: service_discovery_test.c $(SRC)/sdk_service_catalog.h
 	mkdir -p build
 	$(CC) $(CFLAGS) $< -o $@
@@ -49,12 +49,27 @@ build/voice_handlers_test: voice_handlers_test.c $(SRC)/sdk_mailbox.c \
 		$(SRC)/sdk_mailbox.c $(SRC)/scheduler.c \
 		$(SRC)/audio_voice_session.c $(SRC)/audio_voice.c
 
+# CLIENT_RELEASE against the AX media pump, the same way: sdk_mailbox.c
+# through the dispatcher, the media session module and the fabric producer
+# calls supplied by the test.
+build/media_pump_release_test: media_pump_release_test.c $(SRC)/sdk_mailbox.c \
+	$(SRC)/scheduler.c $(SRC)/sdk_media_session.h \
+	$(SRC)/sdk_mailbox.h $(MOCKS)/mailbox_test_decls.h
+	mkdir -p build
+	$(CC) -O2 -g -Wall -Wextra -static -ffunction-sections \
+		-fdata-sections -DTASKQ_HOST_TEST -DSDK_MAILBOX_HOST_TEST \
+		-include $(MOCKS)/mailbox_test_decls.h \
+		-Wl,--gc-sections -Wl,--unresolved-symbols=ignore-all \
+		-I$(MOCKS) -I$(SRC) -o $@ media_pump_release_test.c \
+		$(SRC)/sdk_mailbox.c $(SRC)/scheduler.c
+
 test: $(TARGETS)
 	./build/service_discovery_test
 	./build/mailbox_memory_test $(SRC)/sdk_mailbox.c
 	./build/client_release_test
 	./build/internal_completion_test
 	./build/voice_handlers_test
+	./build/media_pump_release_test
 
 clean:
 	rm -f $(TARGETS)

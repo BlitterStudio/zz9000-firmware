@@ -274,6 +274,11 @@ static void log_module_begin_failure(uint32_t module_id, const char *step,
 {
 	const char *module = module_id == ZZM_MODULE_MPEG2 ? "MPEG2" : "WEBM";
 
+	/* A load in progress is not a failure: the client retries every few
+	 * milliseconds and a console line per retry slows the core that
+	 * serves the retries. */
+	if (status == SDK_TASK_IN_PROGRESS)
+		return;
 	printf("[ZZM] begin %s %s status %u\n", module, step,
 	       (unsigned)status);
 }
@@ -402,8 +407,11 @@ uint16_t sdk_video_stream_begin_owned(
 	uint16_t status;
 
 	/* The module registry returns callable ops before the reference is
-	 * acquired.  Do not let core 0 idle-unload that image in this gap. */
-	zzm_loader_session_begin_lock();
+	 * acquired.  Do not let core 0 idle-unload that image in this gap.
+	 * Core 0 must not wait for core 1's load step either: report it in
+	 * progress without touching the registry. */
+	if (!zzm_loader_session_begin_enter())
+		return SDK_TASK_IN_PROGRESS;
 	status = sdk_video_stream_begin_owned_locked(begin, owner, result);
 	zzm_loader_session_begin_unlock();
 	return status;

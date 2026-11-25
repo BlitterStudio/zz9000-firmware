@@ -86,6 +86,39 @@
 #define AUDIO_VOICE_STATUS_OFF_POLL_GAP 36U /* u32 */
 #define AUDIO_VOICE_STATUS_MARGIN_NONE  0xFFFFFFFFU
 
+/*
+ * Extended status. FEATURES is the features word, written in every status
+ * write; the SDK reads it as ZZ9KVoiceExtStatus. ACTIVE_MASK, ENDS and
+ * OUTPUT_DELAY are reserved for later units and stay zero.
+ */
+#define AUDIO_VOICE_STATUS_OFF_FEATURES     40U /* u32 */
+#define AUDIO_VOICE_STATUS_OFF_ACTIVE_MASK  44U /* u32 */
+#define AUDIO_VOICE_STATUS_OFF_ENDS         48U /* u32 */
+#define AUDIO_VOICE_STATUS_OFF_OUTPUT_DELAY 52U /* u16 */
+
+/* Feature bits, as ZZ9K_VOICE_FEATURE_* in the SDK's zz9k/voice.h. */
+#define AUDIO_VOICE_FEATURE_RAMP         0x0001U
+#define AUDIO_VOICE_FEATURE_LIMITER      0x0002U
+#define AUDIO_VOICE_FEATURE_CUBIC        0x0004U
+#define AUDIO_VOICE_FEATURE_VOICE_INTERP 0x0008U
+#define AUDIO_VOICE_FEATURE_OVERSAMPLE   0x0010U
+#define AUDIO_VOICE_FEATURE_ENVELOPE     0x0020U
+#define AUDIO_VOICE_FEATURE_EVENTS       0x0040U
+#define AUDIO_VOICE_FEATURE_CONFIG       0x0080U
+
+/*
+ * The features this firmware advertises (0x8F). CONFIG is the record the
+ * engine handles. RAMP, LIMITER, CUBIC and VOICE_INTERP passed their card
+ * timing gates; the measured loads and render times are recorded in
+ * sdk/docs/zz9k-voice.md, Hardware measurements. RAMP and LIMITER stay off
+ * until a client sends a CONFIG record; cubic reading stays off until a
+ * client asks for it with a MODE record or a CONFIG default interpolation.
+ */
+#define AUDIO_VOICE_FEATURES \
+	(AUDIO_VOICE_FEATURE_CONFIG | AUDIO_VOICE_FEATURE_RAMP | \
+	 AUDIO_VOICE_FEATURE_LIMITER | AUDIO_VOICE_FEATURE_CUBIC | \
+	 AUDIO_VOICE_FEATURE_VOICE_INTERP)
+
 #define AUDIO_VOICE_STATE_CLOSED 0U
 #define AUDIO_VOICE_STATE_OPEN   1U /* open, no record yet */
 #define AUDIO_VOICE_STATE_LIVE   2U
@@ -176,7 +209,21 @@ uint16_t audio_voice_session_upload(uint32_t session,
  */
 void audio_voice_session_shutdown(void);
 
-/* Main-loop pass: heartbeat, ring drain, render, status. */
+/*
+ * Main-loop pass: heartbeat, ring drain, render, status. Renders at most
+ * one period per call, so the main loop can serve a Zorro request between
+ * periods; a lead that is short (after OPEN, START, RESET or a stall) is
+ * rebuilt over as many calls. The slot goes live once the full lead is
+ * staged.
+ */
 void audio_voice_session_poll(void);
+
+/*
+ * For the main loop's request branch, where audio_voice_session_poll() does
+ * not run: polls when at least 2 ms have passed since the last poll, so
+ * Zorro traffic that never pauses cannot starve the engine. No-op without
+ * a session.
+ */
+void audio_voice_session_poll_busy(void);
 
 #endif /* ZZ_AUDIO_VOICE_SESSION_H */

@@ -967,6 +967,12 @@ static int test_release_client_unbinds_audio(void)
 	    sdk_media_session_audio_bind(mock_session, 0U, &audio) !=
 	        SDK_STATUS_OK)
 		return 2;
+	/* Ownership names the opener only: a pump bound to this session is
+	 * the opener's to stop, not another client's on its release. */
+	if (!sdk_media_session_owned_by(mock_session, 17U) ||
+	    sdk_media_session_owned_by(mock_session, 18U) ||
+	    sdk_media_session_owned_by(mock_session + 1U, 17U))
+		return 8;
 	/* Bound sessions refuse close: the hazard CLIENT_RELEASE must clear. */
 	if (sdk_media_session_close(mock_session, 0U, &result) != SDK_STATUS_BUSY)
 		return 3;
@@ -974,6 +980,12 @@ static int test_release_client_unbinds_audio(void)
 	if (sdk_media_session_release_client(17U, &close_session) != 0 ||
 	    close_session != mock_session)
 		return 4;
+	/* The release only unbinds: the owner stays recorded until the close
+	 * it asked for, so the mailbox's ownership test, which runs before
+	 * this call and again on every BUSY resubmit, never loses the owner
+	 * of a still-open session. */
+	if (!sdk_media_session_owned_by(mock_session, 17U))
+		return 9;
 	/* ...and the close it asked for now succeeds without any further
 	 * unbind call from the mailbox. */
 	if (sdk_media_session_close(close_session, 0U, &result) != SDK_STATUS_OK)
@@ -983,6 +995,9 @@ static int test_release_client_unbinds_audio(void)
 	if (sdk_media_session_release_client(17U, &close_session) != 1 ||
 	    close_session != 0U)
 		return 6;
+	/* The closed session belongs to nobody. */
+	if (sdk_media_session_owned_by(mock_session, 17U))
+		return 7;
 	return 0;
 }
 

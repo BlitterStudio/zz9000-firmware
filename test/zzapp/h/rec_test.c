@@ -285,6 +285,7 @@ static void test_arena_init_validation(void)
     CHECK(zzapp_rec_arena_init((void *)(uintptr_t)addr, &bad) == -1);
     /* A failed init leaves no usable table behind. */
     CHECK(zzapp_rec_capacity() == 0U && zzapp_rec_by_pid(0U) == NULL);
+    CHECK(zzapp_rec_next_allocated(0U) == 0U);
     CHECK(zzapp_rec_admit(NULL, NULL) == AAR_REASON_MEMORY);
     CHECK(zzapp_rec_arena_init((void *)(uintptr_t)addr, &lay) == 0);
     CHECK(zzapp_rec_capacity() == 8U);
@@ -447,6 +448,72 @@ static void test_free_order_and_fifo_reuse(void)
     CHECK((rec = admit(0U, &handle[2])) != NULL);
     CHECK(aar_handle_index(handle[2]) == order[7]);
     CHECK(zzapp_rec_admit(&handle[3], &rec) == AAR_REASON_MEMORY);
+}
+
+/* The records a walk visits: every index it is handed back, in order. */
+static uint32_t walk_allocated(uint32_t visited[], uint32_t max)
+{
+    uint32_t count = 0U;
+    uint32_t pid;
+
+    for (pid = zzapp_rec_next_allocated(0U); pid < zzapp_rec_capacity();
+         pid = zzapp_rec_next_allocated(pid + 1U)) {
+        if (count < max)
+            visited[count] = pid;
+        count++;
+    }
+    return count;
+}
+
+/* A walk with the iterator reaches every record that is not FREE, in whatever
+ * state it is, and none that is. */
+static void test_next_allocated_walks_every_state(void)
+{
+    uint32_t handle[8];
+    uint32_t visited[8];
+    zzapp_rec_t *rec;
+    uint32_t i;
+
+    setup_arena(8U);
+    CHECK(walk_allocated(visited, 8U) == 0U);
+    CHECK(zzapp_rec_next_allocated(0U) == 8U);
+    for (i = 0U; i < 8U; i++)
+        CHECK(admit(i, &handle[i]) != NULL);
+    CHECK(walk_allocated(visited, 8U) == 8U);
+    for (i = 0U; i < 8U; i++)
+        CHECK(visited[i] == i);
+    /* A leading, a middle and a trailing run of FREE records. */
+    CHECK(zzapp_rec_free(handle[0]) == 0);
+    CHECK(zzapp_rec_free(handle[1]) == 0);
+    CHECK(zzapp_rec_free(handle[4]) == 0);
+    CHECK(zzapp_rec_free(handle[6]) == 0);
+    CHECK(zzapp_rec_free(handle[7]) == 0);
+    CHECK(walk_allocated(visited, 8U) == 3U);
+    CHECK(visited[0] == 2U && visited[1] == 3U && visited[2] == 5U);
+    /* CLAIMED, LIVE, RETIRING and RECLAIMED all count as allocated. */
+    rec = zzapp_rec_by_pid(2U);
+    CHECK(zzapp_rec_set_state(rec, ZZAPP_REC_LIVE) == 0);
+    rec = zzapp_rec_by_pid(3U);
+    CHECK(zzapp_rec_set_state(rec, ZZAPP_REC_RETIRING) == 0);
+    rec = zzapp_rec_by_pid(5U);
+    CHECK(zzapp_rec_set_state(rec, ZZAPP_REC_RECLAIMED) == 0);
+    CHECK(walk_allocated(visited, 8U) == 3U);
+    CHECK(visited[0] == 2U && visited[1] == 3U && visited[2] == 5U);
+    /* `from` is where the search starts, whether or not it is allocated. */
+    CHECK(zzapp_rec_next_allocated(3U) == 3U);
+    CHECK(zzapp_rec_next_allocated(4U) == 5U);
+    CHECK(zzapp_rec_next_allocated(6U) == 8U);
+    CHECK(zzapp_rec_next_allocated(8U) == 8U);
+    CHECK(zzapp_rec_next_allocated(0xffffffffU) == 8U);
+    /* A record that is admitted again is found again. */
+    CHECK(admit(0U, &handle[0]) != NULL);
+    CHECK(walk_allocated(visited, 8U) == 4U);
+    CHECK(zzapp_rec_free(handle[2]) == 0);
+    CHECK(zzapp_rec_free(handle[3]) == 0);
+    CHECK(zzapp_rec_free(handle[5]) == 0);
+    CHECK(walk_allocated(visited, 8U) == 1U);
+    CHECK(zzapp_rec_free(zzapp_rec_by_pid(visited[0])->hdr.handle) == 0);
+    CHECK(walk_allocated(visited, 8U) == 0U);
 }
 
 /* The window index and the record index are different things. */
@@ -1166,6 +1233,7 @@ int main(void)
     test_index_areas();
     test_capacity_refusal();
     test_free_order_and_fifo_reuse();
+    test_next_allocated_walks_every_state();
     test_window_is_not_pid();
     test_generation_wrap_and_never_zero();
     test_stale_lookups();

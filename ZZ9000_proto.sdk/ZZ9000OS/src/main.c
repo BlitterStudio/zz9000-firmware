@@ -54,6 +54,9 @@ void Xil_AssertNonVoid() {}
 #include "sd_boot.h"
 #include "fw_update.h"
 #include "zzm_loader.h"
+#ifdef ZZM_LOAD_BENCH
+#include "zzm_load_bench.h"
+#endif
 #include "interrupt.h"
 #include "bootrom.h"
 #include "core2.h"
@@ -1441,6 +1444,13 @@ int main() {
 		 * session), so it is skipped while a session is open. */
 		if (!audio_voice_session_active())
 			audio_fabric_bench_poll();
+#endif
+#ifdef ZZM_LOAD_BENCH
+		/* Instrument build: the longest module load step per phase,
+		 * printed when it changes, at most once per second and never
+		 * while a voice session is open (console output starves it). */
+		if (!audio_voice_session_active())
+			zzm_load_bench_poll();
 #endif
 #if ENABLE_LEGACY_USB_BLOCK_STORAGE
 		if (usb_read_pending) {
@@ -3071,6 +3081,11 @@ int main() {
 		 * iteration. Dormant (a cheap empty-queue scan) until core 1 is enabled.
 		 */
 		scheduler_core0_poll((writereq || readreq) ? 1 : 0, 0);
+		/* The voice poll only runs when no request was pending (see
+		 * above): under steady Zorro traffic it polls here, rate
+		 * limited to once per 2 ms. */
+		if (writereq || readreq)
+			audio_voice_session_poll_busy();
 
 		/* P96 video overlay: enqueue the ISR-requested compose frame
 		 * (the ISR itself must not touch the single-producer queue)

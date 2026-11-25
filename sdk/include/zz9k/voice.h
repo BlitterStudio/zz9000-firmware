@@ -186,18 +186,71 @@ typedef struct ZZ9KVoiceRingHeader {
  * first-pass length (0 = to the sample end). LOOP: arg0/arg1 = loop
  * start/length. SET: flags select rate, volume and rate-in-Hz; arg0 = rate,
  * arg1 = (left << 16) | right. STOP silences the voice. MASTER: arg0 = Q8.8
- * gain. DIRECTION: flags bit 0 = backward. Stamps must not decrease. */
+ * gain. DIRECTION: flags bit 0 = backward. Stamps must not decrease.
+ *
+ * MODE sets a per-voice setting: the voice field names the voice and flags
+ * name the settings the record holds. ZZ9K_VOICE_MODE_INTERP: arg0 = the
+ * voice's interpolation, ZZ9K_VOICE_INTERP_INHERIT (follow the session
+ * default), _NEAREST, _LINEAR or _CUBIC, and arg1 must be 0. A record with
+ * no flag, an unknown flag, an arg0 above ZZ9K_VOICE_INTERP_CUBIC or a
+ * nonzero arg1 is rejected and the voice keeps its setting. The setting
+ * applies from the record's frame and stays across START, STOP and RESET. A
+ * sound that a restart hands to a fade slot keeps the interpolation it had.
+ * ENVELOPE is an op number of a later feature; the firmware rejects it until
+ * it has it. CONFIG (ZZ9K_VOICE_FEATURE_CONFIG) carries
+ * session-wide settings: flags name the settings the record holds, the voice
+ * field is ignored, and every named setting is validated before any is
+ * applied, so a record that holds a bad value changes nothing.
+ * ZZ9K_VOICE_CONFIG_RAMP: arg0 = ramp length in frames, 0 to
+ * ZZ9K_VOICE_RAMP_MAX_FRAMES; with a length above 0, volume changes,
+ * starts, stops and restarts fade over that many frames instead of
+ * stepping, and a restart of a sounding voice lets the old sound fade out in
+ * one of ZZ9K_VOICE_FADE_SLOTS slots. ZZ9K_VOICE_CONFIG_LIMITER: arg1 = 0
+ * (off) or 1 (on), the static soft knee after the master gain: a sample up
+ * to 24576 in magnitude passes unchanged, a louder one is bent toward, and
+ * never onto, the 16-bit rails. A record that names only the limiter must
+ * carry arg0 = 0; a record that names only the ramp ignores arg1 (legacy);
+ * a record that names both carries the ramp length in arg0 and the limiter
+ * setting in arg1. ZZ9K_VOICE_CONFIG_INTERP: arg0 = the session default
+ * interpolation, ZZ9K_VOICE_INTERP_NEAREST to _CUBIC, arg1 must be 0, and
+ * the record names no other setting; every voice without a MODE setting
+ * reads with it from the record's frame. A record with no flag, an unknown
+ * flag, a ramp length above the maximum, a limiter value above 1, a
+ * limiter-only record with a nonzero arg0 or an interpolation record that
+ * breaks the rules above is rejected whole. */
 #define ZZ9K_VOICE_OP_START     1U
 #define ZZ9K_VOICE_OP_LOOP      2U
 #define ZZ9K_VOICE_OP_SET       3U
 #define ZZ9K_VOICE_OP_STOP      4U
 #define ZZ9K_VOICE_OP_MASTER    5U
 #define ZZ9K_VOICE_OP_DIRECTION 6U
+#define ZZ9K_VOICE_OP_MODE      7U
+#define ZZ9K_VOICE_OP_ENVELOPE  8U
+#define ZZ9K_VOICE_OP_CONFIG    9U
 
 #define ZZ9K_VOICE_SET_RATE     0x0001U
 #define ZZ9K_VOICE_SET_VOLUME   0x0002U
 #define ZZ9K_VOICE_SET_RATE_HZ  0x0004U /* rate is Hz, else a Paula period */
 #define ZZ9K_VOICE_DIR_BACKWARD 0x0001U
+
+#define ZZ9K_VOICE_CONFIG_RAMP    0x0001U
+#define ZZ9K_VOICE_CONFIG_LIMITER 0x0002U
+#define ZZ9K_VOICE_CONFIG_INTERP  0x0004U
+
+/* MODE flags: the settings a MODE record holds. */
+#define ZZ9K_VOICE_MODE_INTERP    0x0001U
+
+/* Interpolation selectors of MODE (arg0) and of the CONFIG default (arg0).
+ * INHERIT is MODE only: the voice follows the session default, which is
+ * linear when the session was opened with ZZ9K_VOICE_OPEN_FLAG_LINEAR and
+ * nearest otherwise until a CONFIG record changes it. */
+#define ZZ9K_VOICE_INTERP_INHERIT 0U
+#define ZZ9K_VOICE_INTERP_NEAREST 1U
+#define ZZ9K_VOICE_INTERP_LINEAR  2U
+#define ZZ9K_VOICE_INTERP_CUBIC   3U
+
+#define ZZ9K_VOICE_RAMP_MAX_FRAMES 512U
+#define ZZ9K_VOICE_FADE_SLOTS      32U
 
 #define ZZ9K_VOICE_MASTER_UNITY 256U
 
@@ -252,6 +305,36 @@ typedef struct ZZ9KVoiceRecord {
 #define ZZ9K_VOICE_STATUS_POLL_GAP_OFFSET      36U /* u32 */
 #define ZZ9K_VOICE_JITTER_NONE                 0xFFFFFFFFU
 
+/* Extended status. The firmware writes the features word at open (and keeps
+ * it in every status write); a firmware without it leaves all four words
+ * zero, which reads as no features. A client checks a feature bit before it
+ * sends the records of that feature. active_mask, ends and
+ * output_delay_frames are reserved for the voice-ended reporting and the
+ * oversampling units and read 0 until then. */
+#define ZZ9K_VOICE_STATUS_FEATURES_OFFSET      40U /* u32 */
+#define ZZ9K_VOICE_STATUS_ACTIVE_MASK_OFFSET   44U /* u32 */
+#define ZZ9K_VOICE_STATUS_ENDS_OFFSET          48U /* u32 */
+#define ZZ9K_VOICE_STATUS_OUTPUT_DELAY_OFFSET  52U /* u16 */
+
+/* Feature bits of the features word. CONFIG is the CONFIG record itself;
+ * RAMP says that a ramp length set with it is qualified: the firmware has
+ * been measured with 32 voices and a full fade pool inside its render
+ * budget. LIMITER says the same of the soft knee set with
+ * ZZ9K_VOICE_CONFIG_LIMITER. CUBIC says that cubic interpolation, the
+ * session default or a voice's, is qualified the same way, and VOICE_INTERP
+ * that the MODE record and the CONFIG default interpolation are. A firmware
+ * may accept a setting before it advertises the bit, so that the setting can
+ * be qualified; a client uses the setting outside a qualification run only
+ * once the bit is set. The firmware sets a bit only for a feature it has. */
+#define ZZ9K_VOICE_FEATURE_RAMP         0x0001U
+#define ZZ9K_VOICE_FEATURE_LIMITER      0x0002U
+#define ZZ9K_VOICE_FEATURE_CUBIC        0x0004U
+#define ZZ9K_VOICE_FEATURE_VOICE_INTERP 0x0008U
+#define ZZ9K_VOICE_FEATURE_OVERSAMPLE   0x0010U
+#define ZZ9K_VOICE_FEATURE_ENVELOPE     0x0020U
+#define ZZ9K_VOICE_FEATURE_EVENTS       0x0040U
+#define ZZ9K_VOICE_FEATURE_CONFIG       0x0080U
+
 #define ZZ9K_VOICE_STATE_CLOSED 0U
 #define ZZ9K_VOICE_STATE_OPEN   1U /* open, no record yet */
 #define ZZ9K_VOICE_STATE_LIVE   2U
@@ -294,6 +377,16 @@ typedef struct ZZ9KVoiceJitter {
   uint32_t margin_min_us;   /* ZZ9K_VOICE_JITTER_NONE until the first period */
   uint32_t poll_gap_max_us; /* 0 on firmware without the telemetry */
 } ZZ9KVoiceJitter;
+
+/* Host-order extended status, read by zz9k_voice_ext_status_read(). Header
+ * only, like ZZ9KVoiceJitter: ZZ9KVoiceStatus and the library calls stay as
+ * they are. */
+typedef struct ZZ9KVoiceExtStatus {
+  uint32_t features;            /* ZZ9K_VOICE_FEATURE_*, 0 on old firmware */
+  uint32_t active_mask;         /* reserved: voices sounding, bit per voice */
+  uint32_t ends;                /* reserved: voices that ended by themselves */
+  uint16_t output_delay_frames; /* reserved: delay of the output stage */
+} ZZ9KVoiceExtStatus;
 
 /* ---- Host-facing descriptors ---- */
 
@@ -559,6 +652,20 @@ static inline void zz9k_voice_jitter_read(const volatile uint8_t *block,
       zz9k_voice_read32(block, ZZ9K_VOICE_STATUS_POLL_GAP_OFFSET);
 }
 
+/* Reads the extended status words with the same tear protection and cache
+ * rule. A firmware that does not write them leaves the words zero, which
+ * reads as no features. */
+static inline void zz9k_voice_ext_status_read(const volatile uint8_t *block,
+                                              ZZ9KVoiceExtStatus *ext)
+{
+  ext->features = zz9k_voice_read32(block, ZZ9K_VOICE_STATUS_FEATURES_OFFSET);
+  ext->active_mask =
+      zz9k_voice_read32(block, ZZ9K_VOICE_STATUS_ACTIVE_MASK_OFFSET);
+  ext->ends = zz9k_voice_read32(block, ZZ9K_VOICE_STATUS_ENDS_OFFSET);
+  ext->output_delay_frames =
+      zz9k_voice_load_be16(block + ZZ9K_VOICE_STATUS_OUTPUT_DELAY_OFFSET);
+}
+
 /* Encode and decode one record (big-endian wire form). */
 static inline void zz9k_voice_record_encode(ZZ9KVoiceRecordWire *wire,
                                             const ZZ9KVoiceRecord *record)
@@ -648,6 +755,80 @@ static inline void zz9k_voice_build_direction(ZZ9KVoiceRecord *record,
 {
   zz9k_voice_build_record(record, stamp, voice, ZZ9K_VOICE_OP_DIRECTION,
                           backward ? ZZ9K_VOICE_DIR_BACKWARD : 0U, 0U, 0U);
+}
+
+/* A CONFIG record carrying the settings named by flags (ZZ9K_VOICE_CONFIG_*);
+ * the voice field is 0. The firmware rejects the record whole when flags is
+ * 0 or holds an unknown bit, when RAMP is named and arg0 is above
+ * ZZ9K_VOICE_RAMP_MAX_FRAMES, when LIMITER is named and arg1 is above 1, when
+ * LIMITER is named without RAMP and arg0 is not 0, or when INTERP is named
+ * with another setting, with an arg0 outside NEAREST to CUBIC or with a
+ * nonzero arg1. arg1 is ignored when only RAMP is named. */
+static inline void zz9k_voice_build_config(ZZ9KVoiceRecord *record,
+                                           uint32_t stamp, uint16_t flags,
+                                           uint32_t arg0, uint32_t arg1)
+{
+  zz9k_voice_build_record(record, stamp, 0U, ZZ9K_VOICE_OP_CONFIG, flags, arg0,
+                          arg1);
+}
+
+/* Ramp length in frames, 0 (off) to ZZ9K_VOICE_RAMP_MAX_FRAMES. Check
+ * ZZ9K_VOICE_FEATURE_CONFIG first: firmware without CONFIG counts the record
+ * as rejected and keeps instant volume changes. */
+static inline void zz9k_voice_build_config_ramp(ZZ9KVoiceRecord *record,
+                                                uint32_t stamp,
+                                                uint32_t frames)
+{
+  zz9k_voice_build_config(record, stamp, ZZ9K_VOICE_CONFIG_RAMP, frames, 0U);
+}
+
+/* The static soft knee, on (nonzero) or off (0), with arg0 = 0 as a
+ * limiter-only record requires. The ramp length is not touched. Check
+ * ZZ9K_VOICE_FEATURE_CONFIG first, and ZZ9K_VOICE_FEATURE_LIMITER before
+ * relying on the knee on firmware that may predate it. */
+static inline void zz9k_voice_build_config_limiter(ZZ9KVoiceRecord *record,
+                                                   uint32_t stamp,
+                                                   int enabled)
+{
+  zz9k_voice_build_config(record, stamp, ZZ9K_VOICE_CONFIG_LIMITER, 0U,
+                          enabled ? 1U : 0U);
+}
+
+/* Ramp length and limiter in one record, applied together or not at all: a
+ * bad ramp length leaves the limiter as it was and the other way round. */
+static inline void zz9k_voice_build_config_ramp_limiter(
+    ZZ9KVoiceRecord *record, uint32_t stamp, uint32_t frames, int enabled)
+{
+  zz9k_voice_build_config(
+      record, stamp, ZZ9K_VOICE_CONFIG_RAMP | ZZ9K_VOICE_CONFIG_LIMITER,
+      frames, enabled ? 1U : 0U);
+}
+
+/* A MODE record: voice `voice` reads its sample with `interp`
+ * (ZZ9K_VOICE_INTERP_*). Check ZZ9K_VOICE_FEATURE_VOICE_INTERP first, and
+ * ZZ9K_VOICE_FEATURE_CUBIC before asking for cubic: firmware without MODE
+ * counts the record as rejected, and the voice keeps the session default. */
+static inline void zz9k_voice_build_mode_interp(ZZ9KVoiceRecord *record,
+                                                uint32_t stamp, uint8_t voice,
+                                                uint32_t interp)
+{
+  zz9k_voice_build_record(record, stamp, voice, ZZ9K_VOICE_OP_MODE,
+                          ZZ9K_VOICE_MODE_INTERP, interp, 0U);
+}
+
+/* The session default interpolation, ZZ9K_VOICE_INTERP_NEAREST to _CUBIC
+ * (INHERIT is not a default and is rejected). arg1 is 0 and no other setting
+ * is named, as the firmware requires. The default applies to every voice that
+ * has no MODE setting of its own, from the record's frame on, and replaces
+ * the ZZ9K_VOICE_OPEN_FLAG_LINEAR choice. Check ZZ9K_VOICE_FEATURE_CONFIG and
+ * ZZ9K_VOICE_FEATURE_VOICE_INTERP first, and ZZ9K_VOICE_FEATURE_CUBIC before
+ * asking for cubic. */
+static inline void zz9k_voice_build_config_interp(ZZ9KVoiceRecord *record,
+                                                  uint32_t stamp,
+                                                  uint32_t interp)
+{
+  zz9k_voice_build_config(record, stamp, ZZ9K_VOICE_CONFIG_INTERP, interp,
+                          0U);
 }
 
 /* Copies up to count records into the ring behind the session's write

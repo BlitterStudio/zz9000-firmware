@@ -10,13 +10,23 @@
 #include "zzm_loader.h"
 #include "zzm_manifest.h"
 #include "zzm_runtime.h"
+#include "zzm_registry.h"
 #include "ff.h"
 
-/* Single-threaded host backing for the loader's cross-core session lock. */
-int smp_cpu_id(void) { return 0; }
+/* Host backing for the loader's cross-core session lock. The test picks the
+ * "core" that runs next; a raw spin on a held lock would hang the real
+ * firmware, so the mock counts it instead of looping. */
+static int mock_cpu;
+static unsigned mock_blocked_spins;
+int smp_cpu_id(void) { return mock_cpu; }
 uint32_t smp_local_irq_save(void) { return 0U; }
 void smp_local_irq_restore(uint32_t flags) { (void)flags; }
-void smp_raw_spin_lock(volatile uint32_t *word) { *word = 1U; }
+void smp_raw_spin_lock(volatile uint32_t *word)
+{
+    if (*word)
+        mock_blocked_spins++;
+    *word = 1U;
+}
 void smp_raw_spin_unlock(volatile uint32_t *word) { *word = 0U; }
 int smp_raw_spin_try_lock(volatile uint32_t *word)
 {
@@ -559,6 +569,285 @@ static void test_v1_codec_begin_requeues_until_loaded(void)
     free(file);
 }
 
+/* Core 1 holds the session-begin guard for a load step; core 0 runs next. */
+static void hold_guard_on_core1(void)
+{
+    mock_cpu = 1;
+    CHECK(zzm_loader_session_begin_enter() == 1);
+    mock_cpu = 0;
+}
+
+static void release_guard_on_core1(void)
+{
+    mock_cpu = 1;
+    zzm_loader_session_begin_unlock();
+    mock_cpu = 0;
+}
+
+static unsigned fake_dispatch_calls;
+static int fake_dispatch_queue_only(uint32_t module_id)
+{
+    (void)module_id;
+    fake_dispatch_calls++;
+    return ZZM_LOAD_FAILED;
+}
+
+static uint32_t module_ref_count(uint32_t module_id)
+{
+    zzm_status_t status;
+
+    CHECK(zzm_loader_status_by_id(module_id, &status));
+    return status.ref_count;
+}
+
+static void test_core0_video_begin_never_waits_for_loader_guard(void)
+{
+    const uint32_t image_size = 128U * 1024U;
+    const uint32_t file_size = ZZM_HEADER_SIZE + image_size;
+    uint8_t *file = calloc(1U, file_size);
+    zzm_header_t header = valid_header(image_size);
+    struct SDKVideoStreamBegin begin = {
+        .codec = SDK_VIDEO_CODEC_MPEG2,
+        .container = SDK_VIDEO_CONTAINER_MPEG_PS,
+        .width = 16U,
+        .height = 16U,
+        .output_format = SDK_VIDEO_OUTPUT_DIRECT_OVERLAY,
+    };
+    struct SDKVideoStreamResult result;
+    zzm_status_t module;
+    unsigned blocked;
+    unsigned opens;
+    unsigned passes = 0U;
+    uint16_t status;
+    void *slot;
+    int i;
+
+    CHECK(file != NULL);
+    if (!file)
+        return;
+    slot = mmap((void *)(uintptr_t)header.slot_load_address, 2U << 20,
+                PROT_READ | PROT_WRITE | PROT_EXEC,
+                MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0);
+    CHECK(slot != MAP_FAILED);
+    if (slot == MAP_FAILED) {
+        free(file);
+        return;
+    }
+    memcpy(file, &header, sizeof(header));
+    file[ZZM_HEADER_SIZE] = 0x31U; /* xor %eax, %eax */
+    file[ZZM_HEADER_SIZE + 1U] = 0xc0U;
+    file[ZZM_HEADER_SIZE + 2U] = 0xc3U; /* ret */
+    loader_open_result = FR_OK;
+    set_loader_file(file, file_size, 0);
+    zzm_loader_boot_load();
+    sdk_video_stream_init();
+
+    /* Core 1 is mid-load. Core 0 must answer "in progress" at once: no
+     * wait on the guard, no load step, no registry use. */
+    hold_guard_on_core1();
+    blocked = mock_blocked_spins;
+    opens = loader_open_calls;
+    for (i = 0; i < 3; i++) {
+        status = sdk_video_stream_begin(&begin, &result);
+        CHECK(status == SDK_TASK_IN_PROGRESS);
+    }
+    CHECK(mock_blocked_spins == blocked);
+    CHECK(loader_open_calls == opens);
+    CHECK(zzm_loader_status_by_id(ZZM_MODULE_MPEG2, &module));
+    CHECK(module.state == ZZM_STATE_AVAILABLE);
+
+    /* The same holds for the loader entry points a core-0 caller can reach
+     * directly. */
+    CHECK(zzm_loader_ensure_loaded(ZZM_MODULE_MPEG2) == ZZM_LOAD_IN_PROGRESS);
+    CHECK(zzm_loader_acquire(ZZM_MODULE_MPEG2) == ZZM_LOAD_IN_PROGRESS);
+    CHECK(zzm_registry_sdk_status(ZZM_MODULE_MPEG2) == SDK_TASK_IN_PROGRESS);
+    CHECK(mock_blocked_spins == blocked);
+    CHECK(loader_open_calls == opens);
+    release_guard_on_core1();
+
+    /* Once core 1 lets go, begin loads the module and succeeds. */
+    do {
+        status = sdk_video_stream_begin(&begin, &result);
+        passes++;
+    } while (status == SDK_TASK_IN_PROGRESS && passes < 64U);
+    CHECK(status == SDK_STATUS_OK);
+    CHECK(result.session != 0U);
+    CHECK(loader_open_calls > opens);
+    CHECK(module_ref_count(ZZM_MODULE_MPEG2) == 1U);
+
+    /* A close on core 0 while core 1 holds the guard keeps the reference
+     * and hands the release to the next poll pass. */
+    hold_guard_on_core1();
+    CHECK(sdk_video_stream_close(result.session, &result) == SDK_STATUS_OK);
+    CHECK(mock_blocked_spins == blocked);
+    CHECK(module_ref_count(ZZM_MODULE_MPEG2) == 1U);
+    zzm_loader_poll(1U);
+    CHECK(module_ref_count(ZZM_MODULE_MPEG2) == 1U);
+    release_guard_on_core1();
+    zzm_loader_poll(2U);
+    CHECK(module_ref_count(ZZM_MODULE_MPEG2) == 0U);
+    CHECK(mock_blocked_spins == blocked);
+
+    /* With core 1 online the dispatcher only queues the load; core 0 must
+     * not read that as a failure while the module is still available. */
+    fake_dispatch_calls = 0U;
+    zzm_loader_set_load_dispatch(fake_dispatch_queue_only);
+    zzm_loader_boot_load();
+    CHECK(zzm_loader_ensure_loaded(ZZM_MODULE_MPEG2) == ZZM_LOAD_IN_PROGRESS);
+    CHECK(fake_dispatch_calls == 1U);
+    zzm_loader_set_load_dispatch(0);
+    CHECK(munmap(slot, 2U << 20) == 0);
+    free(file);
+}
+
+static void test_core0_image_begin_never_waits_for_loader_guard(void)
+{
+    const uint32_t image_size = 16U;
+    uint8_t provider_file[ZZM_HEADER_SIZE + 16U] = { 0 };
+    uint8_t webp_file[ZZM_HEADER_SIZE + 16U] = { 0 };
+    zzm_header_t provider = valid_header(image_size);
+    zzm_header_t webp = valid_header(image_size);
+    struct SDKImageStreamBegin begin = {
+        .codec = SDK_IMAGE_CODEC_WEBP,
+        .output_mode = SDK_IMAGE_OUTPUT_TILE_BUFFER,
+        .output_format = SDK_SURFACE_FORMAT_BGRA8888,
+        .tile_handle = 1U,
+        .tile_stride = 4U,
+        .tile_rows = 1U,
+        .tile_address = (uintptr_t)provider_file,
+        .tile_length = 4U,
+        .core1_affine = 1U,
+    };
+    struct SDKImageStreamResult result;
+    unsigned blocked;
+    unsigned opens;
+    void *slot;
+    int i;
+
+    provider.provided_count = 1U;
+    provider.provided[0].service_id = 0xfaceU;
+    provider.provided[0].min_version = 1U;
+    webp.module_id = ZZM_MODULE_WEBP;
+    webp.slot_load_address = zzm_slots[2].address;
+    webp.init_entry = webp.slot_load_address;
+    strcpy(webp.name, "WEBP");
+    webp.required_count = 1U;
+    webp.required[0] = provider.provided[0];
+    memcpy(provider_file, &provider, sizeof(provider));
+    memcpy(webp_file, &webp, sizeof(webp));
+    slot = mmap((void *)(uintptr_t)provider.slot_load_address, 2U << 20,
+                PROT_READ | PROT_WRITE | PROT_EXEC,
+                MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0);
+    CHECK(slot != MAP_FAILED);
+    if (slot == MAP_FAILED)
+        return;
+    loader_open_result = FR_OK;
+    set_loader_file(0, 0U, 0);
+    set_loader_module_file(ZZM_MODULE_MPEG2, provider_file,
+                           sizeof(provider_file));
+    set_loader_module_file(ZZM_MODULE_WEBP, webp_file, sizeof(webp_file));
+    zzm_loader_boot_load();
+
+    hold_guard_on_core1();
+    blocked = mock_blocked_spins;
+    opens = loader_open_calls;
+    for (i = 0; i < 3; i++)
+        CHECK(sdk_image_stream_begin(&begin, &result) == SDK_TASK_IN_PROGRESS);
+    CHECK(mock_blocked_spins == blocked);
+    CHECK(loader_open_calls == opens);
+    release_guard_on_core1();
+
+    /* Released: the begin now takes the guard and starts the load. */
+    CHECK(sdk_image_stream_begin(&begin, &result) == SDK_TASK_IN_PROGRESS);
+    CHECK(loader_open_calls > opens);
+    CHECK(mock_blocked_spins == blocked);
+    /* The load is left half done with its file open; a boot scan drops it. */
+    zzm_loader_boot_load();
+    CHECK(munmap(slot, 2U << 20) == 0);
+}
+
+const zzm_services_t *zzm_runtime_services_v3(void)
+{
+    static zzm_services_t services;
+
+    return &services;
+}
+
+static void acquire_minigl(void)
+{
+    unsigned passes = 0U;
+    int result;
+
+    do {
+        result = zzm_loader_acquire(ZZM_MODULE_MINIGL);
+        passes++;
+    } while (result == ZZM_LOAD_IN_PROGRESS && passes < 64U);
+    CHECK(result == ZZM_LOAD_READY);
+}
+
+/* A release core 0 deferred belongs to the module lifetime it was made in.
+ * When core 1 restarts before a poll applies it, the new lifetime must keep
+ * every reference its clients took. */
+static void test_core0_deferred_release_dies_with_its_module_lifetime(void)
+{
+    const uint32_t image_size = 16U;
+    uint8_t file[ZZM_V3_HEADER_SIZE + 16U] = { 0 };
+    zzm_v3_header_t header = valid_v3_header(image_size);
+    zzm_v3_capabilities_t caps = valid_v3_capabilities();
+    void *slot;
+
+    memcpy(file, &header, sizeof(header));
+    file[ZZM_V3_HEADER_SIZE] = 0x31U; /* xor %eax, %eax */
+    file[ZZM_V3_HEADER_SIZE + 1U] = 0xc0U;
+    file[ZZM_V3_HEADER_SIZE + 2U] = 0xc3U; /* ret */
+    slot = mmap((void *)(uintptr_t)header.slot_load_address, 2U << 20,
+                PROT_READ | PROT_WRITE | PROT_EXEC,
+                MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0);
+    CHECK(slot != MAP_FAILED);
+    if (slot == MAP_FAILED)
+        return;
+    loader_open_result = FR_OK;
+    set_loader_file(file, sizeof(file), 1);
+    zzm_loader_set_v3_capabilities(&caps);
+    zzm_loader_boot_load();
+    acquire_minigl();
+    CHECK(module_ref_count(ZZM_MODULE_MINIGL) == 1U);
+
+    /* Core 0 releases while core 1 holds the guard; core 1 then faults, and
+     * the restart discards the module before any poll applies the release. */
+    hold_guard_on_core1();
+    zzm_loader_release(ZZM_MODULE_MINIGL);
+    CHECK(module_ref_count(ZZM_MODULE_MINIGL) == 1U);
+    release_guard_on_core1();
+    zzm_loader_forget_core1_modules();
+    CHECK(module_ref_count(ZZM_MODULE_MINIGL) == 0U);
+    acquire_minigl();
+    CHECK(module_ref_count(ZZM_MODULE_MINIGL) == 1U);
+    zzm_loader_poll(1U);
+    CHECK(module_ref_count(ZZM_MODULE_MINIGL) == 1U);
+
+    /* A release that finds the module no longer loaded has no reference
+     * left to drop and must not wait for the next lifetime either. */
+    zzm_loader_forget_core1_modules();
+    hold_guard_on_core1();
+    zzm_loader_release(ZZM_MODULE_MINIGL);
+    release_guard_on_core1();
+    acquire_minigl();
+    zzm_loader_poll(2U);
+    CHECK(module_ref_count(ZZM_MODULE_MINIGL) == 1U);
+
+    /* A release deferred in the live lifetime still lands. */
+    hold_guard_on_core1();
+    zzm_loader_release(ZZM_MODULE_MINIGL);
+    release_guard_on_core1();
+    zzm_loader_poll(3U);
+    CHECK(module_ref_count(ZZM_MODULE_MINIGL) == 0U);
+
+    zzm_loader_boot_load();
+    zzm_loader_set_v3_capabilities(NULL);
+    CHECK(munmap(slot, 2U << 20) == 0);
+}
+
 int main(int argc, char **argv)
 {
     uint8_t image[16] = { 1, 2, 3, 4 };
@@ -651,6 +940,9 @@ int main(int argc, char **argv)
     test_legacy_module_failure_poisoning();
     test_webp_begin_requeues_for_loading_dependency();
     test_v1_codec_begin_requeues_until_loaded();
+    test_core0_video_begin_never_waits_for_loader_guard();
+    test_core0_image_begin_never_waits_for_loader_guard();
+    test_core0_deferred_release_dies_with_its_module_lifetime();
     if (argc == 2)
         check_kit_minigl(argv[1]);
     loader_open_calls = 0U;

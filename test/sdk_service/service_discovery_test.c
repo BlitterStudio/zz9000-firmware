@@ -63,17 +63,19 @@ int main(void)
 			       (unsigned)expected[i].id);
 			return 1;
 		}
-		/* The static audio descriptor never carries the voice flag:
-		 * it depends on the bus (checked after the loop). */
+		/* The static audio descriptor never carries the voice flags:
+		 * they depend on the bus (checked after the loop). */
 		if (expected[i].id == SDK_SERVICE_AUDIO &&
-		    (service->flags & SDK_SERVICE_FLAG_AUDIO_VOICE) != 0U) {
+		    (service->flags & (SDK_SERVICE_FLAG_AUDIO_VOICE |
+				       SDK_SERVICE_FLAG_AUDIO_VOICE_STEREO)) != 0U) {
 			puts("service discovery: static audio flags carry voice");
 			return 1;
 		}
 	}
 
-	/* The voice engine is advertised on Zorro III only; the other flag
-	 * that follows the bus is the memory media input flag. */
+	/* The voice engine and its stereo formats are advertised on Zorro III
+	 * only; the other flag that follows the bus is the memory media input
+	 * flag. */
 	for (i = 0; i < sizeof(expected) / sizeof(expected[0]); i++) {
 		uint32_t z3_flags, z2_flags;
 
@@ -92,16 +94,13 @@ int main(void)
 			return 1;
 		}
 		if (expected[i].id == SDK_SERVICE_AUDIO) {
-			if ((z3_flags & SDK_SERVICE_FLAG_AUDIO_VOICE) == 0U ||
-			    (z2_flags & SDK_SERVICE_FLAG_AUDIO_VOICE) != 0U ||
-			    (z3_flags & ~SDK_SERVICE_FLAG_AUDIO_VOICE) !=
-				service->flags) {
-				puts("service discovery: voice flag is not Zorro III only");
-				return 1;
-			}
-			if (((z3_flags | z2_flags | service->flags) &
-			     SDK_SERVICE_FLAG_AUDIO_VOICE_STEREO) != 0U) {
-				puts("service discovery: stereo voice flag is advertised");
+			const uint32_t voice = SDK_SERVICE_FLAG_AUDIO_VOICE |
+				SDK_SERVICE_FLAG_AUDIO_VOICE_STEREO;
+
+			if ((z3_flags & voice) != voice ||
+			    (z2_flags & voice) != 0U ||
+			    (z3_flags & ~voice) != service->flags) {
+				puts("service discovery: voice flags are not Zorro III only");
 				return 1;
 			}
 		} else if (expected[i].id == SDK_SERVICE_MEMORY) {

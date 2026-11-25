@@ -141,6 +141,42 @@ image validation, BSS zeroing, cache maintenance, constructor/start work and
 atomic interface registration succeed, the module is **loaded** and may accept
 sessions.
 
+Each load runs on core 1 as a series of short steps (open, one read-and-hash
+chunk, BSS clear, cache maintenance, module init). Core 1 holds the
+session-begin guard for the length of a step, with its interrupts masked. Core
+0 serves the Zorro registers, RTG operations and the audio poll, so it never
+waits for that guard. A session begin, a module lookup or a module acquire
+that core 0 makes while the guard is held returns `SDK_TASK_IN_PROGRESS`
+(65534) at once, before it touches any module state, and the Amiga side
+retries as it does for any load in progress. A reference release that core 0
+makes while the guard is held stays counted and is applied by the next
+main-loop poll that gets the guard. It is applied only if the module is still
+in the loaded lifetime it was made in: a release for a module that is not
+loaded is dropped, and one still pending when the lifetime ends (unload,
+fault, failed load, cancel, core-1 restart) is discarded, so it never takes a
+reference from the next load of that module. Retries of an in-progress begin
+are not logged; failures still are.
+
+Defining `ZZM_LOAD_BENCH` enables a firmware-only load instrument that times
+each load step on core 1 and keeps the longest step per module and phase. The
+core-0 main loop prints it at most once a second, only when a maximum changed
+and no voice session is open:
+
+```
+make -C ZZ9000_proto.sdk/ZZ9000OS EXTRA_CFLAGS='-DZZM_LOAD_BENCH'
+```
+
+```
+ZZM-BENCH mod=MPEG2 open=12us read=1480us bss=210us dflush=380us iflush=95us init=251340us fail=0us steps=57 t=123456ms
+```
+
+`open` is the first step (storage check, quota, file open, and for v1 images
+the dependency loads), `read` one 12 KiB read-and-hash chunk, `bss`, `dflush`
+and `iflush` one 64 KiB clear, data-cache flush or instruction-cache
+invalidate chunk, `init` the module's init call and `fail` the cleanup after a
+failed load. `steps` counts every step recorded for the module and `t` is
+milliseconds since boot.
+
 An accepted session takes a strong module reference. A pending host-owned
 callback or future job would also take a strong reference; a transient lookup
 does not. On session close, release the reference only after all of that

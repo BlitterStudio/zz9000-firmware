@@ -10,8 +10,8 @@
 
 #define ZZ9K_LIBRARY_NAME "zz9k.library"
 #define ZZ9K_LIBRARY_VERSION 2
-#define ZZ9K_LIBRARY_REVISION 43
-#define ZZ9K_LIBRARY_ID_STRING "zz9k.library 2.43 (22.11.2026)"
+#define ZZ9K_LIBRARY_REVISION 44
+#define ZZ9K_LIBRARY_ID_STRING "zz9k.library 2.44 (23.11.2026)"
 /* Static clients proxy async completions through the resident library.
  * Revision 36 routes a foreign completion seen during a synchronous call
  * into the pending-request registry. Revisions 34 and 35 drop it, so a
@@ -62,6 +62,13 @@
 /* Revision 43 accepts ZZ9K_VOICE_OPEN_FLAG_LOW_LATENCY in ZZ9KVoiceOpen().
  * It adds no calls. Revision 42 refuses the flag as an unknown bit. */
 #define ZZ9K_LIBRARY_MIN_REVISION_VOICE_LOW_LATENCY 43
+/* Revision 44 tags every request an opener's task makes with the opener's
+ * client id. Before it, ZZ9KVoiceOpen, Close and Reset and the other host
+ * helpers that wait for their reply sent client 0, so a voice session and
+ * its buffers were owned by client 0 whoever opened them, and a client
+ * release never ended them. It adds no calls. A task that never opened the
+ * library still sends 0. */
+#define ZZ9K_LIBRARY_MIN_REVISION_VOICE_CLIENT_ID 44
 
 #define ZZ9K_LVO_OPEN (-6)
 #define ZZ9K_LVO_CLOSE (-12)
