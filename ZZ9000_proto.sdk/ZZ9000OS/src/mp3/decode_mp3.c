@@ -134,6 +134,13 @@ enum mp3_input_state mp3_input_state(const struct mp3_decode_ctx *ctx) {
 	 * final frame or trailing junk looks like: the call skips the rest. */
 	if (d->mp3d.header[0] != 0xff)
 		return MP3_INPUT_DAMAGED;
+	/* A Xing or Info header declares the sample count (detected_samples,
+	 * after minimp3 removes the encoder delay and padding). Input that ends
+	 * on a frame boundary with fewer samples delivered lost whole frames.
+	 * Streams without that header declare no length, so a cut on a frame
+	 * boundary cannot be told from a complete file. */
+	if (d->detected_samples && d->cur_sample < d->detected_samples)
+		return MP3_INPUT_DAMAGED;
 	return MP3_INPUT_COMPLETE;
 }
 

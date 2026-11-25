@@ -553,7 +553,9 @@ enum ZZ9KAudioSampleFormat {
  * EXPECT_END says the source range is a complete MP3 stream. The firmware
  * then fails the call with ZZ9K_STATUS_BAD_REQUEST when the decode stops
  * before the end of the stream (a cut-off last frame, bytes after the last
- * frame that are no tag, a stream the decoder cannot continue). A
+ * frame that are no tag, fewer samples than a Xing or Info header declares,
+ * a stream the decoder cannot continue). Whole frames missing from a stream
+ * without such a header are not detectable. A
  * trailing ID3v1 or APEv2 tag is not a fault. Running out of output space is
  * not a fault either: the call succeeds with bytes_consumed short of the
  * source length and ZZ9K_AUDIO_DECODE_RESULT_END clear. The contents of the

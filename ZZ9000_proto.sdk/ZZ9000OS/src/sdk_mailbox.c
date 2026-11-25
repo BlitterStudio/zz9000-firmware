@@ -3161,10 +3161,14 @@ static uint16_t mp3_decode_compute(struct mp3_decode_ctx *ctx,
 	                                             (int)(p->dst_cap / 2U));
 	/* EXPECT_END: the input is a complete stream, so a truncated last
 	 * frame, trailing bytes that are no frame, or frames the decoder
-	 * stopped short of are a bad request. A full output buffer is not. */
+	 * stopped short of are a bad request. A full output buffer is not.
+	 * The decoder has already written the destination, so flush it before
+	 * handing the buffer back on this path too. */
 	if ((p->flags & SDK_AUDIO_DECODE_FLAG_EXPECT_END) != 0U &&
-	    !mp3_expect_end_ok(ctx, bytes_written, p->dst_cap))
+	    !mp3_expect_end_ok(ctx, bytes_written, p->dst_cap)) {
+		Xil_DCacheFlushRange((INTPTR)dst_ptr, p->dst_cap);
 		return SDK_STATUS_BAD_REQUEST;
+	}
 	bytes_consumed = (uint32_t)mp3_get_bytes_consumed(ctx);
 	if (bytes_consumed > p->src_len)
 		bytes_consumed = p->src_len;

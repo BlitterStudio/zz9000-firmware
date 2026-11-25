@@ -249,6 +249,28 @@ static void expect_damaged(const char *what, const struct buf *in,
 	      o.consumed, (unsigned long)in->n, o.end);
 }
 
+/* Offsets just past each frame, walking from the first frame at start. */
+static size_t frame_ends(const struct buf *b, size_t start, size_t *ends,
+                         size_t max)
+{
+	mp3dec_t dec;
+	mp3dec_frame_info_t info;
+	size_t pos = start;
+	size_t n = 0;
+
+	mp3dec_init(&dec);
+	while (pos < b->n && n < max) {
+		int samples = mp3dec_decode_frame(&dec, b->p + pos,
+		                                  (int)(b->n - pos), NULL, &info);
+
+		if (samples <= 0 || info.frame_bytes <= 0)
+			break;
+		pos += (size_t)info.frame_bytes;
+		ends[n++] = pos;
+	}
+	return n;
+}
+
 static void test_fixture(const char *dir, const char *name,
                          size_t expected_frames, unsigned channels,
                          int expect_vbr_tag)
@@ -357,6 +379,53 @@ static void test_fixture(const char *dir, const char *name,
 	v = cat(NULL, 0, clean.p, clean.n - 100U, id3v1, id3v1_len);
 	expect_damaged("input cut by 100 bytes, then ID3v1", &v, clean_written);
 	free(v.p);
+
+	/* Whole frames cut off. A Xing or Info header declares the length, so
+	 * that is damage. A stream without one declares nothing: the cut is
+	 * indistinguishable from a complete file and is accepted. */
+	{
+		static size_t ends[4096];
+		size_t nframes = frame_ends(&clean, start, ends, 4096U);
+		unsigned cut;
+
+		CHECK(nframes > 3U && ends[nframes - 1U] == clean.n,
+		      "%s: frame walk found %lu frames, last ends at %lu of %lu",
+		      name, (unsigned long)nframes,
+		      (unsigned long)(nframes ? ends[nframes - 1U] : 0U),
+		      (unsigned long)clean.n);
+		for (cut = 1; cut <= 2 && nframes > 3U; cut++) {
+			size_t keep = ends[nframes - 1U - cut];
+
+			snprintf(what, sizeof(what), "last %u frame%s cut off", cut,
+			         cut == 1 ? "" : "s");
+			v = cat(NULL, 0, clean.p, keep, NULL, 0);
+			if (expect_vbr_tag) {
+				expect_damaged(what, &v, clean_written);
+			} else {
+				run(v.p, v.n, PCM_CAP, &o);
+				CHECK(o.state == MP3_INPUT_COMPLETE && o.expect_end_ok &&
+				      o.written < clean_written,
+				      "%s: no length header: state %d ok=%d wrote %lu",
+				      what, (int)o.state, o.expect_end_ok,
+				      (unsigned long)o.written);
+			}
+			free(v.p);
+			if (!expect_vbr_tag)
+				continue;
+			snprintf(what, sizeof(what), "last %u frame%s cut off, then "
+			         "ID3v1", cut, cut == 1 ? "" : "s");
+			v = cat(NULL, 0, clean.p, keep, id3v1, id3v1_len);
+			expect_damaged(what, &v, clean_written);
+			free(v.p);
+			/* a full output buffer still means a partial decode */
+			v = cat(NULL, 0, clean.p, keep, NULL, 0);
+			run(v.p, v.n, clean_written / 2U, &o);
+			CHECK(o.state == MP3_INPUT_MORE && o.expect_end_ok && !o.end,
+			      "%s, half output: state %d ok=%d end=%d", what,
+			      (int)o.state, o.expect_end_ok, o.end);
+			free(v.p);
+		}
+	}
 	/* Lyrics3v2 is not skipped, so it counts as trailing junk. */
 	memcpy(tail, "LYRICSBEGINLYRICSEND000000LYRICS200", 35);
 	tail_len = 35;
@@ -487,6 +556,32 @@ static void test_compute_source(const char *path)
 		CHECK(check && strstr(check, "SDK_STATUS_BAD_REQUEST") != NULL &&
 		      strstr(check, "SDK_STATUS_BAD_REQUEST") < swap,
 		      "EXPECT_END failure is not BAD_REQUEST");
+		/* The decoder writes the destination before any later return, so
+		 * every return after decode_mp3_samples() must follow a cache
+		 * flush of it. This is a source-structure check: sdk_mailbox.c
+		 * cannot be linked into a host test to observe the mock. */
+		{
+			const char *dec = strstr(fn, "decode_mp3_samples(");
+			const char *end = strstr(fn, "\nstatic uint16_t handle_decode_mp3");
+			const char *flush = dec ? strstr(dec, "Xil_DCacheFlushRange(") :
+			                          NULL;
+			const char *ret = dec;
+			int returns = 0;
+
+			CHECK(dec && end && flush, "decode/flush not found in compute");
+			while (dec && end && flush &&
+			       (ret = strstr(ret, "return SDK_STATUS_")) && ret < end) {
+				returns++;
+				CHECK(flush < ret, "a return after the decode at offset %ld "
+				      "precedes the destination flush", (long)(ret - fn));
+				ret++;
+			}
+			CHECK(returns >= 2, "expected the BAD_REQUEST and OK returns "
+			      "after the decode, found %d", returns);
+			CHECK(check && (flush = strstr(check, "Xil_DCacheFlushRange(")) &&
+			      flush < strstr(check, "return SDK_STATUS_BAD_REQUEST"),
+			      "EXPECT_END failure does not flush the destination");
+		}
 	}
 	CHECK(strstr(src, "p.flags = flags;") != NULL,
 	      "handle_decode_mp3 does not pass the flags to the decode");

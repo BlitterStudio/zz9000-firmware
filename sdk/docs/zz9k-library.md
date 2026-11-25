@@ -1176,6 +1176,11 @@ end. A Lyrics3 tag is not recognised and counts as bytes after the last frame.
 The check looks at the end of the stream only. A damaged frame in the middle
 is dropped by the decoder in both modes, and neither mode reports it.
 
+A file cut off exactly between two frames is reported only when it starts with
+a Xing or Info header, because that header declares the sample count and the
+decode delivers fewer samples. Without that header the length is unknown, and
+such a file looks complete.
+
 Running out of output space is not a fault. The call succeeds with
 `bytes_consumed` short of the source length and `ZZ9K_AUDIO_DECODE_RESULT_END`
 clear, whether or not `EXPECT_END` is set. A frame whose PCM only partly fits
