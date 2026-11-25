@@ -23,7 +23,7 @@ above it.
 | `0x00100000`–`0x00200000` | 1 MiB | Low exception vectors and MMU table only. |
 | `0x00200000`–`0x033F0000` | 49.9375 MiB | P96 VRAM, managed by rtg.library. The RTG driver's MemorySize ends here. |
 | `0x033F0000`–`0x08200000` | 78.0625 MiB | Firmware host-visible heap (one interval allocator): GFXData and template scratch, dynamic videocap backing, P96 off-screen surfaces from `ACC_OP_ALLOC_SURFACE`, SDK shared allocations, mailbox/direct-ring pages, the MiniGL wire-v9 transport window (one dynamic allocation, see below) and the AHI/MHI scratch. |
-| `0x08200000`–`0x08600000` | 4 MiB | Firmware image and static data. The image holds no app translation tables and no per-app arrays; those live in the record arena in the card pool (see below). |
+| `0x08200000`–`0x08600000` | 4 MiB | Firmware image and static data. App translation tables and process records live in the record arena in the card pool (see below). |
 | `0x08600000`–`0x08700000` | 1 MiB | Coherent dual-core task queue and shared session tables. |
 | `0x08700000`–`0x08800000` | 1 MiB | Full-descending core-1 stack. |
 | `0x08800000`–`0x09000000` | 8 MiB region | Newlib heap plus 22 KiB ARM exception-stack reservation. |
@@ -40,36 +40,10 @@ frames from 8 MiB-aligned pool extents and returns an empty extent to the pool.
 `CARD_POOL_CLASS_APP_FRAMES` has no class cap: aggregate commit admission,
 the system reserve, and the 512 MiB private-window bound limit it instead.
 
-The per-app kernel state is not in the image. One block of the permanent
-prefix, class `CARD_POOL_CLASS_APP_ARENA`, holds it in parallel areas indexed
-by process-record index: the kernel template L1 table and one 16 KiB L1 table
-per record (16 KiB aligned), the shared pool of 1 KiB L2 tables, 8 KiB of user
-API and GL table pages per record, a 32 KiB core-1 stack per record, and a
-16 KiB record per record (`zzapp_rec.c:71-91`). It is taken at boot after
-`card_pool_setup_card()` and before `zzapp_as_init()` (`main.c:1343-1361`),
-when no app extent exists yet. Its class is permanent: never in the
-revocable Fast-RAM tail, kept across an Amiga reset, never freed, and without
-a class cap (`card_pool.c:181-184`, `card_pool.h:63-68,87`).
-
-It is sized by memory. Records are
-`(permanent bytes - 128 MiB system reserve) / 2 MiB`, bounded to 8 and 1024.
-The L2 pool is 16 tables for the template, 16 reserved per record, and a
-shared remainder of 2 tables per MiB of host-visible heap rounded up to a
-multiple of 32. The block is rounded up to 1 MiB and, if the pool cannot
-hold it, retried with half the records down to 8 (`zzapp_rec.c:55-91,155-179`).
-On this board: 590 MiB permanent, 231 records, 3872 L2 tables (160 shared),
-a 20 MiB arena, 3.4 percent of the prefix
-(`test/zzapp/h/rec_test.c:94-114`). The commit ledger needs no extra
-accounting, because the arena leaves the pool before any app extent. See
-[app-runtime.md](app-runtime.md#record-arena) for the records, handles, L2
-reserve, and ASIDs.
-
-The arena stays Normal, shareable write-back, like the earlier per-slot
-state in the task-queue section. There is no non-cacheable record prefix;
-the arena offsets and size above are unchanged. A cooperative core-1 restart
-writes its local dirty lines back before acknowledging the park request.
-An unresponsive worker can lose its last updates on reset; see
-[app-runtime.md](app-runtime.md#record-arena) for the cache and recovery limits.
+The kernel's tables, stacks, records and user API pages live in one permanent
+card-pool block of class `CARD_POOL_CLASS_APP_ARENA`. Its sizing, board record
+capacity, L2 reserve, cache attributes and recovery limits are described in
+[app-runtime.md](app-runtime.md#record-arena).
 
 Each app maps its private image, heap, and stack at
 `0xC0000000`–`0xDFFFFFFF`. This 512 MiB virtual range is non-global and
@@ -86,10 +60,7 @@ are placed in the cacheable part of the heap, below the SDK mailbox section at
 non-cacheable. The pair, service and data blocks live until the client releases
 the claim, the audio ring and load buffer have earlier ends, and a block the
 client may still touch is kept until the release (see
-[app-runtime.md](app-runtime.md#transport-and-claim-protocol)). The former
-four fixed 592 KiB launcher windows (`0x07EA0000`–`0x080F0000`) and the
-boot loop that mapped them non-cacheable are gone: only the Z2 mailbox page
-is still split into non-cacheable pages (`mmu_page.c`, one page table). Every
+[app-runtime.md](app-runtime.md#transport-and-claim-protocol)). Every
 block counts one entry of the surface allocator's 4096-entry block table
 (`SURFACE_ALLOCATOR_MAX_BLOCKS`).
 
@@ -108,28 +79,11 @@ queue, core-1 stack, or first card-pool byte.
 
 ### MiniGL wire-v9 transport window
 
-MiniGL's host-visible transport has a control/status page, two 256 KiB packet
-slots, and a 64 KiB reply buffer (0x91000 bytes). It is one dynamic allocation
-from the host-visible heap, taken by `minigl_transport_init()` at boot and
-after every Amiga reset. There is deliberately no fixed MiniGL DDR
-carve-out. The allocation is constrained (`surface_allocator_alloc_range`)
-to `0x08110000`–`0x081C0000`, the free gap between the SDK mailbox and
-direct-ring reservations inside the 1 MiB MMU section the mailbox already
-maps Normal non-cacheable: both CPUs poll the control block, so the
-window must not be cacheable, and confining it to that existing section
-avoids new MMU work. The gap (704 KiB) exceeds the window with the
-partition checks in `memorymap.h` holding. On allocation failure, or on
-Zorro II where the host window cannot hold even a single-slot window, the
-service reports unavailable and the Amiga library falls back exactly as
-on firmware built without it.
-
-The Amiga side discovers the window through a versioned big-endian
-transport descriptor ('MGTD') published at offset 0x8000 inside the
-64 KiB SDK mailbox reservation (descriptor plus both 64-entry rings end
-at 0x2080, and no mailbox ABI user, firmware or host library, reads or
-writes beyond them). The library locates the mailbox via
-`REG_ZZ_SDK_MAILBOX_HI/LO`, validates the descriptor, and uses its
-addresses verbatim.
+MiniGL's host-visible transport is allocated by the module's `host_window`
+service on demand. Its placement and descriptor are described in the
+[MiniGL module contract](minigl-module.md#transport-memory); the
+[wire-v9 transport](minigl-v29-zz9000-transport.md#32-transport-window-layout)
+defines the layout inside the window.
 
 ## RTL-pinned top belt
 

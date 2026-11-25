@@ -17,7 +17,7 @@ published interfaces are:
 - the app API table, for ARM apps that link only `libaar`. GL reached through
   `aar_gl_bind` is part of that table.
 
-## Programs that call zz9k.library or mpega.library
+## Programs that call the Amiga libraries
 
 `zz9k.library` and `mpega.library` are GPL-3.0-or-later. As an additional
 permission under section 7 of the GPL, the copyright holder of both libraries
@@ -59,16 +59,16 @@ MIT text as `Developer/LICENSE-MIT.txt`, the GPL text as
 
 Each of these source files carries `SPDX-License-Identifier: MIT`.
 
-The ARM app SDK is not in this repository any more. It lives in
+The ARM app SDK lives in
 [BlitterStudio/aar](https://github.com/BlitterStudio/aar), where every file is
-MIT, and this repository pins the commit it builds against in `sdk/AAR_REF`.
+MIT. This repository pins the commit it builds against in `sdk/AAR_REF`.
 The fetched copy in `sdk/aar/` is not part of this repository.
 
 `aar.library` is built here from two sources: the portable core, the AmigaOS
-shell and the image probe in `client/src/` of that repository (MIT, with the
-`client/include` headers and `client/fd/aar_lib.fd` that programs compile
-against), and `sdk/amiga/src/aar_zz9000.[ch]` of this repository, the ZZ9000
-platform layer, which includes the private wire `zzapp_proto.h` and stays
+shell and the image probe in `client/src/`, plus `loader/aar_image.c`, of that
+repository (MIT, with the `client/include` headers and `client/fd/aar_lib.fd`
+that programs compile against), and the ZZ9000 platform layer,
+`sdk/amiga/src/aar_zz9000.[ch]`, which includes the private wire `zzapp_proto.h` and stays
 GPL-3.0-or-later. The linked `Libs/aar.library` binary is therefore
 GPL-3.0-or-later. A program that opens it with `OpenLibrary()` and calls its
 vectors through the MIT headers is covered by the same additional permission
@@ -87,7 +87,7 @@ MIT text in `Developer/LICENSE-MIT.txt`.
 
 The rest of the repository is GPL-3.0-or-later unless a file says otherwise.
 That covers the firmware, `zz9k.library` and `mpega.library` themselves, the
-DataTypes, and the tools. The GL front end that the firmware compiles is
+DataTypes, and the tools. The GL front end used by `MINIGL.ZZM` is
 `PolyForm-Noncommercial-1.0.0 OR GPL-3.0-or-later`. Third-party code keeps its
 own licence, for example `sdk/tools/lha-unix/`. `sdk/tools/libpt4/`, the
 ProTracker 4.1 replayer used by the voice engine tests and `zz9k-voiceplay`,

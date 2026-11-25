@@ -1,20 +1,27 @@
 # ZZ9000 app runtime
 
-This is the firmware and client contract for the app kernel, which
-implements AAR API 0.5 (BlitterStudio/aar, pinned by `sdk/AAR_REF`). The public
-app interface is [aar-api.md](https://github.com/BlitterStudio/aar/blob/main/docs/aar-api.md); application
-build and usage guidance is in
-[aar-developer-guide.md](https://github.com/BlitterStudio/aar/blob/main/docs/aar-developer-guide.md). The shared
-wire definitions in `ZZ9000_proto.sdk/ZZ9000OS/src/zzapp_proto.h` are the
-source of truth for byte offsets and constants. [App interface](#app-interface)
-below lists what this firmware does where the standard leaves a choice.
+The ZZ9000 app kernel implements AAR API 0.5. The normative standard is
+[aar spec/aar.md](https://github.com/BlitterStudio/aar/blob/main/spec/aar.md).
+The [app call reference](https://github.com/BlitterStudio/aar/blob/main/docs/aar-api.md)
+and [developer guide](https://github.com/BlitterStudio/aar/blob/main/docs/aar-developer-guide.md)
+cover the portable interface and building apps; `sdk/AAR_REF` pins the
+checkout used by this firmware. This document describes the ZZ9000 runtime
+choices and its private mailbox wire, defined in
+`ZZ9000_proto.sdk/ZZ9000OS/src/zzapp_proto.h`.
+
+The Amiga side is `aar.library`, built by the firmware SDK from the aar client
+core and the ZZ9000 platform layer. The reference launcher `aar-run` serves an
+app's requests through it. The SDK ships `C/aar-run` and its manual,
+`Docs/aar-run.guide`, generated from
+[aar client/run/README.md](https://github.com/BlitterStudio/aar/blob/main/client/run/README.md).
+The [SDK library guide](../sdk/docs/zz9k-library.md#arm-app-client) describes
+the ZZ9000 platform layer, including mailbox access and `mmu.library` mapping.
 
 ## Kernel architecture
 
 Core 1 runs a small kernel. It has one highest-priority system thread and one
-app thread per running app. The number of apps is not a constant: it is the
-record capacity chosen at boot from card memory (231 on this board, see
-[Record arena](#record-arena)). An app process is a record that owns its
+app thread per running app. The record capacity is chosen at boot from card
+memory; see [Record arena](#record-arena). An app process is a record that owns its
 address space, memory commit, resource ledger, transport pair, and handle.
 Its thread owns the saved user context, kernel stack, scheduler state,
 and CPU accounting. There is one app thread per process today.
@@ -45,9 +52,9 @@ store it stopped after, and a handle of another life never matches
 (`zzapp_rec.c:382-425`). Free indices wait in a FIFO queue, so an index is
 reused as late as possible (`zzapp_rec.c:297-323`). The table holds at least 8
 and at most 1024 records (`ZZAPP_REC_MIN_APPS`, `ZZAPP_REC_MAX_APPS`,
-`zzapp_rec.h:42-43`).
+`zzapp_rec.h:41-42`).
 
-A record is one 16 KiB slot (`ZZAPP_REC_RECORD_BYTES`) holding the kernel
+A record is one 16 KiB block (`ZZAPP_REC_RECORD_BYTES`) holding the kernel
 thread, the words core 0 polls, the per-app scheduler words, the claim
 words (limits, load progress, terminal and refusal reasons, the client
 capability word), the process memory ledger and its address space, the host
@@ -100,7 +107,7 @@ firmware or in fixed overhead.
 
 Every mailbox request except `QUERY`, `CLAIM` and `LIST` names its record by
 handle at byte 40 of the payload, and the lookup (`zzapp_rec_by_handle`)
-fails for a stale one. The wire has no slot and no window; see
+fails for a stale one; see
 [Transport and claim protocol](#transport-and-claim-protocol).
 
 ### Record arena
@@ -109,12 +116,10 @@ At boot one block of the card pool holds the L1 tables, the core-1 stacks, the
 records, the user API and GL table pages, and the shared L2 table pool. It is
 taken in class `CARD_POOL_CLASS_APP_ARENA`, 1 MiB aligned, after
 `card_pool_setup_card()` and before `zzapp_as_init()` and before any app
-extent exists (`main.c:1343-1361`, `zzapp_rec.c:155-179`). The class is
+extent exists (`main.c:1300-1344`, `zzapp_rec.c:155-179`). The class is
 permanent like `FIRMWARE`: the block is never placed in the revocable
 Fast-RAM tail, survives an Amiga reset, is never freed, and has no class cap
-(`card_pool.c:181-184`, `card_pool.h:63-68,87`). The old fixed 208 KiB
-translation-table slab, its linker section, and the per-slot static arrays are
-gone; nothing in the image is sized by an app count.
+(`card_pool.c:181-184`, `card_pool.h:63-68,87`).
 
 The arena is sized by memory (`zzapp_rec.c:55-91`):
 
@@ -126,7 +131,7 @@ The arena is sized by memory (`zzapp_rec.c:55-91`):
   16 L2 tables it is guaranteed.
 - L2 pool: 16 tables for the kernel template, 16 per record, and a shared
   remainder of 2 tables per MiB of host-visible heap, rounded up to a multiple
-  of 32. A table is 1 KiB plus 6 bytes of bookkeeping (`zzapp_as.h:37-54`).
+  of 32. A table is 1 KiB plus 6 bytes of bookkeeping (`zzapp_as.h:30-38`).
 - The total is rounded up to 1 MiB. If the block does not fit, the carve
   retries with half the records down to 8; if even 8 do not fit, no app can
   run and the boot log says `record arena: no memory, apps unavailable`. The
@@ -136,18 +141,17 @@ The arena is sized by memory (`zzapp_rec.c:55-91`):
 
 This board: the permanent prefix of the card pool is `0x0B000000` to
 `0x2FE00000`, 590 MiB. That gives 231 records, 3872 L2 tables (16 template,
-3696 reserved, 160 shared for the 78.0625 MiB host-visible heap), and a 20 MiB
-arena, 3.4 percent of the prefix (`test/zzapp/h/rec_test.c:94-114`). Boot
+3696 reserved, 160 shared for the 78.0625 MiB host-visible heap), and a 21 MiB
+arena, about 3.6 percent of the prefix (`test/zzapp/h/rec_test.c:95-114`). Boot
 prints `[zzapp] record arena N KiB at 0x...: N records, N L2 tables (N
 shared)`. The commit ledger sees the arena automatically, because the block
 is allocated from the pool before any app extent.
 
 The arena uses the BSP's Normal, shareable write-back mapping, including the
-record words polled by core 0. The former per-slot block in the task-queue
-region also used write-back memory; it was not a non-cacheable page. The
-global heartbeat stays in that region. SCU snooping makes these words visible
-while both cores participate in coherency. Reset-time cache handling is
-described below.
+record words polled by core 0. The global heartbeat is in the task-queue
+region. SCU snooping makes these words visible while both cores participate
+in coherency. See [Teardown, reset and restart](#teardown-reset-and-restart)
+for reset-time cache handling.
 
 ### Scheduling and doorbell
 
@@ -372,7 +376,7 @@ non-preemptible spans for SDK tasks, MiniGL, launcher deferred work, audio
 pumping, and sampled API-lock-held SVC work.
 `launcher_steps=zero:N/copy:N/map:N/reloc:N/apply:N/alloc:N/other:N`
 reports the exact longest tick span observed for each launcher-step kind.
-Each field is written only when that kind sets a new maximum; the entire
+Each field is written only when that kind sets a new maximum; this
 attribution is compiled out with `ZZAPP_PERF_COUNTERS=0`.
 `audio` is `low_water/starved/underruns`: low-water crossings on both AHI and
 card-fabric routes, retryable fabric fill failures, and played underruns.
@@ -440,7 +444,7 @@ does not expose those probe numbers.
 
 Each record has a private 16 KiB L1 table at its index in the arena, copied
 from a privileged kernel template when the address space is created
-(`zzapp_as_pool_l1`, `zzapp_as_create`, `zzapp_as.h:112-141`). The private
+(`zzapp_as_pool_l1`, `zzapp_as_create`). The private
 virtual window is `0xC0000000`–`0xDFFFFFFF`. Image, heap, and stack are mapped
 there as non-global sections, 64 KiB large pages, or 4 KiB small pages as
 appropriate. The app sees only its private pages plus grants for its
@@ -449,40 +453,40 @@ firmware, devices, and other apps remain privileged-only.
 
 **L2 tables.** One pool of L2 tables serves every address space and the kernel
 template. Admission reserves 16 tables for each record: image sections that
-mix permissions, the first alias section, and slack (`zzapp_as.h:41-43`). A
+mix permissions, the first alias section, and slack (`zzapp_as.h:34-38`). A
 record's allocations use its own reserve first and then draw from the shared
 remainder, the free tables not promised to another record
-(`zzapp_as.c:459-526`). A table allocation that cannot be given makes the map
+(`zzapp_as.c`, `l2_alloc`). A table allocation that cannot be given makes the map
 call fail with `ZZAPP_AS_ENOMEM`, leaves the address space intact, and is
 counted in `tables_refused`. The one place that cannot report the failure to an
 app is the BSP translation-change hook; there the record is stopped with a
-forced fault, never the kernel (`zzapp_as.c:1641-1735`,
-`zzapp_host.c:2761-2768`). Destroying an address space returns every table it
+forced fault, never the kernel (`zzapp_as_mmu_page_changed`,
+`zzapp_host.c`, `table_fault_hook`). Destroying an address space returns every table it
 owns. An address space tracks its alias ranges as at most 96 extents
-(`zzapp_as.h:48-49`).
+(`zzapp_as.h:42`).
 
 **ASIDs.** Hardware ASIDs 1 to 255 are handed out lazily: a record gets one at
-its first dispatch, not at creation (`zzapp_as_switch`, `zzapp_as.c:1738-1743`).
+its first dispatch, not at creation (`zzapp_as_switch`).
 Assigned ASIDs sit on a least-recently-dispatched list. When none is free, the
 least recently dispatched ASID whose owner is not the running record is
 stolen: its translations are flushed by ASID, its generation is bumped, the
 branch predictors are invalidated, and the old owner finds the generation
 mismatch at its next dispatch and takes another ASID
-(`zzapp_as.c:1161-1205`). A retiring record flushes its ASID by ASID before
+(`zzapp_as_acquire_asid`). A retiring record flushes its ASID by ASID before
 the ASID goes back to the free stack, so a free ASID never has live
-translations and assigning one needs no flush (`zzapp_as.c:1207-1226`). On
-this board 231 records fit in 255 ASIDs, so the steal path does not run. The
-allocator runs on core 1 with local IRQs masked and takes no lock; core 0
-touches it only with core 1 halted, which resets every ASID and flushes the
-whole TLB (`zzapp_as.c:1229-1238`).
+translations and assigning one needs no flush (`zzapp_as_release_asid`).
+The board's record capacity fits in the available ASIDs, so the steal path
+does not run. The allocator runs on core 1 with local IRQs masked and takes
+no lock; core 0 touches it only with core 1 halted, which resets every ASID
+and flushes the TLB (`zzapp_as_reset_asids`).
 
 A host-visible block uses the same mapping as the rest of DDR, Normal
 write-back shareable (descriptor `0x15de6`). Zorro III accesses reach DDR
 through the Zynq ACP (`m00_axi` of the Zorro master, ARCACHE `0xF` for reads
 and AWCACHE `0x3` for writes). The ACP snoops the ARM L1 caches, so neither
 side needs ARM cache maintenance. The 68k's own caches are outside the ACP:
-a 68k client reads through a cache-inhibited mapping, as `zz9k.library` does
-for the transport buffers, or maintains its caches itself. The Zorro
+a 68k client reads through a cache-inhibited mapping, as `aar.library` does
+for the app transport buffers, or maintains its caches itself. The Zorro
 master's second port, `m01_axi`, goes to HP1 but only writes video-capture
 frames; it carries no Zorro access to the host-visible heap.
 
@@ -491,19 +495,19 @@ and `size` semantics of `aar/app.h`, `aar/gl.h` and `aar/ext_zz9000.h`, but
 their entries, including `gl_bind_flags` in the extension table, point to
 user-RX `svc; bx lr` veneers. The extension table's strings live in the app's
 read-only table page. On a user veneer call,
-the vector copies the exception frame to that slot's kernel stack, switches to
+the vector copies the exception frame to that record's kernel stack, switches to
 SYS mode, and enables IRQs before invoking the handler. Every SVC handler
 checks user pointers against the caller's mappings and permissions before
 touching them. Invalid, overflowed, read-only-for-output, device, and
-other-slot pointers return `AAR_E_FAULT`. Firmware code never becomes a
+other-app pointers return `AAR_E_FAULT`. Firmware code never becomes a
 user-call target.
 
 `aar_gl_bind` and `gl_bind_flags` take the id of the app's open display
 (`aar_surface.id`). Any other id, including 0, returns `NULL` (`AAR_E_INVAL`
-inside the runtime) before the module is loaded or a GL slot is taken, so the
+inside the runtime) before the module is loaded or a GL binding is taken, so the
 bind that follows with the right id is not refused as busy.
 
-GL client-array state is per slot. `glVertexPointer`, `glColorPointer` and
+GL client-array state is per app. `glVertexPointer`, `glColorPointer` and
 `glTexCoordPointer` record their pointer without checking it, so a bad pointer
 is no error at that call. `DrawArrays` validates every enabled vertex, colour,
 and client texture-coordinate element in its requested range. `DrawElements`
@@ -676,11 +680,7 @@ app), defined by `aar/transport.h` in the aar repository and described in its
 `zzapp_proto.h`: claim, load, start, stop, list, release and the doorbell.
 Everything an app asks of its client (files, console, log, display, audio,
 messages) and everything the client sends (input events, messages, replies)
-travels in the rings. There is no launcher window, no slot and no fixed
-address range. The Amiga client is `aar.library` (its ZZ9000 platform layer is
-`sdk/amiga/src/aar_zz9000.[ch]`, described in `sdk/docs/zz9k-library.md`), and
-the launcher that serves an app's requests through it is `aar-run`, which the
-SDK package ships as `C/aar-run`.
+travels in the rings.
 
 Integers in mailbox payloads are big-endian. A request is 48 payload bytes
 except `QUERY`, `CLAIM` and `LIST`, which take no handle. Every other
@@ -703,16 +703,14 @@ changes nothing.
 | `RELEASE` | `0x0c0a` | Ends the claim and returns the pair and every buffer. |
 | `KICK` | `0x0c0b` | The doorbell, flags at 0. A hint only. |
 
-`0x0c07` (`STATUS`) and `0x0c08` (`DISPLAY_BIND`) are retired: the client reads
-the control block, and the display is bound when the client completes
-`AAR_OP_DISPLAY_OPEN`. A request with an opcode in `0x0c00` to `0x0c1f` that
-the table does not list is unsupported.
+A request with an opcode in `0x0c00` to `0x0c1f` that the table does not list
+is unsupported. The client reads lifecycle state from the control block and
+binds the display when it completes `AAR_OP_DISPLAY_OPEN`.
 
 `QUERY` (no handle) fills 48 bytes: the ABI major and minor words (0 and 5),
 `EVENTS` at 8 (the board offset of the event block, described with the
-control block below; 0 when there is none, which is also what a firmware
-without the block sends there: the word held the state, always `IDLE` = 0,
-and nothing read it), the capability word at 12 (`Z3`, `DISPLAY`, `AUDIO`, `GL`,
+control block below; 0 when there is none), the capability word at 12
+(`Z3`, `DISPLAY`, `AUDIO`, `GL`,
 `CLUT8`), `HOSTHEAP_LARGEST` at 16 (the largest free block of the
 host-visible heap), `QUEUE_DEPTH` at 20 (the depth of a new claim's queues,
 64), `COMMIT_FREE` at 24 and `COMMIT_TOTAL` at 28 (the bytes still admissible
@@ -805,7 +803,7 @@ allocated before the client has written a limit.
 
 ### The control block and the doorbell
 
-The control block replaces the old life block word for word:
+The control block separates platform and client writes:
 
 - The platform writes the lifecycle line (`AAR_CB_STATE`, `AAR_CB_END_REASON`,
   `AAR_CB_EXIT_CODE`, `AAR_CB_FLAGS`, `AAR_CB_PROGRESS`,
@@ -828,9 +826,9 @@ The control block replaces the old life block word for word:
   `GL` from the groups of the app's note, and `CONSOLE` once the console was
   used.
 
-Display state that the old window shared (`FLIP_GEN`, `FLIP_ACK`, the surface
-words, the palette generation) is private to the firmware. Client capabilities
-that have no control block word (`ZZAPP_CLIENT_LEASE_EXTENDED`, `_AUDIO_AHI`,
+Display flip state, surface words and palette generations are private to the
+firmware. Client capabilities without a control block word
+(`ZZAPP_CLIENT_LEASE_EXTENDED`, `_AUDIO_AHI`,
 `_CLUT8`, `_SCANOUT_ACK`, `_LATEST`) travel in word 0 of `LOAD_BEGIN` and are
 kept in the claim words of the record.
 
@@ -895,13 +893,11 @@ kick costs latency only.
 
 `LOAD_BEGIN` reads `AAR_CB_PRIVATE_MIB`, `AAR_CB_SHARED_MIB` and
 `AAR_CB_WEIGHT` from the control block. A memory limit above 4095 MiB returns
-`BAD_REQUEST`; a shared limit the card cannot grant (the smaller of the
-surface heap, about 78 MiB, and one app's alias window of 62 MiB, so the
-window) returns `SDK_STATUS_NO_MEMORY` at once and leaves the claim as it
-was. That 62 MiB is `ZZAPP_SHARED_MAX_MIB`: `aar.library` reports it as
-`AARInfo.shared_max_mib` and `AARSetTagList` refuses a larger
-`AAR_TAG_SHARED_MIB` with `AAR_E_INVAL`, so a client that stays within
-`shared_max_mib` never meets the `NO_MEMORY` refusal. Zero selects
+`BAD_REQUEST`. A shared limit above `ZZAPP_SHARED_MAX_MIB` returns
+`SDK_STATUS_NO_MEMORY` at once and leaves the claim unchanged. The
+[client-layer shared limit](../sdk/docs/zz9k-library.md#arm-app-client) is
+reported through `AARInfo.shared_max_mib`; the library rejects a tag above
+that limit before sending `LOAD_BEGIN`. Zero selects
 the pool for the private limit and 16 MiB for the shared one
 (`ZZAPP_HOST_VISIBLE_DEFAULT_BYTES`). The limits cap the image, stack and
 minimum heap commit as well as later growth, and a shared cap is not a
@@ -919,8 +915,8 @@ claim of the record starts from 1.
 `LOAD_BEGIN` then allocates the load buffer and the deferred reply (16 bytes)
 names it: the buffer token at 0, its size at 4 (72 KiB), the largest
 `LOAD_CHUNK` at 8 (64 KiB) and the offset of the argv area at 12 (64 KiB). It
-also takes a 16 MiB staging block of class `APP` (`ZZAPP_FILE_MAX`). The class
-is capped at 96 MiB, so six loads that have not reached `LOAD_END` use it all.
+also takes a 16 MiB staging block of class `APP` (`ZZAPP_FILE_MAX`), subject
+to the [card-pool class cap](memory-map.md#adding-a-fixed-range).
 When the pool cannot give the block and another claim still holds its staging,
 `LOAD_BEGIN` answers `SDK_STATUS_BUSY` and the claim stays `CLAIMED`: the
 client asks again once a load has finished. When no other claim holds staging
@@ -968,15 +964,9 @@ own inactivity deadline whenever `AAR_CB_PROGRESS` changes.
 
 Once the app runs, the client must change `AAR_CB_LEASE_COUNTER` at least every
 two seconds. A client that announced `ZZAPP_CLIENT_LEASE_EXTENDED` gets ten
-seconds, so a starved dispatcher or a long interrupts-off period does not lose
-the app. The Amiga client, `aar.library`, announces it by default and stores
-the counter from a vertical-blank interrupt about every 100 ms, while its
-dispatcher process has run in the last five seconds. The dispatcher finds
-owners that died without closing their handles and releases their claims, so
-a dead client is reclaimed within about a second; a wedged but live owner
-keeps its app. If the dispatcher itself stops, the interrupt stops storing and
-the lease expires as described here. The firmware writes the period in force
-to `AAR_CB_LEASE_PERIOD_MS`
+seconds. The [Amiga client layer](../sdk/docs/zz9k-library.md#arm-app-client)
+describes how `aar.library` renews leases and reaps dead owners. The firmware
+writes the period in force to `AAR_CB_LEASE_PERIOD_MS`
 at the claim and when the app starts. Core 0 compares the counter with the
 last value it saw on every poll, for each live record.
 

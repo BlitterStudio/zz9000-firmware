@@ -4,8 +4,7 @@
  * Internal vocabulary of the app runtime that is not wire: the lifecycle
  * states of a claim as the host and the loader keep them, and the fault codes
  * the exception handlers hand to the host. The wire is zzapp_proto.h and
- * aar/transport.h; this header only gives the runtime's own words a home now
- * that the launcher window protocol is gone.
+ * aar/transport.h; this header defines only the runtime's internal vocabulary.
  *
  * States are the AAR_STATE_* values that go into AAR_CB_STATE. Fault codes
  * are the runtime's classification (watchdog, forced stop and core restart

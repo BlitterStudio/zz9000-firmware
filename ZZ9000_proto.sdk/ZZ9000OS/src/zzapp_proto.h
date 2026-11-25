@@ -9,14 +9,10 @@
  * it is the portable contract of aar/transport.h.
  *
  * Mailbox payloads are the 48-byte entry payload, big-endian. Offsets are
- * from the start of that payload. Every operation except QUERY and CLAIM names
- * its claim by handle at ZZAPP_SEL_HANDLE (aar/transport.h, spec 10.2). A
+ * from the start of that payload. Every operation except QUERY, CLAIM and LIST
+ * names its claim by handle at ZZAPP_SEL_HANDLE (aar/transport.h, spec 10.2). A
  * handle that is not the live one gets ZZAPP_ERR_STALE and changes nothing.
  * Unused bytes are zero.
- *
- * The launcher window of the earlier protocol (life block, rings, file wire,
- * slots, ZZAPP_OP_ALLOC_WINDOW, ZZAPP_OP_STATUS, ZZAPP_OP_DISPLAY_BIND) is
- * gone; ZZAPP_OP_CLAIM is the admission and the control block replaces STATUS.
  *
  * SPDX-License-Identifier: GPL-3.0-or-later
  */

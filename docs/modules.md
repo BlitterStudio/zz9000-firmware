@@ -1,145 +1,106 @@
 # Firmware modules: runtime v2
 
-Module runtime v2 replaces the boot-time-only module model with verified,
-on-demand modules. A module remains a fixed-address `.ZZM` image, but it is not
-resident merely because its file is installed. The manifest is the sole source
-of module IDs, filenames, slot addresses and slot sizes; the packer, linker and
-loader must consume the same manifest entry.
+MPEG-2, WebM and WebP are fixed-address `.ZZM` modules loaded on demand from
+`ZZ9K/` on the SD card. A boot scan reads their headers; an installed file
+does not make its image resident. MiniGL uses the v3 module format and
+core-1 host described in [minigl-module.md](minigl-module.md).
 
-This document is the module-author contract. A module whose declared ABI,
-services, quotas or image placement cannot be satisfied is unavailable; it
-must never be partially initialized or called.
+The slot manifest in `ZZ9000_proto.sdk/ZZ9000OS/src/zzm_manifest.c` is shared
+by the packer and loader. It assigns module ids, names, addresses and sizes.
+Modules use runtime service tables rather than importing firmware ELF symbols.
+This runtime is separate from the public mailbox service catalog and the
+[SDK manifest helpers](../sdk/docs/zz9k-modules.md).
 
 ## Image and link recipe
 
-A v2 `.ZZM` header identifies the module and declares:
+A v2 image has a 256-byte `ZZM2` header containing:
 
-- format and module-ABI versions, module ID/version, name, fixed load address,
-  image/BSS sizes, init entry and SHA-256 of the image;
-- a bounded list of required runtime services (ID and minimum interface
-  version), and the services the module provides;
-- the resident and per-session memory quotas and their memory classes; and
-- lifecycle policy overrides, if any. Absent overrides use the defaults below.
+- format and module-ABI versions, module id/version, name and fixed address;
+- image and BSS sizes, init/fini entries and image SHA-256;
+- up to four required services and four provided services;
+- load policy, idle-unload timeout, memory class and one memory quota.
 
-The loader first validates the complete header, manifest match, image bounds,
-hash, service requirements and quotas. It then maps/copies the image only to
-its assigned slot, zeroes BSS, performs instruction-cache maintenance and
-starts the module. There are no relocations, dynamic loading, symbol lookup or
-imports from the firmware ELF. Reject an image that contains relocations or an
-allocated section outside its slot.
+`zzm_format.h` defines the layout. V2 has one quota, not separate resident
+and per-session quota fields. The loader checks header shape, ABI, exact
+file size, manifest slot, required services and available quota, then verifies
+the image hash. A failure leaves the module unavailable.
 
-Link every v2 module against `libzzm_rt.a`, not against an application-local
-runtime or heap. The essential shape is:
+The packer reads little-endian ELF32 input. It rejects `SHT_REL`, `SHT_RELA`
+and `SHT_RELR` sections and allocated sections outside the assigned slot.
+The linker script is `util/zzm_module.ld`. The shared link recipe in
+`ZZ9000_proto.sdk/ZZ9000OS/modules/module.mk` links `libzzm_rt.a` with
+`-nostdlib`, fixed `ZZM_SLOT` and `ZZM_SLOT_SIZE` symbols and the module's
+static dependencies.
 
-```make
-# Values come from the v2 manifest; do not copy addresses into module sources.
-$(CC) $(CPU_FLAGS) -nostdlib -Wl,--gc-sections \
-  -Wl,-T,util/zzm_module.ld \
-  -Wl,--defsym,ZZM_SLOT=$(MODULE_SLOT) \
-  -Wl,--defsym,ZZM_SLOT_SIZE=$(MODULE_SLOT_SIZE) \
-  -o $(MODULE_ELF) $(MODULE_OBJECTS) libzzm_rt.a -lc -lgcc
-$(ZZM_PACK) --manifest $(MODULE_MANIFEST) --module $(MODULE_ID) \
-  $(MODULE_ELF) $(MODULE_ZZM)
+The packer interface for v2 is:
+
+```text
+zzm_pack MODULE_ID MODULE_VERSION INPUT.elf OUTPUT.ZZM
 ```
 
-The `-nostdlib` link does not make ordinary C unavailable: `libzzm_rt` supplies
-the required allocation, syscall stubs and C/C++ runtime boundary. The module
-linker script remains responsible for placing `.text`, read-only data, data
-and BSS in the one manifest slot and asserting that their total fits. The
-packer, rather than a filename convention, writes the authoritative header.
+The MPEG-2, WebM and WebP make fragments under `modules/` supply the slot and
+module arguments. Build them from the firmware source tree with:
 
-## `libzzm_rt` rules
+```bash
+make -C ZZ9000_proto.sdk/ZZ9000OS modules
+```
 
-`libzzm_rt` is the only supported path from a module to runtime resources.
-Modules must not retain raw firmware function pointers beyond the lifetime of
-the service binding supplied at initialization.
+`util/check_zzm_conformance.sh` checks a linked module's entry, slot,
+relocations and runtime symbols. See [BUILD.md](../BUILD.md) for the toolchain
+and dependencies.
 
-### Allocation and syscalls
+## Allocation and C runtime
 
-- `malloc`, `calloc`, `realloc`, `free`, aligned-allocation variants and C++
-  `new`/`delete` are routed to the **memory** service. Allocation carries the
-  active session owner and requested memory class; it is not an untracked
-  module heap.
-- `_sbrk` always fails. A module cannot grow a newlib heap. Direct card-pool,
-  firmware heap, MMIO and filesystem allocation are forbidden.
-- File, socket, process, clock and terminal syscalls have no implicit host
-  implementation. Unsupported syscalls fail with `ENOSYS`; logging goes
-  through the **core** service. A module may not use a failed syscall as a
-  fallback transport.
-- Cache operations are requested through the **cache** service. A module may
-  clean/invalidate only ranges it owns or ranges explicitly lent by the host.
+`modules/libzzm_rt/zzm_rt.c` provides allocation, aligned allocation and C++
+`new`/`delete` through the firmware memory service. Each allocation carries
+the active owner, memory class and quota. Use `zzm_rt_set_context` to select
+the session owner before allocating session resources. A module must not
+substitute an untracked private heap or call the card pool directly.
 
-C++ is optional, but must remain a freestanding module client: build with
-exceptions, RTTI and thread-local storage disabled; do not use `atexit`,
-process termination, dynamic loader facilities or background threads. Static
-constructors run only as part of successful module start and static destructors
-run during orderly unload. `libzzm_rt` supplies the required guards and
-`new`/`delete` bridge; no second C++ runtime, private allocator or unwinder may
-be linked. `__cxa_guard_*` is deliberately a single-threaded implementation:
-module initialization, constructors and function-local static initialization
-must remain serialized on the owning core. An allocation failure is reported by
-the configured no-exception allocation path and must be handled by the module.
+Use `zzm_rt_log` for diagnostics. File and process syscall stubs such as
+`_open`, `_read`, `_close`, `_lseek` and `_kill` return `ENOSYS`; `_write`
+discards output and returns its length. `_gettimeofday` and `clock` use the
+core service's monotonic clock, not an Amiga wall clock.
 
-## Runtime service directory
+Build C++ modules without exceptions or RTTI. The entry wrapper runs the
+preinit and init arrays before module init; the exit wrapper calls module
+fini and then the fini array in reverse. `__cxa_guard_*` is single-threaded.
+`__cxa_atexit` does not register destructors, so code must not rely on it
+for cleanup. Resource teardown belongs in the module's explicit fini and
+session-close paths.
 
-The module runtime directory is independent of the public mailbox service
-catalog. Its IDs are stable 16-bit values; an interface version is a
-`major.minor` pair. A requirement matches only the same major version and a
-provider minor version greater than or equal to the requested minor. Every
-interface begins with `size`, so a newer minor version may append fields; a
-consumer must test `size` before reading an optional field.
+## Runtime services
 
-| ID | Interface | v2 version | Contract |
-|---:|---|---:|---|
-| `0x0000` | core | 1.0 | module start/stop context, structured logging, monotonic time, service lookup, fault reporting and service registration |
-| `0x0100` | memory | 1.0 | owner-tagged allocation/free, quota accounting and explicit memory-class selection |
-| `0x0101` | cache | 1.0 | ownership-checked data-cache clean/invalidate and instruction-cache synchronization |
-| `0x0102` | reclaim/track | 1.0 | session owner creation, allocation/resource tracking, bulk reclaim and checked release of tracked handles |
-| `0x0103` | jobs | reserved | no callable v2 interface; this ID is reserved for a future host-owned asynchronous job API |
+`zzm_services_t` supplies `get_service`, `register_ops` and
+`register_service`. Service tables start with `version` and `size`; check
+the size before reading an appended callback.
 
-A module declares every service it **requires** before load and every service
-it **provides** after successful initialization. The loader binds requirements
-before calling init. Registration is atomic: if initialization fails, no
-provided interface is visible and all start-time resources are reclaimed. The
-service directory must report the provider's module/version, interface
-version, state and capability bits so callers can distinguish not installed,
-incompatible and faulted from an unsupported codec feature.
+| ID | Service | V2 request version | Operations |
+| ---: | --- | --- | --- |
+| 1 | core | 1 | log, monotonic time and fault reporting |
+| 2 | memory | 1 | owner-tagged allocation, free and reallocation |
+| 3 | cache | 1 | data-cache clean and instruction-cache invalidate |
+| 4 | reclaim | 1 | release an owner's resources |
+| 5 | jobs | reserved | no callable implementation |
 
-The v2 runtime does not expose its scheduler to modules. `jobs` remains
-reserved until cancellation, callback lifetime, core affinity and unload
-ordering have one complete contract; modules must not reserve the ID privately
-or invent an equivalent worker-thread API.
+The firmware accepts the v2 request version `1` for these service tables.
+Versioned v3 requests use a packed `major.minor` value and require equal
+major and a provider minor at least as large. The module-provided service
+registry uses the registered service version as a minimum numeric version;
+it is separate from the runtime's built-in service lookup.
 
-## Memory classes and quotas
-
-The header declares both quotas; they are admission limits, not suggestions.
-The loader refuses a module whose declared resident quota exceeds the manifest
-allowance, and the memory service refuses any allocation that would exceed its
-applicable quota.
-
-| Class | Lifetime | Permitted use |
-|---|---|---|
-| `resident` | successful load until unload | module image/BSS, runtime bookkeeping and small bounded state required to expose an interface |
-| `session` | one accepted client/media session | decoder state, input windows, frame/reference buffers, audio buffers and other reclaimable work memory |
-
-Large memory is **session-only**. It cannot be charged to `resident`, retained
-between sessions, or used to make a module permanently resident. The
-reclaim/track service owns the session owner token; closing a session, refusing
-it during a fault, or forcibly ending it reclaims every allocation and tracked
-resource for that token. A module must not conceal a session allocation in a
-static/global pointer after the session ends.
+MiniGL's additional service ids and table versions are in
+[minigl-module.md](minigl-module.md#image-and-services). Modules have no
+general-purpose job or thread service.
 
 ## Lifecycle, references and faults
 
-A manifest entry begins **available** when its package is installed and passes
-the header-only boot scan; it has no loaded image or registered interface. The
-first service lookup that needs one starts an **on-demand load**. The storage
-operation is serialized with the core-1 FWUP FatFs owner and has a bounded
-wait; storage contention records `LOAD_FAILED` rather than hanging the core.
-Dependencies load in topological order and hold a dependency reference. After
-image validation, BSS zeroing, cache maintenance, constructor/start work and
-atomic interface registration succeed, the module is **loaded** and may accept
-sessions.
+The boot scan records each manifest slot as available, missing or rejected.
+First use loads dependencies, verifies and copies the image, zeroes BSS,
+synchronizes caches and calls init. Codec init binds `libzzm_rt` and
+registers its typed operation table. MPEG-2 and WebM expose decoder glue;
+WebP exposes its image operations. Their adapters select the current owner
+before work is allocated.
 
 Each load runs on core 1 as a series of short steps (open, one read-and-hash
 chunk, BSS clear, cache maintenance, module init). Core 1 holds the
@@ -177,84 +138,35 @@ invalidate chunk, `init` the module's init call and `fail` the cleanup after a
 failed load. `steps` counts every step recorded for the module and `t` is
 milliseconds since boot.
 
-An accepted session takes a strong module reference. A pending host-owned
-callback or future job would also take a strong reference; a transient lookup
-does not. On session close, release the reference only after all of that
-session's tracked resources have been reclaimed. At reference count zero the
-module becomes **idle**. The default idle-unload delay is **30 seconds**. A new
-request during that interval cancels unloading and reuses the loaded module.
-After the delay, the runtime unregisters ops/services first, runs orderly C++
-teardown, reclaims resident resources, releases dependency references, poisons
-the slot with undefined ARM instructions and returns it to available.
+`zzm_loader_acquire` increments the use count only after load succeeds.
+`zzm_loader_release` decrements it. A v2 module with no references stays
+loaded until its header's idle timeout expires; the packer writes a default
+of 30 seconds. A new acquire cancels that idle interval. Unload unregisters
+interfaces, calls fini, reclaims module allocations, poisons the slot with
+ARM undefined instructions and releases dependency references.
 
-A start failure, contract violation or reported unrecoverable runtime error
-moves the module to **faulted**. The runtime withdraws its interfaces, rejects
-new sessions, drains/reclaims affected sessions and records the reason. It may
-not call into the module after faulting. Missing, hash/ABI/service mismatch,
-quota rejection and fault are separate observable states; a missing service
-records its service ID.
+Load and fault status is available through `zzm_loader_status` and
+`SDK_OP_MODULE_STATUS`. States distinguish missing, available, loading, loaded,
+load failure, fault, and rejection for ABI, hash, slot, service or capability.
+Reasons distinguish file open/read, invalid image, init, storage contention,
+dependency, cycle, quota and fault failures.
 
-## Fixed arena and H.264/H.265
+V3 release and reset ordering differ from the v2 idle path; see
+[the MiniGL host contract](minigl-module.md#worker-unload-and-reset).
 
-v2 reserves one **32 MiB total arena** for fixed module images. Slots cover
-only linked code, read-only data, data and BSS; they are not decoder working
-memory. The current manifest assigns MPEG-2 2 MiB, WebM 4 MiB, WebP 2 MiB,
-and reserves 4 MiB each for MiniGL, H.264 and H.265, with smaller MP4/AAC
-future slots and unassigned headroom. Decoded frames, reference pictures,
-bitstream windows and AAC buffers are owner-tagged session allocations from
-the card pool and are reclaimed at session end.
+## Fixed arena and codec slots
 
-This sizing establishes loadability headroom, not throughput. Estimates that a
-software decoder may meet a particular resolution or frame rate are inference
-until measured on the target card with the intended streams, display path and
-audio active. The FPGA rasterizer and the FPGA side of every advertised media
-feature remain present regardless of a module's load state; modules provide
-optional software codec paths and never replace the display/raster hardware.
+The [memory map](memory-map.md) reserves the module image arena separately
+from card-pool working memory. Slots contain code, read-only data, data and
+BSS. Decoded frames, reference pictures, bitstream windows and audio buffers
+are owner-tagged allocations outside those slots.
 
-Initial H.264/H.265 playback scope is deliberately narrow: 8-bit 4:2:0 video
-in MP4, with AAC audio through the audio plugin contract. Higher bit depth,
-4:2:2/4:4:4, HDR, arbitrary containers, subtitles and hardware-decoder claims
-are outside that statement. Codec source licensing and an open-source notice
-do **not** clear patent obligations. Distribution of H.264/H.265 support
-requires a release-specific legal/patent review; this document makes no patent
-license or clearance assertion.
+The manifest assigns MPEG-2, WebM, WebP and MiniGL slots and reserves slots
+for H.264, H.265, MP4 and AAC. A reserved slot does not imply an installed
+codec implementation or a measured playback rate. The firmware build
+includes module recipes for MPEG-2, WebM and WebP; MiniGL is built separately.
 
-## Codec plugin contracts
+Codec source licences and notices do not clear patent obligations.
+Distribution of H.264/H.265 support requires a release-specific legal and
+patent review; this document makes no patent-clearance assertion.
 
-Codec modules expose typed services, not codec-specific calls from mailbox
-handlers. All calls use caller-owned request/result structures whose first
-fields are ABI version and size; unknown trailing fields are ignored and a
-caller never reads beyond a provider-reported size.
-
-- A **demuxer** probes a bounded byte prefix, opens a stream, publishes selected
-  tracks and timed compressed access units, supports the declared seek/reset
-  behavior, and closes without leaving borrowed input or session resources.
-  It owns container parsing; it does not decode video or AAC.
-- A **video decoder** accepts demuxed access units plus configuration, produces
-  ordered 8-bit 4:2:0 frames or an explicit need-more-input/error result, and
-  flushes/resets/releases all reference state on the session owner. It does not
-  parse MP4 or control the rasterizer.
-- An **audio decoder** accepts the selected audio access units, produces the
-  negotiated PCM format with timestamps, reports delay/drain state, and
-  releases all per-session state on close. AAC is selected through this
-  contract, never by a direct H.264/H.265 module call.
-
-The host owns session admission, timestamps, A/V synchronization, output
-surfaces and the rasterizer hand-off. Plugins must return ordinary status codes
-for malformed data, unsupported profiles and quota exhaustion; they must not
-fault the module merely because one media file is invalid.
-
-## Migration of existing modules
-
-The current MPEG-2, WebM and WebP modules may retain their codec-specific glue
-while they are first moved behind the v2 service directory. In that phase, the
-existing glue is an adapter that implements the new decoder/demuxer/audio
-contract and forwards allocation, cache and teardown to `libzzm_rt`; there is
-one registry-facing path, not a parallel legacy path. Preserve tested
-container/codec behavior while replacing direct `zzm_services_t` and
-module-specific registry access with the v2 binding.
-
-Once an adapter has equivalent v2 coverage, move only genuinely shared session,
-tracking and output code to the host/runtime, then remove the superseded glue.
-Do not rewrite a codec merely to remove a small adapter, and do not leave a
-legacy direct call path after its v2 replacement is accepted.

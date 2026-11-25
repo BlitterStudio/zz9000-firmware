@@ -15,7 +15,7 @@ and programs that use the card.
 | Document | Contents |
 | --- | --- |
 | [sdk/README.md](../sdk/README.md) | SDK v2 layout, the AmigaOS package, and how to build it. |
-| [zz9k-library.md](../sdk/docs/zz9k-library.md) | `zz9k.library`: headers, calls, service jobs, and the ARM app client API. |
+| [zz9k-library.md](../sdk/docs/zz9k-library.md) | `zz9k.library`: headers, calls and service jobs; `aar.library`'s ZZ9000 platform layer. |
 | [zz9k-zorro2-services.md](../sdk/docs/zz9k-zorro2-services.md) | Which services work in the Zorro II host window. |
 | [zz9k-crypto-acceleration.md](../sdk/docs/zz9k-crypto-acceleration.md) | Mailbox crypto operations. |
 | [zz9k-amissl-provider.md](../sdk/docs/zz9k-amissl-provider.md) | The OpenSSL 3 provider for AmiSSL applications. |
@@ -32,6 +32,8 @@ and programs that use the card.
 
 | Document | Contents |
 | --- | --- |
+| [AAR standard](https://github.com/BlitterStudio/aar/blob/main/spec/aar.md) | The normative AAR API 0.5 specification, including apps, the Amiga client library and transport. |
+| [aar-run manual](https://github.com/BlitterStudio/aar/blob/main/client/run/README.md) | The reference launcher, shipped by the SDK as `Docs/aar-run.guide`. |
 | [aar-developer-guide.md](https://github.com/BlitterStudio/aar/blob/main/docs/aar-developer-guide.md) | Building (including freestanding apps), running, memory, scheduling, bit-identical maths, and porting apps. |
 | [aar-api.md](https://github.com/BlitterStudio/aar/blob/main/docs/aar-api.md) | Every `aar_*` call and `AAR_*` constant, with the ZZ9000 notes and extension table. |
 | [app-runtime.md](app-runtime.md) | The firmware and client contract: the AAR 0.5 interface choices, process records and handles, the record arena, the claim and transport protocol (control block, queues, doorbell), admission and its refusal reasons, limits and leases, release and quarantine, address spaces and ASIDs, lifecycle, retire, exit and reset teardown, and the SVC interface. |
@@ -43,14 +45,14 @@ and programs that use the card.
 | Document | Contents |
 | --- | --- |
 | [memory-map.md](memory-map.md) | DDR reservations, the linker image, the record arena and the card pool. |
-| [modules.md](modules.md) | Module runtime v2: verified, on-demand `.ZZM` modules. |
+| [modules.md](modules.md) | Module runtime v2: verified, on-demand codec `.ZZM` modules, service tables and allocation. |
 | [audio-fabric.md](audio-fabric.md) | Mixing SDK playback and direct-ring audio into the TX ring. |
 | [audio-conversion.md](audio-conversion.md) | PCM rate conversion to and from the 48 kHz period. |
 | [audio-saturation-ceiling.md](audio-saturation-ceiling.md) | Paula and AX saturation calibration. |
 | [ahi-recording-protocol.md](ahi-recording-protocol.md) | The ZZ9000AX recording ring and its protocol. |
 | [native-p96-pip.md](native-p96-pip.md) | The Picasso96 PIP overlay plane. |
 | [usb-proxy-protocol.md](usb-proxy-protocol.md) | The USB proxy protocol, version 2. |
-| [minigl-module.md](minigl-module.md) | Plan for moving card-side MiniGL into `MINIGL.ZZM` (GL work is parked). |
-| [minigl-v29-zz9000-transport.md](minigl-v29-zz9000-transport.md) | The MiniGL wire-v9 transport (GL work is parked). |
+| [minigl-module.md](minigl-module.md) | `MINIGL.ZZM`: v3 module format, resource services, app GL, transport acquisition and recovery. |
+| [minigl-v29-zz9000-transport.md](minigl-v29-zz9000-transport.md) | The MiniGL wire-v9 transport. |
 | [testing/pixel-retiming.md](testing/pixel-retiming.md) | FPGA timing evidence for the pixel-domain paths. |
 | [testing/zz9000ax-dig0-feasibility.md](testing/zz9000ax-dig0-feasibility.md) | Why `DIG0` alone cannot carry lossless stereo capture. |
