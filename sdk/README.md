@@ -245,6 +245,8 @@ includes documentation for [the picture DataType](docs/zz9k-picture-datatype.md)
 [the sound DataType](docs/zz9k-sound-datatype.md),
 [the voice engine](docs/zz9k-voice.md),
 [ZZPlay](docs/zzplay.md), and [the AmiSSL provider](docs/zz9k-amissl-provider.md).
+The build scripts also build `zz9k-voiceplay`, the voice engine's player and
+test tool, as `build/zz9k-voiceplay`; the package does not include it.
 
 ## Compatibility
 

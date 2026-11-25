@@ -6,6 +6,11 @@ frame", "change its period") and the firmware mixes the voices at 48 kHz into
 the ZZ9000AX output. It suits tracker replayers, game audio and anything else
 that would otherwise mix on the 68k.
 
+The AHI driver `zz9000ax.audio` in
+[zz9000-drivers](https://github.com/BlitterStudio/zz9000-drivers/blob/master/ahi/README.md#hardware-mixing-modes)
+uses the engine for its hardware-mixing modes, in which each AHI channel is
+one voice.
+
 This document is the one place for the voice contract. The wire layouts are
 in `zz9k/voice.h`, the library calls in [zz9k-library.md](zz9k-library.md),
 and the firmware side of the mixing path in
@@ -1017,7 +1022,8 @@ have its bytes rewritten.
 
 These runs used a ZZ9000 on Zorro III in an A4000 with a 68060, under
 AmigaOS 3.2, with the firmware lead floor of 7680 frames (standard sessions;
-no low-latency session has run). The maintainer listened to each run. All
+the low-latency runs are under [Low-latency sessions](#low-latency-sessions)).
+The maintainer listened to each run. All
 runs used `zz9k-voiceplay`.
 
 | Run | Result |

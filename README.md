@@ -17,6 +17,7 @@ sources, and host tests.
 - Full-rate native capture and centered 1080p output profiles, with matching-tool calibration and live geometry support.
 - Picasso96 video overlay support and custom progressive modelines.
 - ZZ9000AX boot-time audio scenes, mixer baseline settings, and clean-level ceilings.
+- ZZ9000AX voice engine: a card-side mixer for up to 32 sample voices at 48 kHz, with optional volume ramps, a soft limiter, cubic interpolation, and low-latency sessions. Programs reach it through the Voice API of `zz9k.library`, and the AHI hardware-mixing modes of the matching `zz9000ax.audio` driver use it. It is advertised on Zorro III only. See the [voice engine guide](sdk/docs/zz9k-voice.md).
 - USB proxy protocol v2 with control, bulk, persistent-interrupt, and selected ISO transport paths.
 - Firmware-file updates from AmigaOS through the matching driver tools.
 - SDK media, image, archive, audio, and AmiSSL-provider components.

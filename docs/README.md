@@ -21,7 +21,7 @@ and programs that use the card.
 | [zz9k-amissl-provider.md](../sdk/docs/zz9k-amissl-provider.md) | The OpenSSL 3 provider for AmiSSL applications. |
 | [zz9k-picture-datatype.md](../sdk/docs/zz9k-picture-datatype.md) | `zz9k-picture.datatype` for JPEG, PNG, and WebP. |
 | [zz9k-sound-datatype.md](../sdk/docs/zz9k-sound-datatype.md) | `zz9k-sound.datatype` for MP3, FLAC, and Ogg Vorbis. |
-| [zz9k-voice.md](../sdk/docs/zz9k-voice.md) | The ZZ9000AX voice engine: up to 32 sample voices driven by timestamped commands, with `zz9k-voiceplay`. |
+| [zz9k-voice.md](../sdk/docs/zz9k-voice.md) | The ZZ9000AX voice engine: up to 32 sample voices at 48 kHz driven by timestamped commands through the Voice API, with `zz9k-voiceplay`; the AHI hardware-mixing modes use it. |
 | [zzplay.md](../sdk/docs/zzplay.md) | The ZZPlay media player. |
 | [zz9k-68k-offload.md](../sdk/docs/zz9k-68k-offload.md) | The experimental 68k runner and offload model. |
 | [zz9k-modules.md](../sdk/docs/zz9k-modules.md) | Service manifests and the service registry helpers. |
@@ -46,7 +46,7 @@ and programs that use the card.
 | --- | --- |
 | [memory-map.md](memory-map.md) | DDR reservations, the linker image, the record arena and the card pool. |
 | [modules.md](modules.md) | Module runtime v2: verified, on-demand codec `.ZZM` modules, service tables and allocation. |
-| [audio-fabric.md](audio-fabric.md) | Mixing SDK playback and direct-ring audio into the TX ring. |
+| [audio-fabric.md](audio-fabric.md) | Mixing SDK playback, direct-ring audio and the voice engine into the TX ring. |
 | [audio-conversion.md](audio-conversion.md) | PCM rate conversion to and from the 48 kHz period. |
 | [audio-saturation-ceiling.md](audio-saturation-ceiling.md) | Paula and AX saturation calibration. |
 | [ahi-recording-protocol.md](ahi-recording-protocol.md) | The ZZ9000AX recording ring and its protocol. |
