@@ -4,7 +4,7 @@
 
 ## Confirmed result
 
-Fresh original-to-final comparison on the A4000/68060, ZZ9000 Zorro III. Each row uses one 20-second protocol sample per image, 1016 render periods and 999 steady full-pool periods.
+Forward-playback original-to-final comparison on the A4000/68060, ZZ9000 Zorro III. Each row uses one 20-second protocol sample per image, 1016 render periods and 999 steady full-pool periods.
 
 | Required objective | Original peak, us | Final peak, us | Change, us | Reduction | Requirement |
 |---|---:|---:|---:|---:|---|
@@ -71,7 +71,11 @@ All cases passed their counter, timeline, delay and sample-count checks. The hol
 
 Actual candidate logs show the host audio/session suites and 118 SDK service checks passing. Default-off output matched the frozen engine for 30000 sequences; 3000 oversampled scenarios matched the independent 96 kHz convolution reference. The qemu-arm NEON baseline, ramp, limiter, cubic, cubic guard and oversampling suites passed.
 
-Additional host and ARM proofs cover 116640 linear guarded-reference scenarios and 15552 cases with actual registered banks of 1, 2 or 3 frames, all four formats, both directions, loops, one-shot ends, ramps and partial vectors. Five new S8/S8S lane-order, backward-address and over-read mutants failed both ARM guard probes, by PCM mismatch or a protected-page fault as appropriate.
+Local guard probes passed 116640 linear guarded-reference scenarios and 15552 cases with actual registered banks of 1, 2 or 3 frames, all four formats, both directions, loops, one-shot ends, ramps and partial vectors. Host runs exercise the scalar reader; ARM runs exercise the changed NEON reader. Five new S8/S8S lane-order, backward-address and over-read mutants failed both ARM guard probes, by PCM mismatch or a protected-page fault as appropriate.
+
+Those guard probes did not exercise 2x or non-dyadic steps; those paths rely on the separate committed ramp and oversampling PCM tests. The guard sources are ignored local artifacts, not permanent test targets in this checkout. Their mutant source copies were removed after validation; only logs remain. These exact probes cannot be rerun from a clean checkout.
+
+The ARM PCM tests used arm-linux-gnueabihf-gcc without an explicit `-marm`, not the production arm-none-eabi compiler invocation. The card runs verified timing, counters, timeline and delay, not a capture of the production binary's PCM. Same-compiler/ISA coverage remains a U5 integration requirement.
 
 The original image's correctness receipt uses the explicit recorded-source exception bound only to the original build/image identity; its earlier host raw logs were not preserved. New candidates are not allowed that exception and use the actual logs above.
 
@@ -81,11 +85,13 @@ The original image's correctness receipt uses the explicit recorded-source excep
 - Full-load media/voice coexistence remains unqualified. This optimization does not claim to fix its video drops or late producer records.
 - No fresh post-keep phase profile was taken. Earlier estimated mixing/FIR shares are stale; they do not identify a new bottleneck.
 - Any later feature or compiler change needs its own render-budget qualification. The margin is small.
+- Full-load backward timing was not measured in this run and remains a qualification gate before advertising 2x.
+- The stated normal-tool hash came from earlier staging; it is not repeated in the per-case JSON, so those receipts do not independently attest that executable identity.
 
 ## Accounting and local receipts
 
 Stop: every required target reached. Two serial candidates: one kept, one not selected; zero reverted, inconclusive, censored, degenerate, errors, timeouts or deferred dependencies. No judge calls ($0). Whole-run model cost is unavailable and was uncapped by approval.
 
-Phase 3 stopped at `2026-11-24T08:04:51.935098Z`: 6453.212 active seconds (107.55 minutes), 33731.061 elapsed seconds from the original approval anchor (9 h 22 min 11 s). External power waits, including the earlier overnight wait, are excluded from active time. The user explicitly extended the caps to four candidates, two active hours total and ten elapsed hours from the unchanged original anchor; no experiment ran while the earlier approval was expired.
+Phase 3 stopped at `2026-11-24T08:04:51.935098Z`: 6453.212 active seconds (107.55 minutes), 33731.061 elapsed seconds from the original approval anchor (9 h 22 min 11 s). External power waits, including the earlier overnight wait, are excluded from active time. The user explicitly extended the caps to two active hours total and ten elapsed hours from the unchanged original anchor; the four-candidate cap was unchanged. No experiment ran while the earlier approval was expired.
 
 The local ledger is `.context/compound-engineering/ce-optimize/voice-oversample-card/experiment-log.yaml`, with `spec.yaml` beside it. Actual CLI/UART snapshots, per-case receipts, correctness logs and canonical decisions are in `.docker-tmp/oversample-opt/e2/`, especially `baseline-confirm-*`, `final-confirm-*`, `qualification.json`, `host-suite.log`, `arm-suite.log` and `confirmation-decision.json`. These ignored local artifacts and private benchmark refs are not bundled with this report.
