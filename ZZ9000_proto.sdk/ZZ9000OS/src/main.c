@@ -57,6 +57,7 @@ void Xil_AssertNonVoid() {}
 #ifdef ZZM_LOAD_BENCH
 #include "zzm_load_bench.h"
 #endif
+#include "mailbox_poll_deadline.h"
 #include "interrupt.h"
 #include "bootrom.h"
 #include "core2.h"
@@ -444,6 +445,36 @@ static volatile uint32_t sdk_mailbox_register_events = 0;
 #define SDK_MAILBOX_EVENT_IRQ_ACK  2U
 #define SDK_MAILBOX_EVENT_IRQ_ENABLE 4U
 #define SDK_MAILBOX_EVENT_IRQ_DISABLE 8U
+
+/*
+ * Mailbox scan triggers. The request ring is read by sdk_mailbox_task from
+ * three places in the main loop: a register event (IRQ ack and so on), every
+ * 256th idle pass, and an idle pass that finds MAILBOX_POLL_DEADLINE_US
+ * microseconds have passed since the last scan of any trigger. Every scan
+ * restarts the deadline, so events and the periodic scan do not add deadline
+ * scans. Idle passes are those with no Zorro read or write in service.
+ *
+ * MAILBOX_POLL_DEADLINE_US is on by default at 250. Override it at build time,
+ * for example EXTRA_CFLAGS='-DMAILBOX_POLL_DEADLINE_US=500', or set it to 0
+ * (-DMAILBOX_POLL_DEADLINE_US=0) to drop the deadline scan and keep only the
+ * events and the every-256th-idle-pass scan.
+ */
+#ifndef MAILBOX_POLL_DEADLINE_US
+#define MAILBOX_POLL_DEADLINE_US 250
+#endif
+#if MAILBOX_POLL_DEADLINE_US < 0
+#error "MAILBOX_POLL_DEADLINE_US must be 0 (off) or a positive microsecond count"
+#endif
+#if MAILBOX_POLL_DEADLINE_US > 0
+#define MAILBOX_POLL_DEADLINE_TICKS \
+	(((uint64_t)MAILBOX_POLL_DEADLINE_US * COUNTS_PER_SECOND) / 1000000U)
+#define SDK_MAILBOX_TASK() do { \
+	sdk_mailbox_last_scan = module_now; \
+	sdk_mailbox_task(); \
+} while (0)
+#else
+#define SDK_MAILBOX_TASK() sdk_mailbox_task()
+#endif
 
 // usb state
 // Protocol: 0 = idle/error, 0xFFFF = busy (transfer in progress), other = success (blocks transferred)
@@ -1420,15 +1451,23 @@ int main() {
 	// last time the ethernet state machine was serviced
 	XTime eth_task_last_run = 0;
 	uint32_t sdk_mailbox_poll_divider = 0;
+#if MAILBOX_POLL_DEADLINE_US > 0
+	/* module_now of the pass whose scan was the latest, whatever triggered
+	 * it. 0 makes the first idle pass scan once. */
+	XTime sdk_mailbox_last_scan = 0;
+#endif
 	uint8_t aperture_ack_poll_divider = 0;
 	uint32_t core1_fault_reported = CORE_FAULT_NONE;
 
 	while (1) {
+		/* Timer read of this pass, taken once at the top; the module
+		 * loader and the mailbox poll deadline use it. */
+		XTime module_now;
+
 		watchdog_kick();
 		core1_console_drain();
 		sd_activity_led_poll();
 		{
-			XTime module_now;
 			XTime_GetTime(&module_now);
 			zzm_loader_poll((uint64_t)module_now * 1000U / COUNTS_PER_SECOND);
 			sdk_mailbox_poll_module_load();
@@ -2957,7 +2996,7 @@ int main() {
 					sdk_mailbox_ack_irq();
 				if (events & SDK_MAILBOX_EVENT_IRQ_ENABLE)
 					sdk_mailbox_irq_enable();
-				sdk_mailbox_task();
+				SDK_MAILBOX_TASK();
 				if (events & SDK_MAILBOX_EVENT_DOORBELL) {
 					sdk_mailbox_doorbell();
 					zzm_minigl_doorbell();
@@ -2969,7 +3008,7 @@ int main() {
 			if (zstate & MNTZORRO_STATUS_SDK_IRQ_ACK) {
 				sdk_mailbox_ack_irq();
 				mntzorro_pulse_control(MNTZORRO_CTRL_SDK_IRQ_ACK_CLEAR);
-				sdk_mailbox_task();
+				SDK_MAILBOX_TASK();
 				sdk_diag_task_count++;
 			}
 			if (zstate & MNTZORRO_STATUS_SDK_DOORBELL) {
@@ -2978,13 +3017,30 @@ int main() {
 				mntzorro_pulse_control(MNTZORRO_CTRL_SDK_DOORBELL_CLEAR);
 				/* Core 0 records the doorbell and wakes core 1; it never
 				 * parses wire packets, including after a core-1 fault. */
-				sdk_mailbox_task();
+				SDK_MAILBOX_TASK();
 				sdk_diag_task_count++;
 			}
 #endif
 			sdk_mailbox_poll_divider++;
+#if MAILBOX_POLL_DEADLINE_US > 0
+			/* A scan is also due once MAILBOX_POLL_DEADLINE_US has passed
+			 * since the last one, whatever triggered it, so a request waits
+			 * for the first idle pass after that and not for the 256th.
+			 * Only idle passes (no Zorro read or write in service) check
+			 * it. Both ends of the interval are top-of-pass timer reads
+			 * (module_now), so the scan comes after DEADLINE give or take
+			 * one pass, plus any long work in the passes between; this is
+			 * not a hard real-time bound. The periodic pass is not counted
+			 * here: its scan below restarts the deadline too. */
+			if (mailbox_poll_deadline_due(sdk_mailbox_poll_divider,
+			                              module_now, sdk_mailbox_last_scan,
+			                              MAILBOX_POLL_DEADLINE_TICKS)) {
+				SDK_MAILBOX_TASK();
+				sdk_diag_task_count++;
+			}
+#endif
 			if ((sdk_mailbox_poll_divider & 0xffU) == 0) {
-				sdk_mailbox_task();
+				SDK_MAILBOX_TASK();
 				sdk_diag_task_count++;
 
 				// surface coprocessor (core1) crashes; the slot owns its
