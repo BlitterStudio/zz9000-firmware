@@ -6007,7 +6007,9 @@ struct SDKQueryPalettePayload {
  * hash op does - the result goes to a caller shared buffer as `count`
  * consecutive 0x00RRGGBB words from index `start`. The palette is
  * display-global; `surface` is accepted for future per-surface tables but
- * does not select one today. */
+ * does not select one today. Zorro II never fills the shadow, so the op is
+ * UNSUPPORTED there, matching the service flag withheld by
+ * sdk_service_bus_flags. */
 static uint16_t handle_query_palette(volatile struct SDKMailboxEntry *req,
                                      volatile struct SDKMailboxEntry *comp,
                                      uint16_t payload_len)
@@ -6019,6 +6021,9 @@ static uint16_t handle_query_palette(volatile struct SDKMailboxEntry *req,
 	uint32_t dst_offset;
 	uint32_t flags;
 	uint32_t written;
+
+	if (!sdk_aperture_runtime_is_zorro3())
+		return complete_status(req, comp, SDK_STATUS_UNSUPPORTED);
 
 	if (payload_len < 24U)
 		return complete_status(req, comp, SDK_STATUS_BAD_REQUEST);

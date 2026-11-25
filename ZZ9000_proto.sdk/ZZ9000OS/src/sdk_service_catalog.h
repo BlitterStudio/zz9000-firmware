@@ -55,8 +55,7 @@ static const struct SDKServiceDescriptor sdk_services[] = {
 		.version = 0x00020000U,
 		.capability_bits = SDK_CAP_SURFACES | SDK_CAP_FRAMEBUFFER_SURFACE |
 			SDK_CAP_SURFACE_OPS,
-		.flags = SDK_SERVICE_FLAG_FIRMWARE | SDK_SERVICE_FLAG_ZERO_COPY |
-			SDK_SERVICE_FLAG_SURFACE_PALETTE_QUERY,
+		.flags = SDK_SERVICE_FLAG_FIRMWARE | SDK_SERVICE_FLAG_ZERO_COPY,
 		.opcode_base = SDK_SERVICE_SURFACE,
 		.opcode_count = 6,
 		.name = "surface"
@@ -203,7 +202,10 @@ static const struct SDKServiceDescriptor sdk_services[] = {
  * it serves a descriptor. The voice engine and its stereo sample formats
  * are advertised on Zorro III only: they passed hardware qualification
  * there, and a Zorro II machine has not been tested. The opcodes and the
- * formats work on both buses. */
+ * formats work on both buses. The palette query is Zorro III only for a
+ * different reason: only the Zorro III path loads the CLUT through the
+ * OP_SET_PALETTE op the firmware shadows, so on Zorro II the shadow never
+ * fills and QUERY_PALETTE answers UNSUPPORTED. */
 static uint32_t sdk_service_bus_flags(uint32_t service_id, int zorro3)
 {
 	uint32_t flags = 0U;
@@ -215,6 +217,8 @@ static uint32_t sdk_service_bus_flags(uint32_t service_id, int zorro3)
 	if (service_id == SDK_SERVICE_AUDIO)
 		flags |= SDK_SERVICE_FLAG_AUDIO_VOICE |
 			 SDK_SERVICE_FLAG_AUDIO_VOICE_STEREO;
+	if (service_id == SDK_SERVICE_SURFACE)
+		flags |= SDK_SERVICE_FLAG_SURFACE_PALETTE_QUERY;
 	return flags;
 }
 

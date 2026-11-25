@@ -133,6 +133,8 @@ static int require_palette_service(ZZ9KContext *ctx, const ZZ9KCaps *caps)
            "SURFACE_PALETTE_QUERY\n");
     printf("              (surface service flags 0x%08lx)\n",
            (unsigned long)service.flags);
+    printf("              (Zorro II cards never advertise it; the query is "
+           "Zorro III only)\n");
     return 0;
   }
 

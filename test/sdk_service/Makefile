@@ -11,7 +11,7 @@ CFLAGS += -std=c99 -Wall -Wextra -Werror -I$(SRC)
 TARGETS := build/service_discovery_test build/mailbox_memory_test \
 	build/client_release_test build/internal_completion_test \
 	build/voice_handlers_test build/media_pump_release_test \
-	build/retired_video_session_test
+	build/palette_query_test build/retired_video_session_test
 build/service_discovery_test: service_discovery_test.c $(SRC)/sdk_service_catalog.h
 	mkdir -p build
 	$(CC) $(CFLAGS) $< -o $@
@@ -64,6 +64,19 @@ build/media_pump_release_test: media_pump_release_test.c $(SRC)/sdk_mailbox.c \
 		-I$(MOCKS) -I$(SRC) -o $@ media_pump_release_test.c \
 		$(SRC)/sdk_mailbox.c $(SRC)/scheduler.c
 
+# SDK_OP_QUERY_PALETTE and the palette query service flag per bus, through
+# the dispatcher with the real CLUT shadow.
+build/palette_query_test: palette_query_test.c $(SRC)/sdk_mailbox.c \
+	$(SRC)/scheduler.c $(SRC)/sdk_palette.c $(SRC)/sdk_palette.h \
+	$(SRC)/sdk_mailbox.h $(MOCKS)/mailbox_test_decls.h
+	mkdir -p build
+	$(CC) -O2 -g -Wall -Wextra -static -ffunction-sections \
+		-fdata-sections -DTASKQ_HOST_TEST -DSDK_MAILBOX_HOST_TEST \
+		-include $(MOCKS)/mailbox_test_decls.h \
+		-Wl,--gc-sections -Wl,--unresolved-symbols=ignore-all \
+		-I$(MOCKS) -I$(SRC) -o $@ palette_query_test.c \
+		$(SRC)/sdk_mailbox.c $(SRC)/scheduler.c $(SRC)/sdk_palette.c
+
 # The retired video-session opcodes 0x0b00..0x0b03 through the same
 # dispatcher: every one answers UNSUPPORTED and nothing reaches core 1.
 build/retired_video_session_test: retired_video_session_test.c \
@@ -84,6 +97,7 @@ test: $(TARGETS)
 	./build/internal_completion_test
 	./build/voice_handlers_test
 	./build/media_pump_release_test
+	./build/palette_query_test
 	./build/retired_video_session_test
 
 clean:

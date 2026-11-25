@@ -109,6 +109,17 @@ int main(void)
 				puts("service discovery: memory media input flag wrong");
 				return 1;
 			}
+		} else if (expected[i].id == SDK_SERVICE_SURFACE) {
+			/* The palette query flag follows the bus: the CLUT shadow
+			 * is filled on Zorro III only. */
+			if ((service->flags &
+			     SDK_SERVICE_FLAG_SURFACE_PALETTE_QUERY) != 0U ||
+			    (z2_flags & SDK_SERVICE_FLAG_SURFACE_PALETTE_QUERY) != 0U ||
+			    z3_flags != (service->flags |
+					 SDK_SERVICE_FLAG_SURFACE_PALETTE_QUERY)) {
+				puts("service discovery: palette query flag is not Zorro III only");
+				return 1;
+			}
 		} else if (z3_flags != service->flags) {
 			printf("service discovery: Zorro III changed flags of 0x%04x\n",
 			       (unsigned)expected[i].id);

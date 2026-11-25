@@ -2953,7 +2953,9 @@ enum ZZ9KPaletteQueryFlags {
  * consecutive 0x00RRGGBB words starting at palette index `start`. The palette
  * is display-global: `surface` is carried for future per-surface tables but
  * does not select one, and this op implies nothing about 8-bit overlay
- * composition being available. */
+ * composition being available. Zorro III only: a Zorro II card does not
+ * advertise ZZ9K_SERVICE_FLAG_SURFACE_PALETTE_QUERY and answers
+ * ZZ9K_STATUS_UNSUPPORTED. */
 typedef struct ZZ9KPaletteQueryDesc {
   uint32_t surface;
   uint32_t start;
