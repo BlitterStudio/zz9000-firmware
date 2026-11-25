@@ -8,8 +8,12 @@
 
 /* A child process reads the file in large blocks and copies them into
  * slots of the card-visible input buffer while the player waits on the
- * card, so neither the disk nor the copy to the card adds to a frame. One
- * reader exists at a time. */
+ * card, so neither the disk nor the copy to the card adds to a frame. The
+ * child runs above the player, so it copies in 8 KiB chunks and sleeps
+ * between them whenever the player is waiting for the CPU: a card reply
+ * that is already published is seen at most one chunk late. A slot becomes
+ * visible to the player only when all of it is on the card. One reader
+ * exists at a time. */
 typedef struct ZZPlayReader ZZPlayReader;
 
 /* Opens path and starts filling card (card_bytes, at least two slots'
