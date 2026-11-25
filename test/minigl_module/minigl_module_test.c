@@ -482,9 +482,15 @@ int zzapp_display_layout(uint32_t *layout)
     *layout = display_layout;
     return 0;
 }
+/* What the client's copy of the frame shows: the first RGB565 pixel of the
+ * presented buffer, taken at each flip (a frame is visible once flipped). */
+static const uint8_t *g_flip_src;
+static uint8_t g_shown[2];
 int zzapp_svc_display_flip(uint32_t surface_id)
 {
     (void)surface_id;
+    if (g_flip_src)
+        memcpy(g_shown, g_flip_src, sizeof(g_shown));
     if (hold_flip)
         flip_idle = 0;
     return 0;
@@ -910,6 +916,88 @@ static void test_reset_cancels_resumable_load(void)
     sdk_mailbox_minigl_reset_release_all();
     assert(zzm_loader_status_by_id(ZZM_MODULE_MINIGL, &status));
     assert(status.ref_count == 0U);
+}
+
+/* The first RGB565 pixel (big endian) of seven distinct clear colours. */
+static const struct {
+    float rgb[3];
+    uint8_t pixel[2];
+} swap_colours[7] = {
+    { { 1.0f, 0.0f, 0.0f }, { 0xF8U, 0x00U } },
+    { { 0.0f, 1.0f, 0.0f }, { 0x07U, 0xE0U } },
+    { { 0.0f, 0.0f, 1.0f }, { 0x00U, 0x1FU } },
+    { { 1.0f, 1.0f, 1.0f }, { 0xFFU, 0xFFU } },
+    { { 1.0f, 0.0f, 1.0f }, { 0xF8U, 0x1FU } },
+    { { 0.0f, 1.0f, 1.0f }, { 0x07U, 0xFFU } },
+    { { 1.0f, 1.0f, 0.0f }, { 0xFFU, 0xE0U } },
+};
+
+/* AAR spec 8.5 (conformance C-GL.5): when swap n returns, the frame of swap
+ * n - 2 (or a later one) is visible to the client.  Seven frames with distinct
+ * clear colours make that exact.  The binding rotates three colour targets, so
+ * a context drawing the front target (the front end's default for the
+ * in-process context) puts each frame's draws into the previous frame's
+ * buffer and the buffer a swap seals stays at its initial fill: the client
+ * then sees an older colour for ever.  The GPU and the flip may be slow.
+ * Frames 8 to 10 name the front buffer, which must still draw into the frame
+ * being built. */
+static void test_gl_swap_presents(const zzm_minigl_ops_v1_t *ops, void *context,
+                                  int slow_gpu, int slow_flip)
+{
+    uint8_t frame[64];
+    const void *gl = NULL;
+    const aar_gl *draw;
+    unsigned n;
+    unsigned k;
+
+    memset(frame, 0, sizeof(frame));
+    assert(minigl_platform_set_graphics(&test_rix_service, &graphics_caps,
+                                        ZZM_MODULE_OWNER(ZZM_MODULE_MINIGL)));
+    display_width = 4U;
+    display_height = 2U;
+    display_front = 0x08000000U;
+    display_back = 0x08100000U;
+    display_latest = 0;
+    display_format = 1U;
+    display_layout = 1U;
+    display_pitch = 8U;
+    zzapp_gl_test_set_p96(frame, sizeof(frame));
+    g_flip_src = frame;
+    memset(g_shown, 0, sizeof(g_shown));
+    hold_flip = slow_flip;
+    flip_idle = 1;
+    assert(ops->app_bind_flags(context, 1U, 0U, &gl) == 0 && gl != NULL);
+    draw = (const aar_gl *)gl;
+    for (n = 1U; n <= 10U; n++) {
+        /* Frames 8 to 10 name the front buffer and repeat one colour. */
+        const unsigned colour = n <= 7U ? n - 1U : 0U;
+
+        if (n == 8U)
+            draw->DrawBuffer(0x0404U);
+        draw->ClearColor(swap_colours[colour].rgb[0], swap_colours[colour].rgb[1],
+                         swap_colours[colour].rgb[2], 1.0f);
+        draw->Clear(0x4000U);
+        if (slow_gpu) {
+            g_fetch_hold = 1;
+            g_fetch_release_us = now_us + 40U;
+        }
+        assert(ops->app_swap(context) == 0);
+        if (n < 3U)
+            continue;
+        for (k = n - 2U; k <= n; k++) {
+            const unsigned shown = k <= 7U ? k - 1U : 0U;
+
+            if (memcmp(g_shown, swap_colours[shown].pixel, sizeof(g_shown)) == 0)
+                break;
+        }
+        assert(k <= n);
+    }
+    ops->app_unbind(context);
+    g_fetch_hold = 0;
+    hold_flip = 0;
+    flip_idle = 1;
+    g_flip_src = NULL;
+    zzapp_gl_test_set_p96(NULL, 0U);
 }
 
 
@@ -1778,6 +1866,16 @@ int main(void)
         assert(zzapp_gl_test_invalidates() == 1U);
     }
     ops->app_unbind(context);
+    display_width = 640U;
+    display_height = 480U;
+    display_pitch = 1280U;
+    display_format = 1U;
+    display_layout = 2U;
+    /* C-GL.5: the swap presents the frame (AAR spec 8.5). */
+    test_gl_swap_presents(ops, context, 0, 0);
+    test_gl_swap_presents(ops, context, 1, 0);
+    test_gl_swap_presents(ops, context, 0, 1);
+    test_gl_swap_presents(ops, context, 1, 1);
     display_width = 640U;
     display_height = 480U;
     display_pitch = 1280U;
