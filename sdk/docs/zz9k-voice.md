@@ -1191,8 +1191,8 @@ listener heard both as clean with no clear difference. This is a listening
 check of the effect handling, not a measurement of the ramp.
 
 Still open after these four pairs: the held oversampling and envelope
-listening, and the full-load video, Zorro II, mailbox and window-open
-checks. These sessions do not qualify any of them.
+listening, and Zorro II. These sessions do not qualify any of them. Full-load
+video and window-open timing were measured separately, see the next section.
 
 ### Low-latency sessions
 
@@ -1213,7 +1213,35 @@ a low-latency session and 7680 frames (160 ms) in a standard one. The
 maintainer judged the low-latency session tighter when playing from the
 keyboard. Of 41 keys in the first low-latency run, 2 notes were late.
 
-One gap remains. While a program opens its window, the firmware once stood
-still for about 255 ms in these runs. A low-latency session underruns during
-such a pause (48 underruns in one run), a standard session mostly rides it
-out. Keep that in mind when a tracker window opens during playback.
+On firmware before the mailbox changes of #297 and #298, the firmware once
+stood still for about 255 ms while a program opened its window, and a
+low-latency session underran (48 underruns in one run). This no longer
+reproduces on master (2026-11-25):
+
+| Load | Session | Result | Longest firmware poll gap |
+| --- | --- | --- | --- |
+| ZZPlay starts and opens its window during the session | Low latency | 0 underruns, 240 records late in one tick | 8.6 ms |
+| Four shell windows opened during the session | Low latency | 0 late, 0 underruns | 3.8 ms |
+
+The late tick fits the Exec time slice: ZZPlay and `zz9k-voiceplay` both ran
+at priority 0, and a slice of 80 ms is longer than the 60 ms lead. This start
+case was not rerun with the producer above priority 0; in the full-load run
+below, a producer at priority 1 had nothing late. A low-latency producer
+should run above the programs it competes with.
+
+### Full load with video
+
+ZZPlay played a 30 s PAL MPEG-2 file (750 pictures, direct AX audio) while
+`zz9k-voiceplay LOAD VOICES=32 STEREO RATE=96000 RAMP=256 GAIN=65535 CHURN
+LIMITER LINEAR` ran for 20 s, both at priority 0, on master (2026-11-25):
+
+| Session | Pictures presented | Voice late, underruns |
+| --- | --- | --- |
+| Low latency | 750 of 750 | 0, 0 |
+| Low latency, repeated | 745 of 750 | 0, 0 |
+| Standard | 749 of 750 | 0, 0 |
+
+Before #297 and #298 the same test presented 477 of 750 pictures. When both
+programs ran below priority 0, the video dropped 17 to 20 pictures and the
+low-latency session reported late records, so measure coexistence at the
+priority a user would start the programs with.
