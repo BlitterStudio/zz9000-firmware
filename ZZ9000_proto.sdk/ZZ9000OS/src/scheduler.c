@@ -437,6 +437,7 @@ taskq_class_t taskq_class_for_opcode(uint32_t opcode, uint32_t in_len)
     /* in_len carries the destination-rect byte count */
     return (in_len <= TASKQ_SHORT_MAX_BYTES) ? TASK_SHORT : TASK_LONG;
   case TASKQ_OP_DECODE_JPEG:
+  case TASKQ_OP_DECODE_PNG:
     return TASK_LONG;               /* full image decode: always heavy */
   case TASKQ_OP_DECODE_MP3:
     return TASK_LONG;               /* full audio decode: always heavy */

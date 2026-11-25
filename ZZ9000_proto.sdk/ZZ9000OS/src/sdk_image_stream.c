@@ -114,6 +114,7 @@ struct SDKImageStreamSession {
 	uint8_t png_interlaced;
 	uint8_t png_interlace_direct;
 	uint8_t png_tile_staging;
+	uint8_t one_shot;
 	uint8_t header_ready;
 	uint32_t decode_state_committed;
 	uint8_t output_prepared;
@@ -2260,6 +2261,8 @@ static uint16_t image_stream_begin_locked(
 	session->tile_length = begin->tile_length;
 	session->core1_affine = begin->core1_affine ? 1U : 0U;
 	session->direct_arm_local = begin->direct_arm_local ? 1U : 0U;
+	session->one_shot = (begin->one_shot &&
+	                     begin->codec == SDK_IMAGE_CODEC_PNG) ? 1U : 0U;
 	session->owner_id = owner_id;
 	session->in_use = 1U;
 	session->module_ref = begin->codec == SDK_IMAGE_CODEC_WEBP ? 1U : 0U;
@@ -2398,6 +2401,101 @@ uint16_t sdk_image_stream_close(uint32_t session)
 	return SDK_STATUS_OK;
 }
 
+uint16_t sdk_image_stream_validate_begin(
+	const struct SDKImageStreamBegin *begin)
+{
+	return validate_begin(begin);
+}
+
+static void png_oneshot_close(struct SDKImageStreamSession *slot)
+{
+	destroy_stream_codec(slot);
+	memset(slot, 0, sizeof(*slot));
+}
+
+uint16_t sdk_image_stream_png_oneshot_begin(
+	const struct SDKImageStreamBegin *begin, uint32_t *session)
+{
+	struct SDKImageStreamBegin one_shot;
+	struct SDKImageStreamResult result;
+	uint16_t status;
+
+	if (!begin || !session || begin->codec != SDK_IMAGE_CODEC_PNG)
+		return SDK_STATUS_BAD_REQUEST;
+	one_shot = *begin;
+	one_shot.one_shot = 1U;
+	status = sdk_image_stream_begin(&one_shot, &result);
+	if (status == SDK_STATUS_OK)
+		*session = result.session;
+	return status;
+}
+
+uint16_t sdk_image_stream_png_oneshot_step(
+	uint32_t session_id, const uint8_t *src, uint32_t src_length,
+	uint32_t *offset, int *done, struct SDKImageStreamResult *result)
+{
+	struct SDKImageStreamSession *session = find_session(session_id);
+	uint32_t chunk;
+	int last;
+	uint16_t status;
+
+	if (!done || !result)
+		return SDK_STATUS_BAD_REQUEST;
+	*done = 0;
+	memset(result, 0, sizeof(*result));
+	if (!session || !session->one_shot)
+		return SDK_STATUS_BAD_HANDLE;
+	if (!src || !offset || *offset >= src_length) {
+		png_oneshot_close(session);
+		return SDK_STATUS_BAD_REQUEST;
+	}
+
+	chunk = src_length - *offset;
+	if (chunk > SDK_IMAGE_STREAM_PNG_ONESHOT_SLICE_BYTES)
+		chunk = SDK_IMAGE_STREAM_PNG_ONESHOT_SLICE_BYTES;
+	last = (*offset + chunk == src_length);
+	Xil_DCacheInvalidateRange((INTPTR)(uintptr_t)(src + *offset), chunk);
+	session->input_eof = last ? 1U : 0U;
+	status = process_png_stream(session, src + *offset, chunk, result);
+	if (status == SDK_STATUS_OK) {
+		*offset += chunk;
+		if (result->flush_address != 0U && result->flush_length != 0U)
+			Xil_DCacheFlushRange((INTPTR)result->flush_address,
+			                     result->flush_length);
+		if (result->state == SDK_IMAGE_SESSION_STATE_COMPLETE)
+			*done = 1;
+		else if (last)
+			status = SDK_STATUS_IO_ERROR;   /* truncated PNG */
+	}
+	if (status != SDK_STATUS_OK || *done)
+		png_oneshot_close(session);
+	return status;
+}
+
+uint16_t sdk_image_stream_png_oneshot_decode(
+	const struct SDKImageStreamBegin *begin, const uint8_t *src,
+	uint32_t src_length, struct SDKImageStreamResult *result)
+{
+	uint32_t session = 0U;
+	uint32_t offset = 0U;
+	int done = 0;
+	uint16_t status;
+
+	if (!result)
+		return SDK_STATUS_BAD_REQUEST;
+	memset(result, 0, sizeof(*result));
+	status = sdk_image_stream_png_oneshot_begin(begin, &session);
+	if (status != SDK_STATUS_OK)
+		return status;
+	while (!done) {
+		status = sdk_image_stream_png_oneshot_step(
+			session, src, src_length, &offset, &done, result);
+		if (status != SDK_STATUS_OK)
+			return status;
+	}
+	return SDK_STATUS_OK;
+}
+
 int sdk_image_stream_session_core1(uint32_t session)
 {
 	struct SDKImageStreamSession *slot = find_session(session);
@@ -2510,6 +2608,10 @@ void sdk_image_stream_poison_core1_sessions(void)
 		if (!slot->in_use || !slot->core1_affine)
 			continue;
 		poison_image_slot(slot);
+		/* A one-shot decode has no client handle to close later, and
+		 * its task fails with the fault: free the slot now. */
+		if (slot->one_shot)
+			memset(slot, 0, sizeof(*slot));
 	}
 }
 

@@ -64,6 +64,10 @@ int main(void)
     printf("unexpected animation service flag value\n");
     return 18;
   }
+  if (ZZ9K_SERVICE_FLAG_IMAGE_PNG_ONE_SHOT != (1U << 30)) {
+    printf("unexpected PNG one-shot service flag value\n");
+    return 19;
+  }
   if (sizeof(ZZ9KImageSessionBeginPayload) != 48U) {
     printf("begin payload size is %lu\n",
            (unsigned long)sizeof(ZZ9KImageSessionBeginPayload));

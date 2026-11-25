@@ -135,6 +135,7 @@ m68k-amigaos-gcc $LIBCFLAGS tools/zz9k-libeventlife.c -o build/zz9k-libeventlife
 m68k-amigaos-gcc $LIBCFLAGS tools/zz9k-libeventports.c -o build/zz9k-libeventports
 m68k-amigaos-gcc $LIBCFLAGS tools/zz9k-libeventcancel.c -o build/zz9k-libeventcancel
 m68k-amigaos-gcc $LIBCFLAGS tools/zz9k-libdecode.c -o build/zz9k-libdecode
+m68k-amigaos-gcc $LIBCFLAGS tools/zz9k-pngdecode.c -o build/zz9k-pngdecode
 m68k-amigaos-gcc $LIBCFLAGS -Itools build/m68k/zz9k-fb-common.o \
   tools/zz9k-libsmoke.c -o build/zz9k-libsmoke
 m68k-amigaos-gcc $STACKCFLAGS $AARFLAGS \

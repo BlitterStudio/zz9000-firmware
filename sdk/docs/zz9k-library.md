@@ -459,7 +459,7 @@ All multi-byte mailbox fields use the byte order defined by `zz9k/abi.h`. The se
 | Core | `0x0000` NOP, `0x0001` QUERY_CAPS, `0x0002` PING, `0x0003` CANCEL, `0x0004` QUERY_SERVICE, `0x0005` QUERY_APERTURE_LAYOUT |
 | Memory | `0x0100` ALLOC_SHARED, `0x0101` FREE_SHARED, `0x0102` MEM_FILL, `0x0103` MEM_COPY |
 | Surface | `0x0200` ALLOC_SURFACE, `0x0201` FREE_SURFACE, `0x0202` MAP_FRAMEBUFFER_SURFACE, `0x0203` FILL_SURFACE, `0x0204` COPY_SURFACE, `0x0205` QUERY_PALETTE (Zorro III only) |
-| Image | `0x0400` SCALE_IMAGE, `0x0401` DECODE_JPEG, `0x0402` DECODE_PNG, `0x0403` DECODE_GIF, `0x0404` IMAGE_SESSION_BEGIN, `0x0405` IMAGE_SESSION_FEED, `0x0406` IMAGE_SESSION_CLOSE, `0x0407` SCALE_IMAGE_CLIPPED, `0x0408` IMAGE_ANIMATION_FRAME_NEXT, `0x0409` IMAGE_ANIMATION_FRAME_PRESENT, `0x040a` IMAGE_ANIMATION_FRAME_RETIRE, `0x040b` IMAGE_ANIMATION_RESTART |
+| Image | `0x0400` SCALE_IMAGE, `0x0401` DECODE_JPEG, `0x0402` DECODE_PNG (one-shot; needs `ZZ9K_SERVICE_FLAG_IMAGE_PNG_ONE_SHOT`), `0x0403` DECODE_GIF (reserved; always `UNSUPPORTED`), `0x0404` IMAGE_SESSION_BEGIN, `0x0405` IMAGE_SESSION_FEED, `0x0406` IMAGE_SESSION_CLOSE, `0x0407` SCALE_IMAGE_CLIPPED, `0x0408` IMAGE_ANIMATION_FRAME_NEXT, `0x0409` IMAGE_ANIMATION_FRAME_PRESENT, `0x040a` IMAGE_ANIMATION_FRAME_RETIRE, `0x040b` IMAGE_ANIMATION_RESTART |
 | Audio | `0x0500` DECODE_MP3, `0x0501` MIX_AUDIO, `0x0502` RESAMPLE_AUDIO, `0x0503` STREAM_BEGIN, `0x0504` STREAM_FEED, `0x0505` STREAM_READ, `0x0506` STREAM_CLOSE, `0x0507` STREAM_PLAY, `0x0508` STREAM_STOP, `0x0509`–`0x050e` control and metering, `0x0512` FABRIC_STATE_GET, `0x0513` RING_ACQUIRE, `0x0514` RING_RELEASE, `0x0515` STREAM_GAIN, `0x0516` STREAM_BEGIN_EX, `0x0517` OUTPUT_CLOCK, `0x0518` VOICE_OPEN, `0x0519` VOICE_CLOSE, `0x051a` VOICE_RESET, `0x051b` VOICE_UPLOAD |
 | Codec | `0x0600` DECOMPRESS, `0x0601` DECOMPRESS_TEST, `0x0602` STREAM_BEGIN, `0x0603` STREAM_READ, `0x0604` STREAM_CLOSE, `0x0605` STREAM_FEED, `0x0606` DECOMPRESS_BATCH |
 | Crypto | `0x0800` HASH, `0x0801` STREAM, `0x0802` AEAD, `0x0803` KX, `0x0804` VERIFY |
@@ -506,6 +506,11 @@ Use high-level wrappers such as `ZZ9KQueryCaps()`, `ZZ9KPing()`,
 `ZZ9KCryptoAeadBatch()` for normal calls. The resident library serializes
 short mailbox submissions and completion-ring drains, but never holds that
 lock while a synchronous caller waits.
+
+`ZZ9KDecodePng()` works on firmware that advertises
+`ZZ9K_SERVICE_FLAG_IMAGE_PNG_ONE_SHOT` and returns `ZZ9K_STATUS_UNSUPPORTED`
+on older firmware. `ZZ9KDecodeGif()` returns `ZZ9K_STATUS_UNSUPPORTED` on all
+firmware: there is no GIF decoder. See Image Decode Jobs.
 
 For an empty completion ring, synchronous calls poll its producer index for up
 to 250 microseconds. They then wait on their own completion signal, while a
@@ -733,11 +738,12 @@ the API shape that datatype and viewer code should use.
 
 ## Image Decode Jobs
 
-SDK v2 defines a shared-buffer to surface image decode job shape. Current
-firmware support uses libjpeg-turbo for JPEG decode into 32-bit SDK surfaces.
-PNG support is exposed through streaming image sessions for direct 32-bit
-surface/framebuffer output. The one-shot PNG opcode and GIF opcode are reserved
-and currently return `UNSUPPORTED`.
+SDK v2 defines a shared-buffer to surface image decode job shape. Firmware
+decodes JPEG with libjpeg-turbo into 32-bit SDK surfaces. PNG decodes through
+libpng, either as a streaming image session or, on firmware that advertises
+`ZZ9K_SERVICE_FLAG_IMAGE_PNG_ONE_SHOT`, as a one-shot job (see One-shot PNG
+below). The GIF opcode (`ZZ9K_OP_DECODE_GIF`, `0x0403`) is reserved: the
+firmware has no GIF decoder and always returns `ZZ9K_STATUS_UNSUPPORTED`.
 
 ```c
 ZZ9KImageDecodeDesc desc;
@@ -773,6 +779,43 @@ developer example for this API. It loads one JPEG into a shared buffer, selects
 `zz9k_surface_native_rtg_format()`, sizes the output with
 `zz9k_surface_layout()`, allocates an ARM-local surface, and calls
 `ZZ9KDecodeJpeg(&desc, &result)`.
+
+#### One-shot PNG
+
+`ZZ9KDecodePng()` and `zz9k_request_decode_png()` use the same
+`ZZ9KImageDecodeDesc` as the JPEG call: the PNG file sits in one shared
+buffer, and the decoded pixels go to a surface. Check
+`ZZ9K_SERVICE_FLAG_IMAGE_PNG_ONE_SHOT` on the image service before calling.
+Earlier firmware returns `ZZ9K_STATUS_UNSUPPORTED` for every one-shot PNG
+request.
+
+The job runs the same decoder as a PNG image session, so a file decodes to the
+same pixels and fails with the same status either way. It decodes
+non-interlaced and Adam7 PNG, 8-bit and 16-bit, with palette, grey, RGB and
+alpha. The same limits apply as for a session: at most 24 megapixels, 8192
+pixels wide, and the shared decode-state budget for interlaced images. While it
+runs, the job holds one of the four image session slots, so it returns
+`ZZ9K_STATUS_NO_MEMORY` when all four are open.
+
+| Field | Behavior |
+| --- | --- |
+| `output_format` | Must equal the surface format and be `ZZ9K_SURFACE_FORMAT_ARGB8888`, `RGBA8888`, `BGRA8888` or `RGB888`. Any other value returns `ZZ9K_STATUS_UNSUPPORTED`. |
+| `dst_x`, `dst_y` | Where the top-left pixel lands. An origin beyond the surface returns `ZZ9K_STATUS_BAD_REQUEST`. |
+| `dst_width`, `dst_height` | Size of the area the image must fit in, from `dst_x`, `dst_y`. Zero means to the surface edge. A larger image returns `ZZ9K_STATUS_BAD_REQUEST`; PNG is never scaled. |
+| `flags` | `ZZ9K_IMAGE_DECODE_FLAG_FIT` returns `ZZ9K_STATUS_UNSUPPORTED`, as it does for a PNG session. `ZZ9K_IMAGE_DECODE_FLAG_PRESERVE_ASPECT` has no effect without FIT. Unknown bits return `ZZ9K_STATUS_BAD_REQUEST`. |
+
+A corrupt or truncated file returns `ZZ9K_STATUS_IO_ERROR`; the surface may
+then hold part of the image. On success `ZZ9KImageDecodeResult` carries the
+PNG size, the output format, and `bytes_written` (width times height times
+bytes per pixel). Core 1 decodes the file in 64 KiB slices, so other requests
+keep being served; a surface that is ARM-local or the mapped framebuffer
+decodes on core 0 instead. Use an image session for files that do not fit a
+shared buffer or when the image needs scaling or tiled output.
+
+`zz9k-pngdecode` (`C/zz9k-pngdecode` in the SDK package) is the smoke test for
+this call. `zz9k-pngdecode file.png` decodes the file one-shot and through a
+session into two surfaces, prints both pixel checksums, and checks that they
+match, that FIT is refused, and that the GIF call returns `UNSUPPORTED`.
 
 Large JPEG inputs should use image sessions instead of a one-shot full input
 buffer plus full output surface. The Amiga side feeds compressed data through a
@@ -817,6 +860,7 @@ The image service descriptor reports backend capabilities through these flags.
 | `ZZ9K_SERVICE_FLAG_IMAGE_JPEG_DIRECT_BGRA` | JPEG can emit BGRA without an intermediate RGB buffer. |
 | `ZZ9K_SERVICE_FLAG_IMAGE_JPEG_SCALING` | JPEG decode can scale. |
 | `ZZ9K_SERVICE_FLAG_IMAGE_PNG_DIRECT_BGRA` | Streaming PNG can write 32-bit BGRA to a surface or framebuffer. Interlaced PNG and tile output are supported; PNG fit scaling and APNG are not. |
+| `ZZ9K_SERVICE_FLAG_IMAGE_PNG_ONE_SHOT` | `ZZ9K_OP_DECODE_PNG` decodes a PNG file held in one shared buffer to a surface. `ZZ9K_OP_DECODE_GIF` stays unsupported. |
 | `ZZ9K_SERVICE_FLAG_IMAGE_SCALE_BILINEAR` | `ZZ9K_SCALE_BILINEAR` is accepted for 32-bit surfaces. |
 | `ZZ9K_SERVICE_FLAG_IMAGE_SCALE_CLIPPED` | `ZZ9KScaleImageClipped()` is available. |
 | `ZZ9K_SERVICE_FLAG_IMAGE_SCALE_BGRA_TO_RGB555_RGB565` | Scaling converts BGRA8888 to RGB555 or RGB565. |
@@ -830,8 +874,9 @@ is still larger than the target framebuffer.
 The libpng backend uses direct or staged/tiled output as required by interlace
 and destination mode; use the generic ARM scaler for PNG fit/upscale behavior.
 `zz9k-services` prints these flags as `jpeg-baseline`, `jpeg-progressive`,
-`jpeg-direct-bgra`, `jpeg-scaling`, `png-direct-bgra`, `scale-bilinear`,
-`scale-clipped`, `streaming-input`, `tile-output`, and `framebuffer-output`.
+`jpeg-direct-bgra`, `jpeg-scaling`, `png-direct-bgra`, `png-one-shot`,
+`scale-bilinear`, `scale-clipped`, `streaming-input`, `tile-output`, and
+`framebuffer-output`.
 
 #### WebP decoding
 

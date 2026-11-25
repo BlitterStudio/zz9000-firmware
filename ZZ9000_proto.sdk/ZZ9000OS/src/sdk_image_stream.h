@@ -13,6 +13,9 @@
 #include "sdk_mailbox.h"
 
 #define SDK_IMAGE_STREAM_PNG_MAX_FEED_BYTES (256U * 1024U)
+/* Input slice fed per step of a one-shot PNG decode; a core-1 worker
+ * yields between slices. */
+#define SDK_IMAGE_STREAM_PNG_ONESHOT_SLICE_BYTES (64U * 1024U)
 
 struct SDKImageStreamBegin {
 	uint32_t codec;
@@ -39,6 +42,10 @@ struct SDKImageStreamBegin {
 	 * never change mid-session. */
 	uint32_t core1_affine;
 	uint32_t direct_arm_local;
+	/* Nonzero marks an internal one-shot PNG decode (SDK_OP_DECODE_PNG):
+	 * the session is created, fed and closed by one request, never named
+	 * by a client, and is dropped outright when a core-1 fault poisons it. */
+	uint32_t one_shot;
 };
 
 struct SDKImageStreamFeed {
@@ -122,6 +129,28 @@ uint16_t sdk_image_stream_feed(const struct SDKImageStreamFeed *feed,
                                const uint8_t *src,
                                struct SDKImageStreamResult *result);
 uint16_t sdk_image_stream_close(uint32_t session);
+/* One-shot PNG decode through the session pipeline. The caller fills
+ * `begin` as for a session (codec and output mode included); one_shot is
+ * set here. validate returns the status a session begin would give. */
+uint16_t sdk_image_stream_validate_begin(
+	const struct SDKImageStreamBegin *begin);
+/* Input is consumed in slices of at most
+ * SDK_IMAGE_STREAM_PNG_ONESHOT_SLICE_BYTES, so a core-1 worker can yield
+ * between them. begin creates the slot; each step feeds the next slice
+ * of src[0..src_length) at *offset, advances *offset, flushes the rows it
+ * wrote, and reports done = 1 once the image is complete. Any failure,
+ * and completion, close the slot: a step that returns an error or sets
+ * done never needs a close. A source that ends before the PNG does fails
+ * with SDK_STATUS_IO_ERROR. */
+uint16_t sdk_image_stream_png_oneshot_begin(
+	const struct SDKImageStreamBegin *begin, uint32_t *session);
+uint16_t sdk_image_stream_png_oneshot_step(
+	uint32_t session, const uint8_t *src, uint32_t src_length,
+	uint32_t *offset, int *done, struct SDKImageStreamResult *result);
+/* begin and every step run on the calling core. */
+uint16_t sdk_image_stream_png_oneshot_decode(
+	const struct SDKImageStreamBegin *begin, const uint8_t *src,
+	uint32_t src_length, struct SDKImageStreamResult *result);
 uint16_t sdk_image_stream_begin_owned(
 	const struct SDKImageStreamBegin *begin, uint16_t owner_id,
 	struct SDKImageStreamResult *result);

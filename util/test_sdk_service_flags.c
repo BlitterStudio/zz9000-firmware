@@ -126,6 +126,21 @@ int main(int argc, char **argv)
 	ok &= expect_contains(mailbox_header, "sdk_mailbox.h",
 	                      "#define SDK_SERVICE_FLAG_IMAGE_PNG_DIRECT_BGRA");
 	ok &= expect_contains(mailbox_header, "sdk_mailbox.h",
+	                      "#define SDK_SERVICE_FLAG_IMAGE_PNG_ONE_SHOT");
+	/* The flag promises DECODE_PNG is dispatched; DECODE_GIF has no
+	 * decoder and must stay unsupported. */
+	ok &= expect_contains(mailbox_source, "sdk_mailbox.c",
+	                      "\tcase SDK_OP_DECODE_PNG:\n"
+	                      "\t\treturn handle_decode_png(req, comp, payload_len);\n"
+	                      "\tcase SDK_OP_DECODE_GIF:\n"
+	                      "\t\treturn complete_status(req, comp, "
+	                      "SDK_STATUS_UNSUPPORTED);");
+	ok &= expect_contains_between(
+		catalog_source, "SDK image descriptor",
+		"\n\t{\n\t\t.service_id = SDK_SERVICE_IMAGE,\n",
+		"\n\t\t.name = \"image\"",
+		"SDK_SERVICE_FLAG_IMAGE_PNG_ONE_SHOT");
+	ok &= expect_contains(mailbox_header, "sdk_mailbox.h",
 	                      "#define SDK_SERVICE_FLAG_IMAGE_RGB888_OUTPUT");
 	ok &= expect_contains(
 		mailbox_header, "sdk_mailbox.h",

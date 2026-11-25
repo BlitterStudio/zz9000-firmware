@@ -165,7 +165,7 @@ static inline uint32_t zz9k_known_capability_bit(uint32_t index)
 static inline uint32_t zz9k_known_service_flag_count(uint32_t service_id)
 {
   if (service_id == ZZ9K_SERVICE_IMAGE) {
-    return 18U;
+    return 19U;
   }
   if (service_id == ZZ9K_SERVICE_AUDIO) {
     return 18U;
@@ -231,6 +231,8 @@ static inline uint32_t zz9k_known_service_flag(uint32_t service_id,
       return ZZ9K_SERVICE_FLAG_IMAGE_WEBP;
     case 17:
       return ZZ9K_SERVICE_FLAG_IMAGE_WEBP_ANIMATION;
+    case 18:
+      return ZZ9K_SERVICE_FLAG_IMAGE_PNG_ONE_SHOT;
     default:
       return 0U;
     }
@@ -484,6 +486,8 @@ static inline const char *zz9k_service_flag_name(uint32_t service_id,
       return "webp";
     case ZZ9K_SERVICE_FLAG_IMAGE_WEBP_ANIMATION:
       return "webp-animation";
+    case ZZ9K_SERVICE_FLAG_IMAGE_PNG_ONE_SHOT:
+      return "png-one-shot";
     default:
       return 0;
     }

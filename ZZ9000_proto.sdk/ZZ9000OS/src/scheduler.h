@@ -40,6 +40,7 @@
 #define TASKQ_OP_SCALE_IMAGE         0x0400u
 #define TASKQ_OP_SCALE_IMAGE_CLIPPED 0x0407u
 #define TASKQ_OP_DECODE_JPEG         0x0401u
+#define TASKQ_OP_DECODE_PNG          0x0402u
 
 /* Audio-service opcode mirrored from sdk_mailbox.h (SDK_OP_DECODE_MP3);
  * drift guard in scheduler_arm.c. */

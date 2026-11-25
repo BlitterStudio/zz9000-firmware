@@ -156,6 +156,9 @@
 #define SDK_SERVICE_FLAG_IMAGE_SCALE_BGRA_TO_RGB555_RGB565 (1U << 27)
 #define SDK_SERVICE_FLAG_IMAGE_WEBP             (1U << 28)
 #define SDK_SERVICE_FLAG_IMAGE_WEBP_ANIMATION   (1U << 29)
+/* One-shot DECODE_PNG (0x0402) decodes a PNG to a surface. DECODE_GIF
+ * (0x0403) stays UNSUPPORTED: the firmware has no GIF decoder. */
+#define SDK_SERVICE_FLAG_IMAGE_PNG_ONE_SHOT     (1U << 30)
 #define SDK_SERVICE_FLAG_AUDIO_MP3_DECODE       (1U << 16)
 #define SDK_SERVICE_FLAG_AUDIO_MP3_STREAM       (1U << 20)
 /* Control-plane audio opcodes (0x0509+) are dispatchable. Follows the
