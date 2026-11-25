@@ -1608,6 +1608,11 @@ static struct {
 	uint64_t staged;
 	uint32_t rate;
 	uint32_t underruns;
+	/* Session-style retirement (sdk_media_session_audio_retire): the
+	 * bytes the DMA retired, and the retirements the session rejects. */
+	uint64_t retired;
+	uint32_t retire_rejected;
+	int done;
 } g_fa;
 
 static int fa_snapshot(struct audio_fabric_source *s)
@@ -1621,6 +1626,7 @@ static int fa_snapshot(struct audio_fabric_source *s)
 	s->channels = 2U;
 	s->sample_format = SDK_AUDIO_SAMPLE_FORMAT_S16LE;
 	s->coherent = 1U;
+	s->done = (uint8_t)g_fa.done;
 	return 1;
 }
 
@@ -1634,7 +1640,11 @@ static int fa_stage(uint32_t bytes)
 
 static void fa_retire(uint32_t bytes)
 {
-	(void)bytes;
+	if (bytes > g_fa.staged - g_fa.retired) {
+		g_fa.retire_rejected++;
+		return;
+	}
+	g_fa.retired += bytes;
 }
 
 static void fa_underrun(void)
@@ -1682,6 +1692,18 @@ static void fa_topup(void)
 			g_fa.produced, 0);
 		g_fa.produced++;
 	}
+}
+
+/* End the stream on a period boundary: the last published period is whole,
+ * and the source reports its end. */
+static void fa_finish(void)
+{
+	while (g_fa.produced % TICK_BYTES != 0U) {
+		pcm_byte(&g_fa.ring[g_fa.produced % FA_RING_BYTES],
+			g_fa.produced, 0);
+		g_fa.produced++;
+	}
+	g_fa.done = 1;
 }
 
 /* Keep the lease ring eight periods ahead of what the firmware credited,
@@ -2056,6 +2078,140 @@ static void scenario_fill_ahead_mix(void)
 	      ((const int16_t *)(g_fabric_tx + pos * TICK_BYTES))[0]));
 }
 
+/*
+ * Coexistence. A media-style pump streams a deterministic source through
+ * session-style retirement while a second producer (the voice slot) joins at
+ * the short fill-ahead, runs, and leaves with the queued-period rebuild, the
+ * fill-ahead going 6 -> 2 -> 6. Every period the DMA reaches must carry the
+ * next unplayed period of the pump's source (nothing lost, repeated or
+ * reordered), and the pump's retirement must keep pace with the DMA: one
+ * period retired per tick, its staged-minus-retired depth equal to the
+ * frontier lead, and no retirement the session would reject. At the end of
+ * the stream every produced byte is retired, so the drain can finish.
+ */
+#define CO_TICKS 160U
+#define CO_EOF_TICK 120U
+
+static int co_period_matches(uint32_t tx_index, uint64_t source_period)
+{
+	const uint8_t *tx = g_fabric_tx + (tx_index % AUDIO_NUM_PERIODS) *
+		TICK_BYTES;
+	uint32_t i;
+
+	for (i = 0U; i < TICK_BYTES; i++) {
+		uint8_t expected;
+
+		pcm_byte(&expected, source_period * TICK_BYTES + i, 0);
+		if (tx[i] != expected)
+			return 0;
+	}
+	return 1;
+}
+
+static void scenario_fill_ahead_coexist(void)
+{
+	uint64_t next_period = 0U;
+	uint64_t last_retired = 0U;
+	uint32_t order_bad = 0U;
+	uint32_t first_order_bad = 0U;
+	uint32_t pace_bad = 0U;
+	uint32_t first_pace_bad = 0U;
+	uint32_t depth_bad = 0U;
+	uint32_t first_depth_bad = 0U;
+	uint64_t final_period = 0U;
+	uint32_t seen = 0U;
+	uint32_t tick;
+
+	fa_start(FA_PUMP48, 0U);
+	for (tick = 0U; tick < CO_TICKS; tick++) {
+		uint32_t reached;
+		uint32_t lead_periods;
+		uint64_t depth;
+		int streaming;
+
+		if (tick == 30U) {
+			model_init(&g_model_c, 48000U, 2U,
+				SDK_AUDIO_SAMPLE_FORMAT_S16LE);
+			model_prefill_constant(&g_model_c, 0);
+			check(audio_fabric_producer_attach(
+				AUDIO_FABRIC_SLOT_VOICE, &g_ops_c) == 1,
+			      "coexist: voice attach", "");
+			audio_fabric_producer_go_live(AUDIO_FABRIC_SLOT_VOICE);
+			audio_fabric_fill_ahead_set(2U);
+		}
+		if (tick == 90U) {
+			audio_fabric_fill_ahead_set(0U);
+			audio_fabric_request_rebuild(AUDIO_FABRIC_SLOT_VOICE);
+			audio_fabric_producer_detach(AUDIO_FABRIC_SLOT_VOICE);
+		}
+		if (tick < CO_EOF_TICK)
+			fa_topup();
+		else if (tick == CO_EOF_TICK) {
+			fa_finish();
+			final_period = g_fa.produced / TICK_BYTES;
+		}
+		if (tick >= 30U && tick < 90U)
+			g_model_c.produced = g_model_c.staged +
+				2ULL * MODEL_RING_BYTES;
+		dma_tick(1);
+		reached = (g_dma_count / TICK_BYTES) % AUDIO_NUM_PERIODS;
+		streaming = final_period == 0U || next_period < final_period;
+		/* The period the DMA just entered, before this ISR fills. */
+		if (!streaming) {
+			/* Past the last period the source has nothing to match. */
+		} else if (co_period_matches(reached, next_period)) {
+			next_period++;
+			seen++;
+		} else if (seen != 0U) {
+			if (order_bad++ == 0U)
+				first_order_bad = tick;
+		}
+		audio_fabric_isr();
+		if (streaming && seen > 12U) {
+			if (g_fa.retired - last_retired != TICK_BYTES) {
+				if (pace_bad++ == 0U)
+					first_pace_bad = tick;
+			}
+			lead_periods = fa_lead_frames() / 960U;
+			depth = (g_fa.staged - g_fa.retired) / TICK_BYTES;
+			if (depth != lead_periods) {
+				if (depth_bad++ == 0U)
+					first_depth_bad = tick;
+			}
+		}
+		last_retired = g_fa.retired;
+	}
+	check(seen > 100U,
+	      "coexist: the DMA reached the pump's source in order",
+	      fmt("seen=%u next=%llu", seen,
+	      (unsigned long long)next_period));
+	check(order_bad == 0U,
+	      "coexist: no pump period lost, repeated or reordered",
+	      fmt("%u bad, first at tick %u", order_bad, first_order_bad));
+	check(g_fa.retire_rejected == 0U,
+	      "coexist: the session rejects no retirement",
+	      fmt("%u rejected", g_fa.retire_rejected));
+	check(pace_bad == 0U,
+	      "coexist: the pump retires one period per tick throughout",
+	      fmt("%u bad, first at tick %u", pace_bad, first_pace_bad));
+	check(depth_bad == 0U,
+	      "coexist: staged minus retired is the frontier lead",
+	      fmt("%u bad, first at tick %u", depth_bad, first_depth_bad));
+	/* End of stream: every period of the source reached the DMA, and every
+	 * byte the pump staged was retired, so the drain can complete. */
+	check(final_period != 0U && next_period == final_period,
+	      "coexist: the whole source played out to its end",
+	      fmt("played %llu of %llu periods",
+	      (unsigned long long)next_period,
+	      (unsigned long long)final_period));
+	check(g_fa.retired == g_fa.produced && g_fa.staged == g_fa.produced,
+	      "coexist: the end of stream retires every produced byte",
+	      fmt("produced %llu staged %llu retired %llu",
+	      (unsigned long long)g_fa.produced,
+	      (unsigned long long)g_fa.staged,
+	      (unsigned long long)g_fa.retired));
+}
+
 int main(void)
 {
 	scenario_admission();
@@ -2081,6 +2237,7 @@ int main(void)
 	scenario_fill_ahead_lateness();
 	scenario_fill_ahead_reset();
 	scenario_fill_ahead_mix();
+	scenario_fill_ahead_coexist();
 	scenario_warm_reset();
 	scenario_cache_fidelity();
 	if (failures != 0)

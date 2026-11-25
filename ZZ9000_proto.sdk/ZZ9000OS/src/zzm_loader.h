@@ -105,14 +105,26 @@ void zzm_loader_boot_load(void);
  * Keep the lookup, module callbacks, and reference acquire of a session
  * begin atomic with idle unloading.  Recursive: loader internals acquire it
  * as well, so a guarded begin can load a module without dropping the guard.
+ *
+ * Core 1 holds the guard across every SD-backed load step with local IRQs
+ * masked, so core 0 never waits for it.  _enter returns 1 with the guard
+ * held, or 0 on core 0 when core 1 holds it: the caller returns
+ * SDK_TASK_IN_PROGRESS, which the Amiga side retries, before touching any
+ * module state.  On any other core _enter waits and returns 1.  Every
+ * successful _enter pairs with _unlock.
  */
-void zzm_loader_session_begin_lock(void);
+int zzm_loader_session_begin_enter(void);
 void zzm_loader_session_begin_unlock(void);
 /* Core-1 fault recovery only. */
 void zzm_loader_reset_session_lock_if_owned(void);
 void zzm_loader_reset_session_lock(void);
+/* Core 0 gets ZZM_LOAD_IN_PROGRESS instead of waiting for the guard; with a
+ * load dispatcher set it also reports a queued load as in progress. */
 int zzm_loader_ensure_loaded(uint32_t module_id);
+/* Same core 0 rule as ensure_loaded. */
 int zzm_loader_acquire(uint32_t module_id);
+/* Core 0 never waits: a release that finds the guard held is applied by the
+ * next zzm_loader_poll that gets it. */
 void zzm_loader_release(uint32_t module_id);
 void zzm_loader_poll(uint64_t now_ms);
 void zzm_loader_mark_faulted(uint32_t module_id, const char *reason);
@@ -128,8 +140,11 @@ int zzm_loader_service_declared(uint32_t module_id, uint32_t service_id,
 uint32_t zzm_loader_service_declared_count(uint32_t module_id);
 void zzm_loader_set_storage_idle(int (*storage_idle)(void));
 int zzm_loader_ensure_service(uint32_t service_id, uint32_t min_version);
+/* Core 1 (or a single-core build) only: runs one load step and waits for the
+ * session-begin guard. */
 int zzm_loader_load_on_owner(uint32_t module_id);
-/* Core 0 reset path: cancel a resumable module load before core 1 drains it. */
+/* Core 1 only, like load_on_owner: cancel a resumable module load. The Amiga
+ * reset path on core 0 flags the cancel and the core-1 task performs it. */
 void zzm_loader_cancel_loading(uint32_t module_id);
 void zzm_loader_set_load_dispatch(int (*dispatch)(uint32_t module_id));
 #ifdef ZZM_LOADER_HOST_TEST

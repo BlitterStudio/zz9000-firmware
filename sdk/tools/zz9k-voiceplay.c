@@ -21,6 +21,14 @@
  * of eight voices, with the pitch set by the key. It is for the ear test of
  * the low-latency session, and counts the records the engine found late.
  *
+ * LOAD mode is a steady synthetic load for the firmware's render bench: it
+ * loops one 16-bit sample (a few sine cycles plus a little noise, mono or
+ * interleaved stereo) on VOICES voices (1 to 32, default 32) at rates spread
+ * from half to twice RATE (default 22050 Hz), volume 65535 divided by the
+ * voice count per side (GAIN=n replaces that with an explicit volume per
+ * side, 0 to 65535), for SECONDS (default 20). The AUDIO_VOICE_BENCH
+ * firmware prints its per-period render times when the session closes.
+ *
  * LOWLAT opens a low-latency session: the firmware shortens its audio
  * fill-ahead while it runs and the lead floor drops from 8 periods to 3. The
  * tool falls back to the standard floor, and says so, when zz9k.library is
@@ -63,14 +71,32 @@
 
 #include "zz9k-voice-pt4.h"
 
-#define TEMPLATE "MODULE,LEAD/K/N,NTSC/S,LINEAR/S,SECONDS/K/N,LOWLAT/S"
+#define TEMPLATE "MODULE,LEAD/K/N,NTSC/S,LINEAR/S,SECONDS/K/N,LOWLAT/S," \
+                 "VOICES/K/N,STEREO/S,RATE/K/N,RAMP/K/N,CHURN/S,GROUPS/K/N," \
+                 "LIMITER/S,GAIN/K/N,INTERP/K,PERVOICE/S"
 #define OPT_MODULE 0
 #define OPT_LEAD 1
 #define OPT_NTSC 2
 #define OPT_LINEAR 3
 #define OPT_SECONDS 4
 #define OPT_LOWLAT 5
-#define OPT_COUNT 6
+#define OPT_VOICES 6
+#define OPT_STEREO 7
+#define OPT_RATE 8
+#define OPT_RAMP 9
+#define OPT_CHURN 10
+#define OPT_GROUPS 11
+#define OPT_LIMITER 12
+#define OPT_GAIN 13
+#define OPT_INTERP 14
+#define OPT_PERVOICE 15
+#define OPT_COUNT 16
+
+/* CHURN: a restart interval of the ramp length, but not below 32 frames (a
+ * shorter one would write a record for every frame). */
+#define CHURN_MIN_INTERVAL 32U
+#define CHURN_DEFAULT_INTERVAL 256U
+#define CHURN_RING_BYTES 8192U
 
 /* The lead floor of a session without the low-latency flag. */
 #define STANDARD_FLOOR_FRAMES 7680U
@@ -87,6 +113,19 @@
 #define CLICK_VOLUME 0x4000UL
 #define CLICK_DEFAULT_SECONDS 10UL
 #define BANK_ROUND 64U
+
+/* LOAD mode: one looping 16-bit sample of 4096 frames. The left side is 8
+ * sine cycles and the right side of a stereo sample 11, so both wrap
+ * seamlessly; the noise is +-256 on a peak of 20000. */
+#define LOAD_FRAMES 4096U
+#define LOAD_PEAK 20000L
+#define LOAD_CYCLES_LEFT 8U
+#define LOAD_CYCLES_RIGHT 11U
+#define LOAD_DEFAULT_VOICES 32U
+#define LOAD_DEFAULT_RATE 22050U
+#define LOAD_DEFAULT_SECONDS 20UL
+/* next_frame once the load records are written: never produce again. */
+#define LOAD_DONE_FRAME 0xFFFFFFFFUL
 
 /* libnix stack size request, honoured by the swapstack.o the build links:
  * libpt4's pt4_open keeps about 3 KiB of its own on the stack. */
@@ -183,15 +222,50 @@ static void usage(void)
   puts("usage: zz9k-voiceplay MODULE [LEAD=frames] [NTSC] [LINEAR] [SECONDS=n] [LOWLAT]");
   puts("       zz9k-voiceplay CLICK [LEAD=frames] [SECONDS=n] [LOWLAT]");
   puts("       zz9k-voiceplay LIVE [LEAD=frames] [SECONDS=n] [LOWLAT]");
+  puts("       zz9k-voiceplay LOAD VOICES=n SECONDS=n [LINEAR] [STEREO] [RATE=hz] [GAIN=n] [CHURN] [GROUPS=n] [LOWLAT]");
+  puts("       every mode also takes RAMP=frames, LIMITER, INTERP=nearest|linear|cubic and PERVOICE");
   puts("  MODULE   ProTracker module to play (DYN envelopes and EFx funk are refused)");
   puts("  CLICK    a short pulse once per second at 48000 Hz, for listening and");
   puts("           for checking the scheduling margin; 10 seconds unless SECONDS");
   puts("  LIVE     play notes from the keyboard: zsxdcvgbhnjm is one octave, then");
   puts("           q2w3er5t6y7u and i; ESC stops. Each key starts a note at the");
   puts("           earliest frame the engine has not rendered");
+  puts("  LOAD     a steady load for the firmware render bench: VOICES voices (1 to");
+  puts("           32, default 32) loop one 16-bit sine sample at rates spread from");
+  puts("           half to twice RATE (default 22050 Hz, at most 192000), volume");
+  puts("           65535 / VOICES per side; 20 seconds unless SECONDS. STEREO uses an");
+  puts("           interleaved stereo sample (needs a firmware with the stereo");
+  puts("           formats). Meant for a firmware built with AUDIO_VOICE_BENCH,");
+  puts("           which prints the render times on its UART when the session closes");
+  puts("           CHURN restarts the voices over and over, so that with RAMP the");
+  puts("           fade pool stays full: every voice restarts every RAMP frames");
+  puts("           (256 without RAMP), in GROUPS groups spread evenly over that");
+  puts("           time (1 to 32, default 32; 1 restarts all voices together)");
+  puts("           GAIN sets the volume of every voice, per side, 0 to 65535, in");
+  puts("           place of 65535 / VOICES. GAIN=65535 on 32 voices is far past");
+  puts("           full scale: it drives the master clip or the limiter knee and");
+  puts("           the full-volume tails of a CHURN restart with RAMP. It is very");
+  puts("           loud and can be harsh: turn the amplifier or speakers down");
+  puts("           first, and use headphones only at a low level");
+  puts("  RAMP     CONFIG ramp length in frames (0 to 512) sent before anything");
+  puts("           else, for any mode: volume changes, starts, stops and restarts");
+  puts("           fade over that many frames. Needs a firmware with CONFIG");
+  puts("  LIMITER  CONFIG static soft knee, for any mode, in the same CONFIG");
+  puts("           record as RAMP: magnitudes up to 24576 pass unchanged and");
+  puts("           louder ones bend toward, never onto, the 16-bit rails. Needs a");
+  puts("           firmware with CONFIG. A firmware that does not advertise");
+  puts("           LIMITER runs it unqualified, for its qualification only");
   puts("  LEAD     lead in 48 kHz frames; 0 or absent is the firmware floor");
   puts("  NTSC     Paula clock of the module is NTSC (else PAL)");
   puts("  LINEAR   linear interpolation (else nearest)");
+  puts("  INTERP   nearest, linear or cubic: the interpolation of the session,");
+  puts("           sent before anything else as a CONFIG default (or with");
+  puts("           PERVOICE as a MODE record for each voice), and in place of");
+  puts("           LINEAR. Needs a firmware with the MODE and default records;");
+  puts("           cubic and these records run unqualified, with a warning, on a");
+  puts("           firmware that does not advertise CUBIC and VOICE_INTERP");
+  puts("  PERVOICE with INTERP: one MODE record per voice instead of the CONFIG");
+  puts("           default");
   puts("  SECONDS  stop after this many seconds of engine time");
   puts("  LOWLAT   low-latency session: shorter audio fill-ahead while it runs and");
   puts("           a lead floor of 3 periods (2880 frames) instead of 8. Without");
@@ -406,6 +480,7 @@ static void make_click(void)
 
 typedef struct Source {
   int click;
+  int load;
   uint32_t next_frame;  /* song frame of the next tick, or click */
   uint32_t click_count;
   int ended;
@@ -434,6 +509,197 @@ static void click_produce(Source *source)
   }
   source->click_count++;
   source->next_frame += ZZ9K_VOICE_OUTPUT_RATE;
+}
+
+/* ---- Load source ---- */
+
+static uint8_t load_sample[LOAD_FRAMES * 4U];
+static uint32_t load_voices;
+static uint32_t load_rate;
+static uint32_t load_stereo;
+static uint32_t load_bytes;
+static int load_linear;
+static int load_mode;
+
+/* RAMP: the CONFIG ramp length sent first. LIMITER: the CONFIG soft knee
+ * switch. CHURN: restart groups, 0 = none. load_volume: the LOAD volume per
+ * side, 65535 / VOICES unless GAIN. */
+static int ramp_set;
+static uint32_t ramp_frames;
+static int limiter_set;
+
+/* INTERP: the interpolation asked for, sent as the CONFIG default or, with
+ * PERVOICE, as a MODE record for each voice. It takes the place of LINEAR. */
+static int interp_set;
+static int interp_pervoice;
+static uint32_t interp_value;
+
+static int parse_interp(const char *text)
+{
+  if (is_word(text, "NEAREST")) {
+    interp_value = ZZ9K_VOICE_INTERP_NEAREST;
+  } else if (is_word(text, "LINEAR")) {
+    interp_value = ZZ9K_VOICE_INTERP_LINEAR;
+  } else if (is_word(text, "CUBIC")) {
+    interp_value = ZZ9K_VOICE_INTERP_CUBIC;
+  } else {
+    return 0;
+  }
+  interp_set = 1;
+  return 1;
+}
+
+/* What the session reads with: INTERP if given, else LINEAR or nearest. */
+static const char *interp_name(void)
+{
+  if (interp_set) {
+    return interp_value == ZZ9K_VOICE_INTERP_CUBIC ? "cubic"
+           : interp_value == ZZ9K_VOICE_INTERP_LINEAR ? "linear" : "nearest";
+  }
+  return load_linear ? "linear" : "nearest";
+}
+static uint32_t load_volume;
+static uint32_t churn_groups;
+static uint32_t churn_interval;
+static uint32_t churn_step;
+static uint32_t churn_slot;
+static uint32_t stat_restarts;
+static int load_started;
+
+/* A sine of LOAD_PEAK at phase (0 to LOAD_FRAMES - 1 is one cycle), by
+ * Bhaskara's rational approximation on each half cycle. */
+static long load_sine(uint32_t phase)
+{
+  const unsigned long long half = LOAD_FRAMES / 2U;
+  unsigned long long p = phase % half;
+  unsigned long long a = p * (half - p);
+  long value = (long)(((unsigned long long)LOAD_PEAK * 16ULL * a) /
+                      (5ULL * half * half - 4ULL * a));
+
+  return phase >= half ? -value : value;
+}
+
+/* Big-endian 16-bit samples, interleaved when stereo, with a little noise
+ * so the data is not a pure table. */
+static void make_load_sample(void)
+{
+  uint32_t noise = 0x2545F491UL;
+  uint32_t out = 0U;
+  uint32_t i;
+
+  for (i = 0U; i < LOAD_FRAMES; i++) {
+    uint32_t side;
+
+    for (side = 0U; side <= load_stereo; side++) {
+      uint32_t cycles = side == 0U ? LOAD_CYCLES_LEFT : LOAD_CYCLES_RIGHT;
+      long value;
+      uint16_t raw;
+
+      noise = noise * 1664525UL + 1013904223UL;
+      value = load_sine((i * cycles) % LOAD_FRAMES) +
+              (long)((noise >> 16) & 0x1FFU) - 256L;
+      raw = (uint16_t)(int16_t)value;
+      load_sample[out++] = (uint8_t)(raw >> 8);
+      load_sample[out++] = (uint8_t)(raw & 0xFFU);
+    }
+  }
+  load_bytes = out;
+}
+
+/* Half to twice RATE spread evenly over the voices; one voice plays RATE. */
+static uint32_t load_voice_rate(uint32_t voice)
+{
+  uint32_t rate = load_rate;
+
+  if (load_voices > 1U) {
+    rate = load_rate / 2U +
+           (uint32_t)(((unsigned long long)(load_rate + load_rate / 2U) *
+                       voice) / (load_voices - 1U));
+  }
+  if (rate > ZZ9K_VOICE_RATE_MAX_HZ) {
+    rate = ZZ9K_VOICE_RATE_MAX_HZ;
+  }
+  return rate == 0U ? 1U : rate;
+}
+
+static void load_start(Source *source)
+{
+  uint32_t stamp = lead_frames + source->next_frame;
+  uint32_t volume = load_volume;
+  uint32_t voice;
+
+  for (voice = 0U; voice < load_voices; voice++) {
+    ZZ9KVoiceRecord *record = pending_next(stamp, voice, ZZ9K_VOICE_OP_SET);
+
+    if (record) {
+      record->flags = ZZ9K_VOICE_SET_RATE | ZZ9K_VOICE_SET_RATE_HZ |
+                      ZZ9K_VOICE_SET_VOLUME;
+      record->arg0 = load_voice_rate(voice);
+      record->arg1 = (volume << 16) | volume;
+    }
+    record = pending_next(stamp, voice, ZZ9K_VOICE_OP_START);
+    if (record) {
+      record->flags = 0U;
+      record->arg0 = 0U;
+      record->arg1 = 0U;
+    }
+    record = pending_next(stamp, voice, ZZ9K_VOICE_OP_LOOP);
+    if (record) {
+      record->arg0 = 0U;
+      record->arg1 = load_bytes;
+    }
+  }
+}
+
+/* CHURN: every churn_step frames one group of voices (voice number modulo
+ * churn_groups) restarts: a START and the LOOP over the whole sample, as a
+ * player that retriggers a note. With a ramp every restart hands the old
+ * sound to a fade slot, and since each voice restarts every churn_interval
+ * frames (the ramp length) the slots stay in use all the time. Restarts are
+ * written a batch at a time, as many as the pending array holds, up to a
+ * lead ahead of the playing frame. */
+static void load_churn(Source *source)
+{
+  uint32_t per_slot = 2U * ((load_voices + churn_groups - 1U) / churn_groups);
+
+  while (source->next_frame < status.playing_frame + lead_frames &&
+         pending_count + per_slot <= MAX_PENDING) {
+    uint32_t stamp = lead_frames + source->next_frame;
+    uint32_t voice;
+
+    for (voice = churn_slot % churn_groups; voice < load_voices;
+         voice += churn_groups) {
+      ZZ9KVoiceRecord *record = pending_next(stamp, voice, ZZ9K_VOICE_OP_START);
+
+      if (record) {
+        record->flags = 0U;
+        record->arg0 = 0U;
+        record->arg1 = 0U;
+      }
+      record = pending_next(stamp, voice, ZZ9K_VOICE_OP_LOOP);
+      if (record) {
+        record->arg0 = 0U;
+        record->arg1 = load_bytes;
+      }
+      stat_restarts++;
+    }
+    churn_slot++;
+    source->next_frame += churn_step;
+  }
+}
+
+/* The first call writes every voice's rate, volume, start and loop at the
+ * granted lead. Without CHURN that is all; with it the restarts follow. */
+static void load_produce(Source *source)
+{
+  if (!load_started) {
+    load_started = 1;
+    load_start(source);
+    source->next_frame = churn_groups != 0U ? churn_step : LOAD_DONE_FRAME;
+    churn_slot = 1U;
+    return;
+  }
+  load_churn(source);
 }
 
 static void module_produce(Source *source)
@@ -633,6 +899,8 @@ static const char *play(Source *source, uint32_t limit_frames)
       tick_work = 0U;
       if (source->click) {
         click_produce(source);
+      } else if (source->load) {
+        load_produce(source);
       } else {
         module_produce(source);
         if (source->ended) {
@@ -673,6 +941,32 @@ static void report(const char *reason)
          (unsigned long)stat_records, (unsigned long)stat_ring_waits);
   if (live_mode) {
     printf("  keys played %lu\n", (unsigned long)stat_keys);
+  }
+  if (load_mode) {
+    printf("  load: %lu voices, %s samples, %s, rates %lu to %lu Hz, volume "
+           "%lu per side\n", (unsigned long)load_voices,
+           load_stereo ? "stereo" : "mono",
+           interp_name(),
+           (unsigned long)load_voice_rate(0U),
+           (unsigned long)load_voice_rate(load_voices - 1U),
+           (unsigned long)load_volume);
+  }
+  if (ramp_set) {
+    printf("  ramp: %lu frames\n", (unsigned long)ramp_frames);
+  }
+  if (limiter_set) {
+    puts("  limiter: on (static soft knee above 24576)");
+  }
+  if (interp_set) {
+    printf("  interpolation: %s, set with %s\n", interp_name(),
+           interp_pervoice ? "a MODE record for each voice"
+                           : "the CONFIG default");
+  }
+  if (churn_groups != 0U) {
+    printf("  churn: %lu restarts, %lu group%s, a restart every %lu frames "
+           "(each voice every %lu)\n", (unsigned long)stat_restarts,
+           (unsigned long)churn_groups, churn_groups == 1U ? "" : "s",
+           (unsigned long)churn_step, (unsigned long)churn_interval);
   }
   printf("  session: %s, lead floor %lu frames\n",
          session.grant.lead_floor_frames < STANDARD_FLOOR_FRAMES
@@ -764,6 +1058,7 @@ int main(void)
   const char *name;
   int click;
   int live;
+  int load;
   int want_low_latency;
   uint32_t seconds = 0U;
   uint32_t lead_request = 0U;
@@ -795,6 +1090,65 @@ int main(void)
   }
   click = is_word(name, "CLICK");
   live = is_word(name, "LIVE");
+  load = is_word(name, "LOAD");
+  if (!load && (options[OPT_VOICES] || options[OPT_STEREO] ||
+                options[OPT_RATE] || options[OPT_CHURN] ||
+                options[OPT_GAIN])) {
+    puts("zz9k-voiceplay: VOICES, STEREO, RATE, GAIN and CHURN belong to LOAD "
+         "mode");
+    FreeArgs(rdargs);
+    usage();
+    return 10;
+  }
+  load_voices = LOAD_DEFAULT_VOICES;
+  load_rate = LOAD_DEFAULT_RATE;
+  if (options[OPT_VOICES]) {
+    LONG value = *(LONG *)options[OPT_VOICES];
+
+    if (value < 1 || value > (LONG)ZZ9K_VOICE_MAX_VOICES) {
+      FreeArgs(rdargs);
+      usage();
+      return 10;
+    }
+    load_voices = (uint32_t)value;
+  }
+  if (options[OPT_RATE]) {
+    LONG value = *(LONG *)options[OPT_RATE];
+
+    if (value < 1 || value > (LONG)ZZ9K_VOICE_RATE_MAX_HZ) {
+      FreeArgs(rdargs);
+      usage();
+      return 10;
+    }
+    load_rate = (uint32_t)value;
+  }
+  load_volume = 0xFFFFU / load_voices;
+  if (options[OPT_GAIN]) {
+    LONG value = *(LONG *)options[OPT_GAIN];
+
+    if (value < 0 || value > 65535L) {
+      puts("zz9k-voiceplay: GAIN is 0 to 65535");
+      FreeArgs(rdargs);
+      return 10;
+    }
+    load_volume = (uint32_t)value;
+  }
+  limiter_set = options[OPT_LIMITER] != 0;
+  load_stereo = options[OPT_STEREO] != 0;
+  load_linear = options[OPT_LINEAR] != 0;
+  if (options[OPT_INTERP]) {
+    if (!parse_interp((const char *)options[OPT_INTERP])) {
+      puts("zz9k-voiceplay: INTERP is nearest, linear or cubic");
+      FreeArgs(rdargs);
+      return 10;
+    }
+  }
+  if (options[OPT_PERVOICE] && !options[OPT_INTERP]) {
+    puts("zz9k-voiceplay: PERVOICE belongs to INTERP");
+    FreeArgs(rdargs);
+    return 10;
+  }
+  interp_pervoice = options[OPT_PERVOICE] != 0;
   if (options[OPT_LEAD]) {
     LONG value = *(LONG *)options[OPT_LEAD];
 
@@ -816,6 +1170,8 @@ int main(void)
     seconds = (uint32_t)value;
   } else if (click) {
     seconds = (uint32_t)CLICK_DEFAULT_SECONDS;
+  } else if (load) {
+    seconds = (uint32_t)LOAD_DEFAULT_SECONDS;
   }
   if (options[OPT_NTSC]) {
     flags |= ZZ9K_VOICE_OPEN_FLAG_NTSC;
@@ -824,10 +1180,48 @@ int main(void)
     flags |= ZZ9K_VOICE_OPEN_FLAG_LINEAR;
   }
   want_low_latency = options[OPT_LOWLAT] != 0;
+  if (options[OPT_RAMP]) {
+    LONG value = *(LONG *)options[OPT_RAMP];
+
+    if (value < 0 || value > (LONG)ZZ9K_VOICE_RAMP_MAX_FRAMES) {
+      puts("zz9k-voiceplay: RAMP is 0 to 512 frames");
+      FreeArgs(rdargs);
+      return 10;
+    }
+    ramp_frames = (uint32_t)value;
+    ramp_set = 1;
+  }
+  if (options[OPT_GROUPS] && !options[OPT_CHURN]) {
+    puts("zz9k-voiceplay: GROUPS belongs to CHURN");
+    FreeArgs(rdargs);
+    return 10;
+  }
+  if (options[OPT_CHURN]) {
+    uint32_t groups = 32U;
+
+    if (options[OPT_GROUPS]) {
+      LONG value = *(LONG *)options[OPT_GROUPS];
+
+      if (value < 1 || value > (LONG)ZZ9K_VOICE_MAX_VOICES) {
+        puts("zz9k-voiceplay: GROUPS is 1 to 32");
+        FreeArgs(rdargs);
+        return 10;
+      }
+      groups = (uint32_t)value;
+    }
+    churn_groups = groups < load_voices ? groups : load_voices;
+    churn_interval = ramp_frames >= CHURN_MIN_INTERVAL ? ramp_frames
+                                                       : CHURN_DEFAULT_INTERVAL;
+    churn_step = churn_interval / churn_groups;
+    if (churn_step == 0U) {
+      churn_step = 1U;
+    }
+  }
 
   memset(&session, 0, sizeof(session));
   memset(&source, 0, sizeof(source));
   source.click = click;
+  source.load = load;
 
   /* The module is read and checked before the card is touched. */
   if (live && !IsInteractive(Input())) {
@@ -841,6 +1235,13 @@ int main(void)
     bank_data = click_sample;
     bank_size = CLICK_BYTES;
     bank_bytes = CLICK_BANK_BYTES;
+  } else if (load) {
+    make_load_sample();
+    load_mode = 1;
+    voice_count = load_voices;
+    bank_data = load_sample;
+    bank_size = load_bytes;
+    bank_bytes = load_bytes;
   } else if (live) {
     make_live_sample();
     live_mode = 1;
@@ -934,6 +1335,8 @@ int main(void)
   open_desc.bank_bytes = bank_bytes;
   open_desc.lead_frames = lead_request;
   open_desc.flags = flags;
+  /* CHURN writes a restart every few frames: a deeper ring. */
+  open_desc.ring_bytes = churn_groups != 0U ? CHURN_RING_BYTES : 0U;
   result = ZZ9KVoiceOpen(&open_desc, &session);
   if (result == ZZ9K_STATUS_BAD_REQUEST &&
       (flags & ZZ9K_VOICE_OPEN_FLAG_LOW_LATENCY) != 0U) {
@@ -941,6 +1344,12 @@ int main(void)
          "no low-latency mode: retrying with the standard floor");
     flags &= ~ZZ9K_VOICE_OPEN_FLAG_LOW_LATENCY;
     open_desc.flags = flags;
+    result = ZZ9KVoiceOpen(&open_desc, &session);
+  }
+  if (result == ZZ9K_STATUS_NO_MEMORY && open_desc.ring_bytes != 0U) {
+    puts("zz9k-voiceplay: no room for the deeper CHURN ring: using the "
+         "default ring");
+    open_desc.ring_bytes = 0U;
     result = ZZ9KVoiceOpen(&open_desc, &session);
   }
   if (result != ZZ9K_STATUS_OK) {
@@ -975,17 +1384,67 @@ int main(void)
     code = 20;
     goto close_session;
   }
+  {
+    ZZ9KVoiceExtStatus ext;
+
+    zz9k_voice_ext_status_read(session.status, &ext);
+    printf("  engine features 0x%lx%s%s%s%s%s%s\n", (unsigned long)ext.features,
+           (ext.features & ZZ9K_VOICE_FEATURE_CONFIG) ? " CONFIG" : "",
+           (ext.features & ZZ9K_VOICE_FEATURE_RAMP) ? " RAMP" : "",
+           (ext.features & ZZ9K_VOICE_FEATURE_LIMITER) ? " LIMITER" : "",
+           (ext.features & ZZ9K_VOICE_FEATURE_CUBIC) ? " CUBIC" : "",
+           (ext.features & ZZ9K_VOICE_FEATURE_VOICE_INTERP) ? " VOICE_INTERP"
+                                                            : "",
+           ext.features == 0U ? " (none: an older firmware)" : "");
+    if ((ramp_set || limiter_set || (interp_set && !interp_pervoice)) &&
+        (ext.features & ZZ9K_VOICE_FEATURE_CONFIG) == 0U) {
+      puts("zz9k-voiceplay: RAMP, LIMITER and INTERP need a firmware with the "
+           "CONFIG record");
+      code = 20;
+      goto close_session;
+    }
+    if (ramp_set && ramp_frames != 0U &&
+        (ext.features & ZZ9K_VOICE_FEATURE_RAMP) == 0U) {
+      puts("  the firmware does not advertise RAMP yet: running the ramp "
+           "for its qualification");
+    }
+    if (limiter_set && (ext.features & ZZ9K_VOICE_FEATURE_LIMITER) == 0U) {
+      puts("zz9k-voiceplay: WARNING: the firmware does not advertise "
+           "LIMITER: the soft knee is unqualified, running it for its "
+           "qualification only. Keep the volume low and the speakers "
+           "protected");
+    }
+    if (interp_set && (ext.features & ZZ9K_VOICE_FEATURE_VOICE_INTERP) == 0U) {
+      puts("zz9k-voiceplay: WARNING: the firmware does not advertise "
+           "VOICE_INTERP: the INTERP records are unqualified, running them "
+           "for their qualification only. A firmware older than the MODE "
+           "record counts them as rejected and plays as before");
+    }
+    if (interp_set && interp_value == ZZ9K_VOICE_INTERP_CUBIC &&
+        (ext.features & ZZ9K_VOICE_FEATURE_CUBIC) == 0U) {
+      puts("zz9k-voiceplay: WARNING: the firmware does not advertise CUBIC: "
+           "the cubic interpolation is unqualified, running it for its "
+           "qualification only. Keep the volume low and the speakers "
+           "protected");
+    }
+  }
 
   memset(&upload, 0, sizeof(upload));
   upload.sample_id = 0U;
   upload.bank_offset = 0U;
   upload.data = bank_data;
   upload.length = bank_size;
-  upload.format = ZZ9K_VOICE_FORMAT_S8;
+  upload.format = load ? (load_stereo ? ZZ9K_VOICE_FORMAT_S16S
+                                      : ZZ9K_VOICE_FORMAT_S16)
+                       : ZZ9K_VOICE_FORMAT_S8;
   result = ZZ9KVoiceUpload(&session, &upload);
   if (result != ZZ9K_STATUS_OK) {
     printf("zz9k-voiceplay: sample upload failed: %s (%d)\n",
            zz9k_status_text(result), result);
+    if (load && load_stereo) {
+      puts("  the firmware may lack the stereo sample formats "
+           "(audio-voice-stereo)");
+    }
     code = 20;
     goto close_session;
   }
@@ -995,9 +1454,46 @@ int main(void)
    * loop would wait for a playing frame that never advances, so a unity
    * master gain goes out first, stamped at the start of the song. */
   {
-    ZZ9KVoiceRecord *record =
-        pending_next(lead_frames, 0U, ZZ9K_VOICE_OP_MASTER);
+    ZZ9KVoiceRecord *record;
 
+    if (ramp_set || limiter_set) {
+      record = pending_next(lead_frames, 0U, ZZ9K_VOICE_OP_CONFIG);
+      if (record) {
+        /* One record at the lead stamp, ahead of the master gain and every
+         * note, so the ring order puts the settings first. Both settings in
+         * the record are validated together by the firmware. */
+        if (ramp_set && limiter_set) {
+          zz9k_voice_build_config_ramp_limiter(record, lead_frames,
+                                               ramp_frames, 1);
+        } else if (limiter_set) {
+          zz9k_voice_build_config_limiter(record, lead_frames, 1);
+        } else {
+          zz9k_voice_build_config_ramp(record, lead_frames, ramp_frames);
+        }
+      }
+    }
+    if (interp_set) {
+      /* The interpolation goes out at the lead stamp too, ahead of every
+       * note: the session default in one CONFIG record, or a MODE record
+       * for each voice. */
+      if (interp_pervoice) {
+        uint32_t v;
+
+        for (v = 0U; v < voice_count; v++) {
+          record = pending_next(lead_frames, v, ZZ9K_VOICE_OP_MODE);
+          if (record) {
+            zz9k_voice_build_mode_interp(record, lead_frames, (uint8_t)v,
+                                         interp_value);
+          }
+        }
+      } else {
+        record = pending_next(lead_frames, 0U, ZZ9K_VOICE_OP_CONFIG);
+        if (record) {
+          zz9k_voice_build_config_interp(record, lead_frames, interp_value);
+        }
+      }
+    }
+    record = pending_next(lead_frames, 0U, ZZ9K_VOICE_OP_MASTER);
     if (record) {
       record->arg0 = 256U;
     }

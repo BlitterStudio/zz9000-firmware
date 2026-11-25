@@ -53,10 +53,46 @@ output.
 The voice engine renders on the core-0 main loop, from
 `audio_voice_session_poll()`. It renders whole periods until its frame
 counter is the granted lead past the playing frame, and writes them into a
-staging ring of 40 periods that serves as the slot's source ring. The
+staging ring of 40 periods that serves as the slot's source ring. A poll
+call renders one period at most. The main loop runs the poll in the branch
+where no Zorro request is pending, and every register access from the 68k
+waits while a render runs; 32 interpolated voices cost about 1.0 ms (mono) to
+1.4 ms (stereo) a period on the card, measured with the `AUDIO_VOICE_BENCH`
+build, and a period with no sounding voice about 2.5 us. Before the mixer ran
+in runs per voice the same load cost 3 to 3.5 ms a period, and a call that
+rendered all eight periods of the lead after an open or a START held the 68k
+for about 24 ms. The main loop calls the poll
+many times in a period, so a short lead is rebuilt within a few loop
+iterations, with Zorro requests served between the periods. The slot goes
+live once the whole lead is staged, because going live primes the TX ring
+from the staged periods up to the fill-ahead. A reset stages one silent
+period inside its critical section and leaves the rest of the lead to the
+poll. A reset before the slot goes live takes back the periods the earlier
+polls staged, and the engine timeline restarts at frame 0 (nothing has been
+played), so the pre-reset voices never sound. Zorro traffic that never
+pauses never reaches the poll's branch, so
+the request branch calls `audio_voice_session_poll_busy()`, which polls when
+2 ms have passed since the last poll. The
 fabric ISR only copies periods out of that ring, as it does for the other
 slots, and the slot's retirement gives the playing frame that clients read.
 The slot produces 48 kHz stereo S16, so it needs no conversion.
+
+The engine's final stage sums the voices, scales the sums by the Q8.8 master
+gain and clamps them to 16 bits. A `CONFIG`
+record can switch on a static soft knee between the master gain and the
+clamp: samples up to 24576 in magnitude pass unchanged and louder ones are
+bent toward the rails, never reaching them. The knee keeps no state, so the
+result does not depend on how the render splits its periods, and records
+with one stamp apply in ring order, so a `CONFIG` record ahead of the notes
+at the lead stamp takes effect before the first note. The firmware advertises
+the `LIMITER` feature bit after the card timing gate in
+[zz9k-voice.md](../sdk/docs/zz9k-voice.md#limiter-timing); the knee is off
+until a client switches it on, and firmware without the bit still accepts the
+record when a bench build is under test. The
+curve and the client contract are in
+[zz9k-voice.md](../sdk/docs/zz9k-voice.md#limiter), and the relation to the
+saturation ceilings is in
+[audio-saturation-ceiling.md](audio-saturation-ceiling.md).
 
 The engine reads mono S8 and S16 samples and interleaved stereo S8S and S16S
 samples (left sample, then right sample) from the session's bank. A frame is
@@ -69,6 +105,24 @@ upload DEFINE accepts format numbers 0 to 3 and refuses the rest without
 changing the bank or the sample table. The formats and the rate and pass
 helpers in `zz9k/voice.h` are described in
 [zz9k-voice.md](../sdk/docs/zz9k-voice.md).
+
+Each voice reads nearest, linearly or with a four-point cubic. A session
+default (nearest, linear with the open flag, or the `CONFIG` default
+interpolation) applies to a voice until a `MODE` record gives it a setting of
+its own, and a fade slot keeps the setting its sound had when it was handed
+over. A cubic read overshoots the 16-bit range by up to a quarter, so the
+engine applies a cubic voice's volume in 64-bit arithmetic (or the vector
+equivalent) and, in a chunk that a cubic voice has added to, takes the
+32-bit master product for masters up to 511 instead of 1023; the limiter
+holds a sum beyond its last table node at that node. The nearest and linear
+arithmetic and its output are unchanged. The firmware accepts cubic, `MODE`
+and the default interpolation and advertises the `CUBIC` and `VOICE_INTERP`
+bits (features word 0x8F): 32 voices and a full fade pool rendered in at
+most 4566 us per 20 ms period across the load matrix in
+[zz9k-voice.md](../sdk/docs/zz9k-voice.md#cubic-timing), with no late or
+rejected record, underrun or drop. That is a timing result; the cubic output
+has not been listened to. The contract is in
+[zz9k-voice.md](../sdk/docs/zz9k-voice.md#interpolation).
 
 Closing a session detaches the slot, and a reset clears it. Both drop the
 periods already queued in the TX ring and request a rebuild from the
@@ -216,7 +270,7 @@ at 48 kHz and never needs conversion.
 | `SDK_SERVICE_FLAG_AUDIO_FABRIC` | bit 22 | Direct-ring audio fabric is available in the audio service |
 | `SDK_SERVICE_FLAG_AUDIO_FABRIC_RATE` | bit 23 | Source-rate leases are available |
 | `SDK_SERVICE_FLAG_AUDIO_VOICE` | bit 28 | Voice engine opcodes are advertised. The firmware sets it on Zorro III; it is not set on Zorro II yet |
-| `SDK_SERVICE_FLAG_AUDIO_VOICE_STEREO` | bit 29 | The voice engine's stereo sample formats are advertised. The flag is defined in the firmware headers, and no firmware sets it yet |
+| `SDK_SERVICE_FLAG_AUDIO_VOICE_STEREO` | bit 29 | The voice engine's stereo sample formats are advertised. The firmware sets it on Zorro III with the voice flag; it is not set on Zorro II yet |
 
 Clients should check the capability and service flags before using the
 opcodes. Firmware that does not recognize the source-rate flag returns
@@ -282,6 +336,43 @@ The same session passed these checks:
 
 Two-stream listening under RTG and network load also ran with no audible
 drops. No session has measured two converting producers at once.
+
+### ZZPlay beside a 32-voice low-latency voice session
+
+A second session on 2026-11-23 ran `ZZPlay --fps --audio=ax` on a PAL
+MPEG-2 file with 48 kHz MP2 audio (750 pictures, 1440000 audio frames, about
+30 s), and started `zz9k-voiceplay LOAD VOICES=32 SECONDS=15 STEREO
+RATE=96000 RAMP=256 GAIN=65535 CHURN GROUPS=32 LIMITER INTERP=linear LOWLAT`
+about 5 s into the movie. The pump, the media session and the voice slot
+shared the compositor, and the fill-ahead went from 6 periods to 2 and back.
+
+Before the owner check in `CLIENT_RELEASE`, the movie stopped at 19.44 s
+(933120 of 1440000 audio frames) when the voice tool exited and closed
+`zz9k.library`. The release stopped the media pump of a session the tool did
+not own. The movie then held its next picture until it was interrupted. With
+the check, the pump stays bound and the movie ran on after the voice tool
+exited.
+
+| Measure | Result with the check |
+| --- | --- |
+| ZZPlay wall time | 30306 ms, normal end of file |
+| Pictures | 750 decoded, 477 presented, 273 discarded |
+| Audio | 1440000 frames played, 0 underruns |
+| A/V sync | 273 late pictures, 637 holds, largest drift 260 ms |
+| SDK calls, per call | write 8390 us, decode 12825 us, retire 2842 us |
+| Voice session | late counter 240 voice records, 0 rejected, 0 underruns, 0 dropped |
+| Voice host pacing | largest wait 67876 us against 5000 us asked, first late at 3.224 s |
+
+The release fix removes the freeze. It does not qualify the combination:
+the same movie plays 750 pictures with no discards when it runs alone, and
+with the 32-voice low-latency load running, 273 pictures were discarded and
+the voice late counter read 240 records. That counts late voice records, not
+late periods: with `CHURN GROUPS=32` and `RAMP=256` one 20 ms producer period
+carries 240 records, and the first late record was one such window. The cause
+of the late pictures and records is not established. The voice host waits of
+up to 67876 us fit the mailbox and main-loop stalls that are already open.
+Qualifying ZZPlay beside this voice load stays an open item until a run
+presents all pictures with a late counter of 0.
 
 ## History
 

@@ -2486,7 +2486,10 @@ void zzapp_core0_poll(void)
     zzapp_services_expire_claims(ticks_to_us(now_ticks()));
     uint64_t core_tick_age = core1_stamp_age_us(g_core_heartbeat);
 
-    for (slot = 0U; slot < capacity; ++slot) {
+    /* Only allocated records are visited: an idle card has none, and this
+     * runs on every main-loop pass. A `continue` goes on to the next one. */
+    for (slot = zzapp_rec_next_allocated(0U); slot < capacity;
+         slot = zzapp_rec_next_allocated(slot + 1U)) {
         zzapp_rec_host_t *host;
         zzapp_rec_coherent_t *coh;
         uint32_t running;
@@ -2494,8 +2497,6 @@ void zzapp_core0_poll(void)
         uint64_t now;
         uint32_t heartbeat;
 
-        if (!record_live(slot))
-            continue;
         host = host_slot(slot);
         coh = coherent(slot);
         running = coh->running;

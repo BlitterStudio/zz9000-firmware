@@ -29,6 +29,12 @@ REDUCE_TARGET := $(BUILD_DIR)/audio_reduce_test
 VOICE_TARGET := $(BUILD_DIR)/audio_voice_test
 VOICE_PT4_TARGET := $(BUILD_DIR)/audio_voice_pt4_test
 VOICE_SESSION_TARGET := $(BUILD_DIR)/audio_voice_session_test
+VOICE_BASELINE_TARGET := $(BUILD_DIR)/audio_voice_baseline_test
+VOICE_RAMP_TARGET := $(BUILD_DIR)/audio_voice_ramp_test
+VOICE_LIMITER_TARGET := $(BUILD_DIR)/audio_voice_limiter_test
+VOICE_CUBIC_TARGET := $(BUILD_DIR)/audio_voice_cubic_test
+VOICE_CUBIC_GUARD_TARGET := $(BUILD_DIR)/audio_voice_cubic_guard_test
+VOICE_PARITY_TARGET := $(BUILD_DIR)/audio_voice_abi_parity_test
 TARGETS := $(CONVERT_TARGET) $(CONVERT_EXACT_TARGET) $(CAPTURE_TARGET) $(PROFILE_TARGET) \
 	$(PLAYBACK_TARGET) $(RATE_TARGET) $(PRECONVERT_TARGET) \
 	$(MEDIA_VIEW_TARGET) $(DRAIN_TARGET) $(CLOSE_TARGET) $(RECLAIM_TARGET) \
@@ -36,6 +42,10 @@ TARGETS := $(CONVERT_TARGET) $(CONVERT_EXACT_TARGET) $(CAPTURE_TARGET) $(PROFILE
 	$(MP3_PROBE_TARGET) $(MPEG_LAYER2_TARGET) $(FABRIC_TARGET) \
 	$(RING_TARGET) $(BENCH_SMOKE_TARGET) $(STREAM_DECODE_TARGET) \
 	$(REDUCE_TARGET) $(VOICE_TARGET) $(VOICE_PT4_TARGET) \
+	$(VOICE_BASELINE_TARGET) \
+	$(VOICE_RAMP_TARGET) $(VOICE_LIMITER_TARGET) $(VOICE_CUBIC_TARGET) \
+	$(VOICE_CUBIC_GUARD_TARGET) \
+	$(VOICE_PARITY_TARGET) \
 	$(VOICE_SESSION_TARGET)
 
 # mock/ shadows ff.h and xil_cache.h for the TUs (zz_config.c) whose
@@ -45,7 +55,7 @@ TARGETS := $(CONVERT_TARGET) $(CONVERT_EXACT_TARGET) $(CAPTURE_TARGET) $(PROFILE
 # assert the exact invalidate/flush ranges; every other target keeps
 CPPFLAGS += -I$(MOCK_DIR) -I$(SRC_DIR) -Ihost_stubs
 
-.PHONY: test clean check-tables
+.PHONY: test clean check-tables speed
 
 test: $(TARGETS)
 	$(CONVERT_TARGET)
@@ -70,8 +80,14 @@ test: $(TARGETS)
 	$(STREAM_DECODE_TARGET) fixtures/tone.mp3
 	$(REDUCE_TARGET)
 	$(VOICE_TARGET)
+	$(VOICE_BASELINE_TARGET)
 	$(VOICE_PT4_TARGET)
 	$(VOICE_SESSION_TARGET)
+	$(VOICE_RAMP_TARGET)
+	$(VOICE_PARITY_TARGET)
+	$(VOICE_LIMITER_TARGET)
+	$(VOICE_CUBIC_TARGET)
+	$(VOICE_CUBIC_GUARD_TARGET)
 
 # U2 fabric compositor: the characterization golden (pump_golden.c, a
 # verbatim capture of the pre-fabric pump) drives the parity scenarios
@@ -301,6 +317,75 @@ $(VOICE_TARGET): audio_voice_test.c $(SRC_DIR)/audio_voice.c \
 	$(CC) $(CPPFLAGS) -I$(SDK_INC) $(CFLAGS) -o $@ audio_voice_test.c \
 		$(SRC_DIR)/audio_voice.c
 
+# Exact comparison against the frozen master engine (baseline/): a seeded
+# random corpus, byte-identical PCM and identical engine state. The count of
+# sequences is ZZ9K_VOICE_BASELINE_SEQS (default 10000).
+$(VOICE_BASELINE_TARGET): audio_voice_baseline_test.c \
+	baseline/audio_voice_baseline.c baseline/audio_voice_baseline.h \
+	$(SRC_DIR)/audio_voice.c $(SRC_DIR)/audio_voice.h
+	@mkdir -p $(BUILD_DIR)
+	$(CC) $(CPPFLAGS) -Ibaseline $(CFLAGS) -o $@ audio_voice_baseline_test.c \
+		baseline/audio_voice_baseline.c $(SRC_DIR)/audio_voice.c
+
+# Ramping and fade slots against a frame-by-frame model, plus directed cases.
+# ZZ9K_VOICE_RAMP_SEQS sets the random sequences (default 20000).
+$(VOICE_RAMP_TARGET): audio_voice_ramp_test.c \
+	baseline/audio_voice_baseline.c baseline/audio_voice_baseline.h \
+	$(SRC_DIR)/audio_voice.c $(SRC_DIR)/audio_voice.h
+	@mkdir -p $(BUILD_DIR)
+	$(CC) $(CPPFLAGS) -Ibaseline $(CFLAGS) -o $@ audio_voice_ramp_test.c \
+		baseline/audio_voice_baseline.c $(SRC_DIR)/audio_voice.c
+
+# The optional static soft knee (CONFIG limiter) against an independent
+# model of the mix and the rational curve: dense sweeps, segment edges, the
+# maximum master with 32 voices and 32 fade tails, CONFIG timing and split
+# renders, the CONFIG validation matrix.
+$(VOICE_LIMITER_TARGET): audio_voice_limiter_test.c \
+	$(SRC_DIR)/audio_voice.c $(SRC_DIR)/audio_voice.h
+	@mkdir -p $(BUILD_DIR)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ audio_voice_limiter_test.c \
+		$(SRC_DIR)/audio_voice.c
+
+
+# Per-voice interpolation and the cubic reader: real-arithmetic, unrolled
+# stream and frame-by-frame model references, records, tails, formats, the
+# overshoot at the largest gain and master, the limiter, split renders.
+$(VOICE_CUBIC_TARGET): audio_voice_cubic_test.c \
+	$(SRC_DIR)/audio_voice.c $(SRC_DIR)/audio_voice.h
+	@mkdir -p $(BUILD_DIR)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ audio_voice_cubic_test.c \
+		$(SRC_DIR)/audio_voice.c -lm
+
+# The cubic reader reads nothing outside the four taps of a frame it mixes:
+# the bank is a page between two protected pages and the sample is flush
+# with them, so any read of an unused lane is a fault (Linux only).
+$(VOICE_CUBIC_GUARD_TARGET): audio_voice_cubic_guard_test.c \
+	$(SRC_DIR)/audio_voice.c $(SRC_DIR)/audio_voice.h
+	@mkdir -p $(BUILD_DIR)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ audio_voice_cubic_guard_test.c \
+		$(SRC_DIR)/audio_voice.c
+
+# The voice constants of the SDK header and of the firmware headers agree.
+$(VOICE_PARITY_TARGET): audio_voice_abi_parity_test.c \
+	$(SRC_DIR)/audio_voice.h $(SRC_DIR)/audio_voice_session.h \
+	$(SDK_INC)/zz9k/voice.h
+	@mkdir -p $(BUILD_DIR)
+	$(CC) $(CPPFLAGS) -I$(SDK_INC) $(CFLAGS) -o $@ \
+		audio_voice_abi_parity_test.c
+
+# Host timing of the render path, baseline engine against the current one.
+# Not part of `make test`: run `make speed`.
+VOICE_SPEED_TARGET := $(BUILD_DIR)/audio_voice_speed
+$(VOICE_SPEED_TARGET): audio_voice_speed.c \
+	baseline/audio_voice_baseline.c baseline/audio_voice_baseline.h \
+	$(SRC_DIR)/audio_voice.c $(SRC_DIR)/audio_voice.h
+	@mkdir -p $(BUILD_DIR)
+	$(CC) $(CPPFLAGS) -Ibaseline $(CFLAGS) -o $@ audio_voice_speed.c \
+		baseline/audio_voice_baseline.c $(SRC_DIR)/audio_voice.c
+
+speed: $(VOICE_SPEED_TARGET)
+	$(VOICE_SPEED_TARGET)
+
 # Voice engine against libpt4 (the ProTracker 4.1 replayer, vendored under
 # sdk/tools/libpt4): voice events from zz9k-voice-pt4 must reproduce
 # libpt4's WIDE voice positions exactly and its output within rounding.
@@ -338,10 +423,12 @@ $(VOICE_SESSION_TARGET): audio_voice_session_test.c \
 		$(SRC_DIR)/audio_fabric.c $(SRC_DIR)/audio_fabric_lease.c \
 		$(SRC_DIR)/audio_convert.c $(SRC_DIR)/audio_convert_tables.c -lm
 
+# The limiter table in audio_voice.c is the marked block the generator emits.
 check-tables:
 	python3 ../../util/gen_audio_convert_tables.py
 	git diff --exit-code -- ../../ZZ9000_proto.sdk/ZZ9000OS/src/audio_convert_tables.c \
 		../../ZZ9000_proto.sdk/ZZ9000OS/src/audio_convert_tables.h
+	python3 ../../util/gen_voice_limiter_table.py --check $(SRC_DIR)/audio_voice.c
 
 clean:
 	rm -rf $(BUILD_DIR)

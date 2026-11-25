@@ -957,3 +957,9 @@ int sdk_media_session_release_client(uint16_t owner_id, uint32_t *close_session)
 		*close_session = media.session;
 	return 0;
 }
+
+int sdk_media_session_owned_by(uint32_t session, uint16_t owner_id)
+{
+	return media.active && media.session == session &&
+	       media.owner_id == owner_id;
+}

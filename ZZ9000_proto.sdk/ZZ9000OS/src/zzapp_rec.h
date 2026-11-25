@@ -470,6 +470,14 @@ zzapp_rec_t *zzapp_rec_by_handle(uint32_t handle);
 uint32_t zzapp_rec_handle(uint32_t pid);
 /* 0 (FREE) for a pid outside the table. */
 zzapp_rec_state_t zzapp_rec_state(uint32_t pid);
+/* The first pid at or after `from` whose record is not FREE, or the capacity
+ * when there is none. A walk over the records uses it to skip FREE ones: a
+ * FREE record costs one byte load, where zzapp_rec_state() is a call, two
+ * loads of the arena words and an acquire barrier for every index. The
+ * barrier is taken once, for the record returned, so what the caller then
+ * reads of it is ordered as after zzapp_rec_state(). A FREE record is skipped
+ * without ordering because nothing of it is read. */
+uint32_t zzapp_rec_next_allocated(uint32_t from);
 /* CLAIMED -> LIVE, any admitted state -> RETIRING -> RECLAIMED. FREE is only
  * reached through zzapp_rec_free()/zzapp_rec_unadmit(). 0, or -1 for a FREE
  * record, a request for FREE, or one that moves back from RETIRING. */

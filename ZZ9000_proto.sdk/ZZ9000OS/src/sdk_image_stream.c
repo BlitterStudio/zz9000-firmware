@@ -2194,7 +2194,11 @@ static uint16_t image_stream_begin_locked(
 	if (begin->codec == SDK_IMAGE_CODEC_WEBP) {
 		status = zzm_registry_sdk_status(ZZM_MODULE_WEBP);
 		if (status != SDK_STATUS_OK) {
-			printf("[ZZM] begin WEBP registry status %u\n", (unsigned)status);
+			/* A load in progress is retried by the client; only real
+			 * failures are worth a console line. */
+			if (status != SDK_TASK_IN_PROGRESS)
+				printf("[ZZM] begin WEBP registry status %u\n",
+				       (unsigned)status);
 			return status;
 		}
 		if (!webp_ops()) {
@@ -2281,10 +2285,11 @@ static uint16_t sdk_image_stream_begin_with_owner(
 	int module_guard = begin && begin->codec == SDK_IMAGE_CODEC_WEBP;
 	int locked;
 
-	/* WebP loads on core 1. Keep core 0's JPEG/PNG mailbox work from
-	 * waiting with IRQs masked while that SD-backed load runs. */
-	if (module_guard)
-		zzm_loader_session_begin_lock();
+	/* WebP loads on core 1. Core 0 must not wait with IRQs masked while
+	 * that SD-backed load runs: it reports the begin in progress, and
+	 * returns before the registry is touched. */
+	if (module_guard && !zzm_loader_session_begin_enter())
+		return SDK_TASK_IN_PROGRESS;
 	locked = smp_cpu_id() == 0 ?
 		sdk_smp_lock_try_acquire(&image_session_lock) :
 		(sdk_smp_lock_acquire(&image_session_lock), 1);

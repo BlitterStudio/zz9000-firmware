@@ -72,8 +72,10 @@ B_RT_DEPS := b/rt_env.h mock_client.h aar_note_image.h \
 B_RTX_exit_reset_test := $(BUILD)/b/spin_template.o $(BUILD)/aar.o
 B_RTF_exit_reset_test := -Wl,--wrap=zzapp_loader_retire_resources \
 	-Wl,--wrap=zzapp_kernel_stop_app
-# zzapp_rec_state is wrapped to free a record between two reads of its state.
-B_RTF_record_race_test := -Wl,--wrap=zzapp_rec_state
+# zzapp_rec_state and zzapp_rec_next_allocated are wrapped to free a record
+# between a walk's read of its state and the walk's use of the record.
+B_RTF_record_race_test := -Wl,--wrap=zzapp_rec_state \
+	-Wl,--wrap=zzapp_rec_next_allocated
 
 define B_RT_RULE
 $(BUILD)/b/$(1): b/$(1).c $$(LOADER_REAL_AS_HOST_OBJS) $$(LOADER_REAL_AS_HOST_SOURCES) \

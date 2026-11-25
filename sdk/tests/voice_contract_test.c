@@ -137,6 +137,31 @@ static void test_layouts(void)
   CHECK(ZZ9K_VOICE_STATUS_SESSION_OFFSET == 28U);
   CHECK(ZZ9K_VOICE_STATUS_MARGIN_OFFSET == 32U);
   CHECK(ZZ9K_VOICE_STATUS_POLL_GAP_OFFSET == 36U);
+  CHECK(ZZ9K_VOICE_STATUS_FEATURES_OFFSET == 40U);
+  CHECK(ZZ9K_VOICE_STATUS_ACTIVE_MASK_OFFSET == 44U);
+  CHECK(ZZ9K_VOICE_STATUS_ENDS_OFFSET == 48U);
+  CHECK(ZZ9K_VOICE_STATUS_OUTPUT_DELAY_OFFSET == 52U);
+  /* the extended words sit in the reserved bytes of the wire struct */
+  CHECK(ZZ9K_VOICE_STATUS_OUTPUT_DELAY_OFFSET + 2U <=
+        ZZ9K_VOICE_STATUS_BYTES);
+  CHECK(ZZ9K_VOICE_FEATURE_RAMP == 0x01U && ZZ9K_VOICE_FEATURE_LIMITER == 0x02U &&
+        ZZ9K_VOICE_FEATURE_CUBIC == 0x04U &&
+        ZZ9K_VOICE_FEATURE_VOICE_INTERP == 0x08U &&
+        ZZ9K_VOICE_FEATURE_OVERSAMPLE == 0x10U &&
+        ZZ9K_VOICE_FEATURE_ENVELOPE == 0x20U &&
+        ZZ9K_VOICE_FEATURE_EVENTS == 0x40U &&
+        ZZ9K_VOICE_FEATURE_CONFIG == 0x80U);
+  CHECK(ZZ9K_VOICE_OP_MODE == 7U && ZZ9K_VOICE_OP_ENVELOPE == 8U &&
+        ZZ9K_VOICE_OP_CONFIG == 9U);
+  CHECK(ZZ9K_VOICE_CONFIG_RAMP == 1U && ZZ9K_VOICE_CONFIG_LIMITER == 2U &&
+        ZZ9K_VOICE_RAMP_MAX_FRAMES == 512U && ZZ9K_VOICE_FADE_SLOTS == 32U);
+  /* the two settings are independent bits of the CONFIG flags word */
+  CHECK((ZZ9K_VOICE_CONFIG_RAMP & ZZ9K_VOICE_CONFIG_LIMITER) == 0U);
+  CHECK(ZZ9K_VOICE_CONFIG_INTERP == 4U && ZZ9K_VOICE_MODE_INTERP == 1U);
+  CHECK((ZZ9K_VOICE_CONFIG_INTERP &
+         (ZZ9K_VOICE_CONFIG_RAMP | ZZ9K_VOICE_CONFIG_LIMITER)) == 0U);
+  CHECK(ZZ9K_VOICE_INTERP_INHERIT == 0U && ZZ9K_VOICE_INTERP_NEAREST == 1U &&
+        ZZ9K_VOICE_INTERP_LINEAR == 2U && ZZ9K_VOICE_INTERP_CUBIC == 3U);
   CHECK(ZZ9K_VOICE_JITTER_NONE == 0xFFFFFFFFU);
 
   CHECK(ZZ9K_VOICE_OP_START == 1U && ZZ9K_VOICE_OP_LOOP == 2U &&
@@ -438,6 +463,91 @@ static void test_records(void)
   CHECK(r.op == ZZ9K_VOICE_OP_DIRECTION && r.flags == 1U);
   zz9k_voice_build_direction(&r, 9U, 2U, 0);
   CHECK(r.flags == 0U);
+  zz9k_voice_build_config_ramp(&r, 10U, 256U);
+  CHECK(r.stamp == 10U && r.voice == 0U && r.op == ZZ9K_VOICE_OP_CONFIG &&
+        r.flags == ZZ9K_VOICE_CONFIG_RAMP && r.arg0 == 256U && r.arg1 == 0U);
+  zz9k_voice_build_config(&r, 11U, 0x0003U, 5U, 6U);
+  CHECK(r.op == ZZ9K_VOICE_OP_CONFIG && r.flags == 3U && r.arg0 == 5U &&
+        r.arg1 == 6U);
+  zz9k_voice_record_encode(&w, &r);
+  CHECK(b[4] == 0U && b[5] == 9U && b[6] == 0x00 && b[7] == 0x03);
+
+  /* Limiter-only: flags name the limiter, arg0 is 0 as the firmware needs,
+   * arg1 is 0 or 1 whatever nonzero value the caller passes. */
+  memset(&r, 0xA5, sizeof(r));
+  zz9k_voice_build_config_limiter(&r, 12U, 1);
+  CHECK(r.stamp == 12U && r.voice == 0U && r.op == ZZ9K_VOICE_OP_CONFIG &&
+        r.flags == ZZ9K_VOICE_CONFIG_LIMITER && r.arg0 == 0U && r.arg1 == 1U);
+  zz9k_voice_build_config_limiter(&r, 13U, 0);
+  CHECK(r.flags == ZZ9K_VOICE_CONFIG_LIMITER && r.arg0 == 0U &&
+        r.arg1 == 0U);
+  zz9k_voice_build_config_limiter(&r, 14U, 7);
+  CHECK(r.flags == ZZ9K_VOICE_CONFIG_LIMITER && r.arg0 == 0U &&
+        r.arg1 == 1U);
+  zz9k_voice_record_encode(&w, &r);
+  CHECK(b[0] == 0 && b[1] == 0 && b[2] == 0 && b[3] == 14U);
+  CHECK(b[4] == 0U && b[5] == ZZ9K_VOICE_OP_CONFIG);
+  CHECK(b[6] == 0x00 && b[7] == ZZ9K_VOICE_CONFIG_LIMITER);
+  CHECK(b[8] == 0 && b[9] == 0 && b[10] == 0 && b[11] == 0);
+  CHECK(b[12] == 0 && b[13] == 0 && b[14] == 0 && b[15] == 1U);
+  zz9k_voice_record_decode(&back, &w);
+  CHECK(memcmp(&back, &r, sizeof(r)) == 0);
+
+  /* Ramp and limiter in one record: both flags, ramp length in arg0,
+   * limiter switch in arg1. */
+  zz9k_voice_build_config_ramp_limiter(&r, 15U, ZZ9K_VOICE_RAMP_MAX_FRAMES,
+                                       1);
+  CHECK(r.stamp == 15U && r.voice == 0U && r.op == ZZ9K_VOICE_OP_CONFIG &&
+        r.flags == (ZZ9K_VOICE_CONFIG_RAMP | ZZ9K_VOICE_CONFIG_LIMITER) &&
+        r.arg0 == 512U && r.arg1 == 1U);
+  zz9k_voice_build_config_ramp_limiter(&r, 16U, 0U, 0);
+  CHECK(r.flags == 3U && r.arg0 == 0U && r.arg1 == 0U);
+  zz9k_voice_record_encode(&w, &r);
+  CHECK(b[6] == 0x00 && b[7] == 0x03);
+  CHECK(b[8] == 0 && b[9] == 0 && b[10] == 0 && b[11] == 0);
+  CHECK(b[15] == 0U);
+  zz9k_voice_build_config_ramp_limiter(&r, 17U, 300U, 1);
+  zz9k_voice_record_encode(&w, &r);
+  CHECK(b[8] == 0 && b[9] == 0 && b[10] == 0x01 && b[11] == 0x2C);
+  CHECK(b[12] == 0 && b[13] == 0 && b[14] == 0 && b[15] == 1U);
+
+  /* A ramp-only record keeps the limiter argument 0 (the firmware ignores
+   * it for this flag set) and does not name the limiter. */
+  zz9k_voice_build_config_ramp(&r, 18U, 512U);
+  CHECK((r.flags & ZZ9K_VOICE_CONFIG_LIMITER) == 0U && r.arg1 == 0U);
+
+  /* MODE and the default interpolation. The MODE record names the voice and
+   * the setting flag; both records carry the selector in arg0 and 0 in arg1,
+   * and the default names no other setting. */
+  memset(&r, 0xA5, sizeof(r));
+  zz9k_voice_build_mode_interp(&r, 20U, 31U, ZZ9K_VOICE_INTERP_CUBIC);
+  CHECK(r.stamp == 20U && r.voice == 31U && r.op == ZZ9K_VOICE_OP_MODE &&
+        r.flags == ZZ9K_VOICE_MODE_INTERP && r.arg0 == 3U && r.arg1 == 0U);
+  zz9k_voice_record_encode(&w, &r);
+  CHECK(b[0] == 0 && b[1] == 0 && b[2] == 0 && b[3] == 20U);
+  CHECK(b[4] == 31U && b[5] == 7U && b[6] == 0x00 && b[7] == 0x01);
+  CHECK(b[8] == 0 && b[9] == 0 && b[10] == 0 && b[11] == 3U);
+  CHECK(b[12] == 0 && b[13] == 0 && b[14] == 0 && b[15] == 0);
+  zz9k_voice_record_decode(&back, &w);
+  CHECK(memcmp(&back, &r, sizeof(r)) == 0);
+  zz9k_voice_build_mode_interp(&r, 21U, 0U, ZZ9K_VOICE_INTERP_INHERIT);
+  CHECK(r.arg0 == 0U && r.flags == ZZ9K_VOICE_MODE_INTERP);
+  zz9k_voice_build_mode_interp(&r, 21U, 0U, ZZ9K_VOICE_INTERP_NEAREST);
+  CHECK(r.arg0 == 1U);
+  zz9k_voice_build_mode_interp(&r, 21U, 0U, ZZ9K_VOICE_INTERP_LINEAR);
+  CHECK(r.arg0 == 2U);
+  memset(&r, 0xA5, sizeof(r));
+  zz9k_voice_build_config_interp(&r, 22U, ZZ9K_VOICE_INTERP_LINEAR);
+  CHECK(r.stamp == 22U && r.voice == 0U && r.op == ZZ9K_VOICE_OP_CONFIG &&
+        r.flags == ZZ9K_VOICE_CONFIG_INTERP && r.arg0 == 2U && r.arg1 == 0U);
+  zz9k_voice_record_encode(&w, &r);
+  CHECK(b[4] == 0U && b[5] == 9U && b[6] == 0x00 && b[7] == 0x04);
+  CHECK(b[8] == 0 && b[9] == 0 && b[10] == 0 && b[11] == 2U);
+  CHECK(b[12] == 0 && b[13] == 0 && b[14] == 0 && b[15] == 0);
+  /* a record a test sends to be refused goes through the generic builder */
+  zz9k_voice_build_config(&r, 23U, ZZ9K_VOICE_CONFIG_INTERP |
+                                       ZZ9K_VOICE_CONFIG_RAMP, 3U, 0U);
+  CHECK(r.flags == 5U && r.arg0 == 3U);
 }
 
 /* ---- Status reader ---- */
@@ -499,6 +609,41 @@ static void test_jitter_read(void)
                   ZZ9K_VOICE_JITTER_NONE);
   zz9k_voice_jitter_read(block, &j);
   CHECK(j.margin_min_us == ZZ9K_VOICE_JITTER_NONE);
+}
+
+static void test_ext_status_read(void)
+{
+  uint8_t block[ZZ9K_VOICE_STATUS_BYTES];
+  ZZ9KVoiceExtStatus x;
+  ZZ9KVoiceJitter j;
+  ZZ9KVoiceStatus s;
+
+  /* A block from firmware that predates the features word, or a zeroed one:
+   * every extended word reads 0, which means no features. */
+  memset(block, 0, sizeof(block));
+  memset(&x, 0xAA, sizeof(x));
+  zz9k_voice_ext_status_read(block, &x);
+  CHECK(x.features == 0U && x.active_mask == 0U && x.ends == 0U &&
+        x.output_delay_frames == 0U);
+
+  /* Each word at its offset, big-endian, and the older words untouched. */
+  put_status_word(block, 28, 0x55555555UL);
+  put_status_word(block, ZZ9K_VOICE_STATUS_POLL_GAP_OFFSET, 0x00067890UL);
+  put_status_word(block, ZZ9K_VOICE_STATUS_FEATURES_OFFSET, 0x00000081UL);
+  put_status_word(block, ZZ9K_VOICE_STATUS_ACTIVE_MASK_OFFSET, 0x80000001UL);
+  put_status_word(block, ZZ9K_VOICE_STATUS_ENDS_OFFSET, 0x01020304UL);
+  zz9k_put_be16(block + ZZ9K_VOICE_STATUS_OUTPUT_DELAY_OFFSET, 0x0123U);
+  zz9k_voice_ext_status_read(block, &x);
+  CHECK(x.features == 0x81UL);
+  CHECK((x.features & ZZ9K_VOICE_FEATURE_CONFIG) != 0U &&
+        (x.features & ZZ9K_VOICE_FEATURE_RAMP) != 0U &&
+        (x.features & ZZ9K_VOICE_FEATURE_CUBIC) == 0U);
+  CHECK(x.active_mask == 0x80000001UL);
+  CHECK(x.ends == 0x01020304UL);
+  CHECK(x.output_delay_frames == 0x0123U);
+  zz9k_voice_status_read(block, &s);
+  zz9k_voice_jitter_read(block, &j);
+  CHECK(s.session == 0x55555555UL && j.poll_gap_max_us == 0x00067890UL);
 }
 
 /* A scripted 16-bit source that returns a queued sequence, so a tear (the
@@ -688,6 +833,107 @@ static void test_stage_then_publish(void)
   CHECK(zz9k_voice_ring_stage(&session, 0U, 0, 1U) == 0U);
 }
 
+/* The CONFIG record a player sends ahead of its notes shares the lead stamp
+ * with them. The firmware applies same-stamp records in ring order, so the
+ * staging path must keep that order whatever the batching and the wrap. */
+static void test_config_same_stamp_order(void)
+{
+  uint8_t ring[ZZ9K_VOICE_RING_HEADER_BYTES + 8U * ZZ9K_VOICE_RECORD_BYTES];
+  ZZ9KVoiceSession session;
+  ZZ9KVoiceRecord recs[6];
+  ZZ9KVoiceRecord back;
+  ZZ9KVoiceRecordWire wire;
+  const uint32_t stamp = 7680U;
+  uint32_t round;
+  uint32_t i;
+
+  zz9k_voice_build_config_ramp_limiter(&recs[0], stamp, 256U, 1);
+  zz9k_voice_build_master(&recs[1], stamp, ZZ9K_VOICE_MASTER_UNITY);
+  zz9k_voice_build_set(&recs[2], stamp, 3U,
+                       ZZ9K_VOICE_SET_RATE | ZZ9K_VOICE_SET_VOLUME, 428U,
+                       0xFFFFU, 0xFFFFU);
+  zz9k_voice_build_start(&recs[3], stamp, 3U, 0U, 0U, 0U);
+  zz9k_voice_build_loop(&recs[4], stamp, 3U, 0U, 8192U);
+  zz9k_voice_build_config_limiter(&recs[5], stamp, 0);
+
+  /* Two rounds: the second starts at cursor 6, so the batch wraps the
+   * eight-record ring. Each round stages in two uneven batches. */
+  memset(ring, 0, sizeof(ring));
+  fill_session(&session, ring, 8U);
+  for (round = 0U; round < 2U; round++) {
+    uint32_t base = session.write_cursor;
+
+    CHECK(zz9k_voice_ring_stage(&session, (uint16_t)base, recs, 2U) == 2U);
+    CHECK(zz9k_voice_ring_stage(&session, (uint16_t)base, recs + 2U, 4U) ==
+          4U);
+    zz9k_voice_ring_publish(&session);
+    CHECK(zz9k_get_be16(ring) == (uint16_t)session.write_cursor);
+    for (i = 0U; i < 6U; i++) {
+      uint32_t slot = (base + i) & 7U;
+
+      memcpy(&wire, ring + ZZ9K_VOICE_RING_HEADER_BYTES +
+                        slot * ZZ9K_VOICE_RECORD_BYTES,
+             sizeof(wire));
+      zz9k_voice_record_decode(&back, &wire);
+      CHECK(memcmp(&back, &recs[i], sizeof(back)) == 0);
+      CHECK(back.stamp == stamp);
+    }
+    /* the settings record is first in the ring, ahead of every note */
+    memcpy(&wire, ring + ZZ9K_VOICE_RING_HEADER_BYTES +
+                      (base & 7U) * ZZ9K_VOICE_RECORD_BYTES,
+           sizeof(wire));
+    zz9k_voice_record_decode(&back, &wire);
+    CHECK(back.op == ZZ9K_VOICE_OP_CONFIG &&
+          back.flags == (ZZ9K_VOICE_CONFIG_RAMP | ZZ9K_VOICE_CONFIG_LIMITER) &&
+          back.arg0 == 256U && back.arg1 == 1U);
+  }
+  CHECK(session.write_cursor == 12U);
+}
+
+/* A MODE record and the default-interpolation CONFIG record that a player
+ * sends with its notes keep their ring order at one stamp, wrap included:
+ * the interpolation a note reads with depends on it. */
+static void test_interp_same_stamp_order(void)
+{
+  uint8_t ring[ZZ9K_VOICE_RING_HEADER_BYTES + 8U * ZZ9K_VOICE_RECORD_BYTES];
+  ZZ9KVoiceSession session;
+  ZZ9KVoiceRecord recs[5];
+  ZZ9KVoiceRecord back;
+  ZZ9KVoiceRecordWire wire;
+  const uint32_t stamp = 9600U;
+  uint32_t round;
+  uint32_t i;
+
+  zz9k_voice_build_config_interp(&recs[0], stamp, ZZ9K_VOICE_INTERP_LINEAR);
+  zz9k_voice_build_mode_interp(&recs[1], stamp, 2U, ZZ9K_VOICE_INTERP_CUBIC);
+  zz9k_voice_build_start(&recs[2], stamp, 2U, 0U, 0U, 0U);
+  zz9k_voice_build_mode_interp(&recs[3], stamp, 2U,
+                               ZZ9K_VOICE_INTERP_INHERIT);
+  zz9k_voice_build_config_interp(&recs[4], stamp, ZZ9K_VOICE_INTERP_NEAREST);
+
+  memset(ring, 0, sizeof(ring));
+  fill_session(&session, ring, 8U);
+  for (round = 0U; round < 2U; round++) {
+    uint32_t base = session.write_cursor;
+
+    CHECK(zz9k_voice_ring_stage(&session, (uint16_t)base, recs, 3U) == 3U);
+    CHECK(zz9k_voice_ring_stage(&session, (uint16_t)base, recs + 3U, 2U) ==
+          2U);
+    zz9k_voice_ring_publish(&session);
+    for (i = 0U; i < 5U; i++) {
+      uint32_t slot = (base + i) & 7U;
+
+      memcpy(&wire, ring + ZZ9K_VOICE_RING_HEADER_BYTES +
+                        slot * ZZ9K_VOICE_RECORD_BYTES,
+             sizeof(wire));
+      zz9k_voice_record_decode(&back, &wire);
+      CHECK(memcmp(&back, &recs[i], sizeof(back)) == 0);
+      CHECK(back.stamp == stamp);
+    }
+  }
+  CHECK(session.write_cursor == 10U);
+}
+
 /* ---- Request builders and the OPEN reply decoder ---- */
 
 static void test_request_builders(void)
@@ -871,11 +1117,13 @@ struct MockBuf {
   uint32_t flags;
   int live;
   int pinned;
+  uint16_t owner;
 };
 
 struct MockLog {
   uint16_t opcode;
   uint8_t payload[48];
+  uint16_t client;
 };
 
 struct MockSample {
@@ -905,6 +1153,8 @@ static struct {
   uint16_t open_status;        /* status OPEN answers with */
   uint32_t grant_ring_override;/* 0 = honest ring_records */
   uint32_t session;
+  uint16_t session_owner;
+  uint32_t release_calls;
   uint32_t open_calls;
   int session_open;
   uint32_t fail_copy_at;       /* 1-based COPY that fails, 0 = none */
@@ -1061,10 +1311,25 @@ static uint32_t mock_req_word(const ZZ9KMailboxWireEntry *req, uint32_t index)
   return zz9k_get_be32(&req->payload[index * 4U]);
 }
 
+static uint16_t mock_req_client(const ZZ9KMailboxWireEntry *req)
+{
+  return (uint16_t)((zz9k_get_be16(req->flags) & ZZ9K_ENTRY_CLIENT_ID_MASK) >>
+                    ZZ9K_ENTRY_CLIENT_ID_SHIFT);
+}
+
+/* The firmware's voice_session_owned_by(): the session id of another client
+ * is no handle. */
+static int mock_owns_session(const ZZ9KMailboxWireEntry *req)
+{
+  return g_mock.session_open && mock_req_word(req, 0) == g_mock.session &&
+         g_mock.session_owner == mock_req_client(req);
+}
+
 static void mock_log(const ZZ9KMailboxWireEntry *req)
 {
   if (g_mock.log_count < MOCK_MAX_LOG) {
     g_mock.log[g_mock.log_count].opcode = zz9k_get_be16(req->opcode);
+    g_mock.log[g_mock.log_count].client = mock_req_client(req);
     memcpy(g_mock.log[g_mock.log_count].payload, (const void *)req->payload,
            48U);
     g_mock.log_count++;
@@ -1094,14 +1359,19 @@ static void mock_serve_open(const ZZ9KMailboxWireEntry *req)
     (void)mock_complete(req, g_mock.open_status, 0U);
     return;
   }
+  /* The firmware takes only buffers the opening client allocated. */
   if (!ring || !status || !staging || g_mock.session_open ||
       ring == status || ring == staging || status == staging ||
+      ring->owner != mock_req_client(req) ||
+      status->owner != mock_req_client(req) ||
+      staging->owner != mock_req_client(req) ||
       status->length < ZZ9K_VOICE_STATUS_BYTES || bank > MOCK_BANK_MAX) {
     (void)mock_complete(req, ZZ9K_STATUS_BAD_HANDLE, 0U);
     return;
   }
   ring->pinned = status->pinned = staging->pinned = 1;
   g_mock.session_open = 1;
+  g_mock.session_owner = mock_req_client(req);
   g_mock.session = 0xa5000000UL + g_mock.open_calls;
   g_mock.bank_bytes = bank;
   memset(g_mock.bank, 0, sizeof(g_mock.bank));
@@ -1149,7 +1419,7 @@ static void mock_serve_upload(const ZZ9KMailboxWireEntry *req)
   struct MockBuf *staging = NULL;
   uint32_t i;
 
-  if (!g_mock.session_open || mock_req_word(req, 0) != g_mock.session) {
+  if (!mock_owns_session(req)) {
     (void)mock_complete(req, ZZ9K_STATUS_BAD_HANDLE, 0U);
     return;
   }
@@ -1247,6 +1517,7 @@ static void mock_respond(void)
                   (b->board_offset - (uint32_t)ZZ9K_AMIGA_MEMORY_OFFSET);
     b->length = length;
     b->flags = flags;
+    b->owner = mock_req_client(req);
     b->live = 1;
     g_mock.last_alloc_flags[g_mock.buf_count - 1U] = flags;
     g_mock.next_offset += length;
@@ -1269,11 +1540,31 @@ static void mock_respond(void)
     (void)mock_complete(req, ZZ9K_STATUS_OK, 0U);
     break;
   }
+  case ZZ9K_OP_CLIENT_RELEASE: {
+    uint16_t client = mock_req_client(req);
+    uint32_t i;
+
+    g_mock.release_calls++;
+    if (client == 0U) {
+      (void)mock_complete(req, ZZ9K_STATUS_BAD_REQUEST, 0U);
+      break;
+    }
+    if (g_mock.session_open && g_mock.session_owner == client) {
+      mock_unpin();
+    }
+    for (i = 0U; i < g_mock.buf_count; i++) {
+      if (g_mock.bufs[i].live && g_mock.bufs[i].owner == client) {
+        g_mock.bufs[i].live = 0;
+      }
+    }
+    (void)mock_complete(req, ZZ9K_STATUS_OK, 0U);
+    break;
+  }
   case ZZ9K_OP_AUDIO_VOICE_OPEN:
     mock_serve_open(req);
     break;
   case ZZ9K_OP_AUDIO_VOICE_CLOSE:
-    if (!g_mock.session_open || mock_req_word(req, 0) != g_mock.session) {
+    if (!mock_owns_session(req)) {
       (void)mock_complete(req, ZZ9K_STATUS_BAD_HANDLE, 0U);
       break;
     }
@@ -1281,7 +1572,7 @@ static void mock_respond(void)
     (void)mock_complete(req, g_mock.close_status, 0U);
     break;
   case ZZ9K_OP_AUDIO_VOICE_RESET:
-    if (!g_mock.session_open || mock_req_word(req, 0) != g_mock.session) {
+    if (!mock_owns_session(req)) {
       (void)mock_complete(req, ZZ9K_STATUS_BAD_HANDLE, 0U);
       break;
     }
@@ -1918,6 +2209,150 @@ static void test_reset_and_close(void)
   mock_detach(ctx);
 }
 
+/* A mailbox call the way ZZ9KCall issues it: submit, then collect the
+ * completion. The mock answers between the two. */
+static int submit_and_collect(ZZ9KContext *ctx, ZZ9KRequest *request,
+                              ZZ9KMailboxEntry *reply)
+{
+  uint32_t request_id = 0U;
+  int status = zz9k_submit(ctx, request, &request_id);
+
+  if (status != ZZ9K_STATUS_QUEUED) {
+    return status;
+  }
+  mock_respond();
+  status = zz9k_poll(ctx, reply);
+  if (status != ZZ9K_STATUS_OK) {
+    return status;
+  }
+  return reply->status;
+}
+
+static int submit_define(ZZ9KContext *ctx, const ZZ9KVoiceSession *s)
+{
+  ZZ9KRequest request;
+  ZZ9KMailboxEntry reply;
+
+  memset(&reply, 0, sizeof(reply));
+  if (zz9k_request_audio_voice_upload(&request, s->grant.session,
+                                      ZZ9K_VOICE_UPLOAD_FLAG_DEFINE, 0U, 0U,
+                                      0U, 1U, 0U, 16U,
+                                      ZZ9K_VOICE_FORMAT_S16) !=
+      ZZ9K_STATUS_OK) {
+    return ZZ9K_STATUS_BAD_REQUEST;
+  }
+  return submit_and_collect(ctx, &request, &reply);
+}
+
+/* Every request a context sends, through zz9k_call or zz9k_submit, carries
+ * the context's client id: the Voice API calls own the session and its
+ * buffers under that id, so a ZZ9KCall-style submit on the same session is
+ * accepted. */
+static void test_client_id_on_voice_calls(void)
+{
+  ZZ9KContext *ctx = mock_attach(3U);
+  ZZ9KVoiceOpenDesc desc;
+  ZZ9KVoiceSession s;
+  uint32_t i;
+
+  CHECK(ctx != NULL);
+  if (!ctx) {
+    return;
+  }
+  CHECK(zz9k_set_client_id(ctx, 7U) == ZZ9K_STATUS_OK);
+  default_desc(&desc);
+  CHECK(zz9k_voice_open(ctx, &desc, &s) == ZZ9K_STATUS_OK);
+  CHECK(g_mock.buf_count == 3U);
+  for (i = 0U; i < g_mock.buf_count; i++) {
+    CHECK(g_mock.bufs[i].owner == 7U);
+  }
+  CHECK(g_mock.session_open == 1);
+  CHECK(g_mock.session_owner == 7U);
+  CHECK(g_mock.log_count == 1U);
+  CHECK(g_mock.log[0].opcode == ZZ9K_OP_AUDIO_VOICE_OPEN);
+  CHECK(g_mock.log[0].client == 7U);
+
+  /* A submit on the session the Voice API opened. */
+  CHECK(submit_define(ctx, &s) == ZZ9K_STATUS_OK);
+  CHECK(g_mock.defines == 1U);
+  /* And the Voice API on the same session after the submit. */
+  CHECK(zz9k_voice_reset(ctx, &s) == ZZ9K_STATUS_OK);
+  CHECK(zz9k_voice_close(ctx, &s) == ZZ9K_STATUS_OK);
+  CHECK(g_mock.session_open == 0);
+  CHECK(mock_live_buffers() == 0);
+  for (i = 0U; i < g_mock.log_count; i++) {
+    CHECK(g_mock.log[i].client == 7U);
+  }
+
+  /* Another client sees no handle in the session id. */
+  CHECK(zz9k_voice_open(ctx, &desc, &s) == ZZ9K_STATUS_OK);
+  CHECK(zz9k_set_client_id(ctx, 8U) == ZZ9K_STATUS_OK);
+  CHECK(submit_define(ctx, &s) == ZZ9K_STATUS_BAD_HANDLE);
+  CHECK(zz9k_set_client_id(ctx, 7U) == ZZ9K_STATUS_OK);
+  CHECK(zz9k_voice_close(ctx, &s) == ZZ9K_STATUS_OK);
+  mock_detach(ctx);
+}
+
+/* A context with no client id sends 0 on every path, as the AHI voice worker
+ * does, and its session is owned by client 0. */
+static void test_client_id_zero_unchanged(void)
+{
+  ZZ9KContext *ctx = mock_attach(3U);
+  ZZ9KVoiceOpenDesc desc;
+  ZZ9KVoiceSession s;
+  uint32_t i;
+
+  CHECK(ctx != NULL);
+  if (!ctx) {
+    return;
+  }
+  default_desc(&desc);
+  CHECK(zz9k_voice_open(ctx, &desc, &s) == ZZ9K_STATUS_OK);
+  CHECK(g_mock.session_owner == 0U);
+  CHECK(submit_define(ctx, &s) == ZZ9K_STATUS_OK);
+  CHECK(zz9k_voice_close(ctx, &s) == ZZ9K_STATUS_OK);
+  for (i = 0U; i < g_mock.log_count; i++) {
+    CHECK(g_mock.log[i].client == 0U);
+  }
+  mock_detach(ctx);
+}
+
+/* CLIENT_RELEASE for the opener's id ends its voice session and frees its
+ * buffers; another client's release leaves them alone. */
+static void test_client_release_closes_voice_session(void)
+{
+  ZZ9KContext *ctx = mock_attach(3U);
+  ZZ9KVoiceOpenDesc desc;
+  ZZ9KVoiceSession s;
+  ZZ9KRequest request;
+  ZZ9KMailboxEntry reply;
+
+  CHECK(ctx != NULL);
+  if (!ctx) {
+    return;
+  }
+  CHECK(zz9k_set_client_id(ctx, 9U) == ZZ9K_STATUS_OK);
+  default_desc(&desc);
+  CHECK(zz9k_voice_open(ctx, &desc, &s) == ZZ9K_STATUS_OK);
+  CHECK(g_mock.session_open == 1);
+
+  zz9k_request_init(&request, ZZ9K_OP_CLIENT_RELEASE);
+  CHECK(zz9k_set_client_id(ctx, 10U) == ZZ9K_STATUS_OK);
+  CHECK(zz9k_call(ctx, &request, &reply, ZZ9K_DEFAULT_TIMEOUT_TICKS) ==
+        ZZ9K_STATUS_OK);
+  CHECK(g_mock.session_open == 1);
+  CHECK(mock_live_buffers() == 3);
+
+  zz9k_request_init(&request, ZZ9K_OP_CLIENT_RELEASE);
+  CHECK(zz9k_set_client_id(ctx, 9U) == ZZ9K_STATUS_OK);
+  CHECK(zz9k_call(ctx, &request, &reply, ZZ9K_DEFAULT_TIMEOUT_TICKS) ==
+        ZZ9K_STATUS_OK);
+  CHECK(g_mock.release_calls == 2U);
+  CHECK(g_mock.session_open == 0);
+  CHECK(mock_live_buffers() == 0);
+  mock_detach(ctx);
+}
+
 int main(void)
 {
   g_window_size = 0x00400000UL;
@@ -1937,10 +2372,13 @@ int main(void)
   test_records();
   test_status_block_read();
   test_jitter_read();
+  test_ext_status_read();
   test_read32_tear();
   test_ring_math();
   test_stage_then_publish();
   test_request_builders();
+  test_config_same_stamp_order();
+  test_interp_same_stamp_order();
   test_open_reply_decoder();
 
   test_open_success(2U);
@@ -1956,6 +2394,9 @@ int main(void)
   test_write_bounded_by_free_space();
   test_status_and_heartbeat();
   test_reset_and_close();
+  test_client_id_on_voice_calls();
+  test_client_id_zero_unchanged();
+  test_client_release_closes_voice_session();
 
   mock_window_free(g_window, g_window_size);
   if (g_failures) {
