@@ -261,10 +261,9 @@ enum ZZ9KOpcode {
   ZZ9K_OP_CRYPTO_KX        = ZZ9K_SERVICE_CRYPTO + 0x03,
   ZZ9K_OP_CRYPTO_VERIFY    = ZZ9K_SERVICE_CRYPTO + 0x04,
 
-  ZZ9K_OP_VIDEO_SESSION_BEGIN = ZZ9K_SERVICE_VIDEO + 0x00,
-  ZZ9K_OP_VIDEO_SESSION_WRITE = ZZ9K_SERVICE_VIDEO + 0x01,
-  ZZ9K_OP_VIDEO_SESSION_DECODE = ZZ9K_SERVICE_VIDEO + 0x02,
-  ZZ9K_OP_VIDEO_SESSION_CLOSE = ZZ9K_SERVICE_VIDEO + 0x03,
+  /* 0x0b00..0x0b03 were the experimental video-session ops (begin, write,
+   * decode, close). They are retired and stay reserved: firmware answers
+   * them ZZ9K_STATUS_UNSUPPORTED and will not reuse the numbers. */
   ZZ9K_OP_MEDIA_SESSION_BEGIN = ZZ9K_SERVICE_VIDEO + 0x04,
   ZZ9K_OP_MEDIA_SESSION_WRITE = ZZ9K_SERVICE_VIDEO + 0x05,
   ZZ9K_OP_MEDIA_SESSION_DECODE = ZZ9K_SERVICE_VIDEO + 0x06,
@@ -1522,58 +1521,9 @@ typedef struct ZZ9KAudioOutputClockResultPayload {
   uint8_t reserved[24];
 } ZZ9KAudioOutputClockResultPayload;
 
-/* Decoder identity and immutable geometry are fixed at BEGIN. DECODE publishes
- * a decoder-owned frame to the active P96 overlay; client-visible bitmap
- * addresses and pitches are deliberately not part of this contract. */
-typedef struct ZZ9KVideoSessionBeginPayload {
-  uint8_t codec[4];
-  uint8_t container[4];
-  uint8_t width[4];
-  uint8_t height[4];
-  uint8_t output_format[4];
-  uint8_t flags[4];
-  uint8_t reserved[24];
-} ZZ9KVideoSessionBeginPayload;
-
-typedef struct ZZ9KVideoSessionWritePayload {
-  uint8_t session[4];
-  uint8_t src_handle[4];
-  uint8_t src_offset[4];
-  uint8_t src_length[4];
-  uint8_t flags[4];
-  uint8_t reserved[28];
-} ZZ9KVideoSessionWritePayload;
-
-typedef struct ZZ9KVideoSessionDecodePayload {
-  uint8_t session[4];
-  uint8_t flags[4];
-  uint8_t reserved[40];
-} ZZ9KVideoSessionDecodePayload;
-
-typedef struct ZZ9KVideoSessionClosePayload {
-  uint8_t session[4];
-  uint8_t flags[4];
-  uint8_t reserved[40];
-} ZZ9KVideoSessionClosePayload;
-
-typedef struct ZZ9KVideoSessionResultPayload {
-  uint8_t session[4];
-  uint8_t state[4];
-  uint8_t width[4];
-  uint8_t height[4];
-  uint8_t frame_rate_milli[4];
-  uint8_t frame_number[4];
-  uint8_t frame_time_millis[4];
-  uint8_t bytes_accepted[4];
-  uint8_t bytes_written[4];
-  uint8_t flags[4];
-  uint8_t reserved[8];
-} ZZ9KVideoSessionResultPayload;
-
-/* Additive media sessions leave the legacy VIDEO_SESSION_* wire contract
- * untouched. The MP2/ring fields are reserved in U2 so later firmware can
- * enable them without changing BEGIN; requesting MP2 from U2 firmware returns
- * UNSUPPORTED and its service flags remain clear. */
+/* Media sessions. The MP2/ring fields are reserved in U2 so later firmware
+ * can enable them without changing BEGIN; requesting MP2 from U2 firmware
+ * returns UNSUPPORTED and its service flags remain clear. */
 typedef struct ZZ9KMediaSessionBeginPayload {
   uint8_t video_codec[4];
   uint8_t container[4];
@@ -1928,21 +1878,6 @@ typedef char ZZ9KAudioDecodePayload_must_be_48_bytes[
 ];
 typedef char ZZ9KAudioDecodeResultPayload_must_be_48_bytes[
   (sizeof(ZZ9KAudioDecodeResultPayload) == 48U) ? 1 : -1
-];
-typedef char ZZ9KVideoSessionBeginPayload_must_be_48_bytes[
-  (sizeof(ZZ9KVideoSessionBeginPayload) == 48U) ? 1 : -1
-];
-typedef char ZZ9KVideoSessionWritePayload_must_be_48_bytes[
-  (sizeof(ZZ9KVideoSessionWritePayload) == 48U) ? 1 : -1
-];
-typedef char ZZ9KVideoSessionDecodePayload_must_be_48_bytes[
-  (sizeof(ZZ9KVideoSessionDecodePayload) == 48U) ? 1 : -1
-];
-typedef char ZZ9KVideoSessionClosePayload_must_be_48_bytes[
-  (sizeof(ZZ9KVideoSessionClosePayload) == 48U) ? 1 : -1
-];
-typedef char ZZ9KVideoSessionResultPayload_must_be_48_bytes[
-  (sizeof(ZZ9KVideoSessionResultPayload) == 48U) ? 1 : -1
 ];
 typedef char ZZ9KMediaSessionBeginPayload_must_be_48_bytes[
   (sizeof(ZZ9KMediaSessionBeginPayload) == 48U) ? 1 : -1
@@ -2543,41 +2478,6 @@ typedef struct ZZ9KAudioOutputClockResult {
   uint32_t flags;
 } ZZ9KAudioOutputClockResult;
 
-typedef struct ZZ9KVideoSessionBeginDesc {
-  uint32_t codec;
-  uint32_t container;
-  uint32_t width;
-  uint32_t height;
-  uint32_t output_format;
-  uint32_t flags;
-} ZZ9KVideoSessionBeginDesc;
-
-typedef struct ZZ9KVideoSessionWriteDesc {
-  uint32_t session;
-  uint32_t src_handle;
-  uint32_t src_offset;
-  uint32_t src_length;
-  uint32_t flags;
-} ZZ9KVideoSessionWriteDesc;
-
-typedef struct ZZ9KVideoSessionDecodeDesc {
-  uint32_t session;
-  uint32_t flags;
-} ZZ9KVideoSessionDecodeDesc;
-
-typedef struct ZZ9KVideoSessionResult {
-  uint32_t session;
-  uint32_t state;
-  uint32_t width;
-  uint32_t height;
-  uint32_t frame_rate_milli;
-  uint32_t frame_number;
-  uint32_t frame_time_millis;
-  uint32_t bytes_accepted;
-  uint32_t bytes_written;
-  uint32_t flags;
-} ZZ9KVideoSessionResult;
-
 typedef struct ZZ9KMediaSessionBeginDesc {
   uint32_t video_codec;
   uint32_t container;
@@ -2960,6 +2860,8 @@ enum ZZ9KVideoOutputFormat {
   ZZ9K_VIDEO_OUTPUT_DIRECT_OVERLAY = 1U
 };
 
+/* The VIDEO_SESSION_* flag, state and result names below date from the
+ * retired video-session ops. ZZPlay still uses them. */
 enum ZZ9KVideoSessionWriteFlags {
   ZZ9K_VIDEO_SESSION_WRITE_EOF = 1U << 0
 };

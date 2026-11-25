@@ -438,17 +438,15 @@ static void test_class_unknown_is_long(void)
   expect_int("unknown_long", taskq_class_for_opcode(0x9999u, 0u), TASK_LONG);
 }
 
-static void test_class_video_sessions_are_core1_long(void)
+static void test_class_media_sessions_are_core1_long(void)
 {
-  expect_int("video_write_long",
-             taskq_class_for_opcode(TASKQ_OP_VIDEO_SESSION_WRITE, 1u),
-             TASK_LONG);
-  expect_int("video_decode_long",
-             taskq_class_for_opcode(TASKQ_OP_VIDEO_SESSION_DECODE, 0u),
-             TASK_LONG);
-  expect_int("video_close_long",
-             taskq_class_for_opcode(TASKQ_OP_VIDEO_SESSION_CLOSE, 0u),
-             TASK_LONG);
+  uint32_t retired;
+
+  /* The retired video-session opcodes 0x0b00..0x0b03 have no case any
+   * more: they fall to the unknown/heavy default and never drain on core 0. */
+  for (retired = 0x0b00u; retired <= 0x0b03u; retired++)
+    expect_int("retired_video_long",
+               taskq_class_for_opcode(retired, 0u), TASK_LONG);
   expect_int("media_write_long",
              taskq_class_for_opcode(TASKQ_OP_MEDIA_SESSION_WRITE, 1u),
              TASK_LONG);
@@ -818,7 +816,7 @@ int main(void)
   test_class_kx_verify_always_short();
   test_class_data_ops_size_threshold();
   test_class_unknown_is_long();
-  test_class_video_sessions_are_core1_long();
+  test_class_media_sessions_are_core1_long();
   test_should_drain_gates();
   test_fallback_halts_before_lock_recovery();
   test_watchdog_trips_at_threshold();

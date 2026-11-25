@@ -358,18 +358,6 @@ uint32_t zz9k_voice_write(ZZ9KVoiceSession *session,
  * mailbox call (upload and reset count as liveness too; write does not).
  * No mailbox call. */
 int zz9k_voice_status(ZZ9KVoiceSession *session, ZZ9KVoiceStatus *status);
-int zz9k_video_session_begin(ZZ9KContext *ctx,
-                             const ZZ9KVideoSessionBeginDesc *desc,
-                             ZZ9KVideoSessionResult *result);
-int zz9k_video_session_write(ZZ9KContext *ctx,
-                             const ZZ9KVideoSessionWriteDesc *desc,
-                             ZZ9KVideoSessionResult *result);
-int zz9k_video_session_decode(ZZ9KContext *ctx,
-                              const ZZ9KVideoSessionDecodeDesc *desc,
-                              ZZ9KVideoSessionResult *result);
-int zz9k_video_session_close(ZZ9KContext *ctx, uint32_t session,
-                             uint32_t flags,
-                             ZZ9KVideoSessionResult *result);
 int zz9k_media_session_begin(ZZ9KContext *ctx,
                              const ZZ9KMediaSessionBeginDesc *desc,
                              ZZ9KMediaSessionMainResult *result);

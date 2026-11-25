@@ -80,12 +80,6 @@ int sdk_image_stream_release_client(uint16_t owner, uint32_t *close_session)
 	*close_session = 0U;
 	return 1;
 }
-int sdk_video_stream_release_client(uint16_t owner, uint32_t *close_session)
-{
-	(void)owner;
-	*close_session = 0U;
-	return 1;
-}
 int sdk_decompress_stream_release_client(uint16_t owner)
 {
 	(void)owner;

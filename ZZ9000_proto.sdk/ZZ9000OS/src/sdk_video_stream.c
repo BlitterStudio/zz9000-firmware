@@ -46,8 +46,6 @@ struct SDKVideoStreamSession {
 	uint8_t faulted;
 	uint8_t in_use;
 	uint8_t direct_frame_valid;
-	uint8_t owner;
-	uint16_t client_owner_id;
 };
 
 #ifdef SDK_VIDEO_HOST_TEST
@@ -143,14 +141,11 @@ static uint16_t ensure_decoder(struct SDKVideoStreamSession *session)
 	session->decoder = session->ops->create(session->pool_owner);
 	if (!session->decoder)
 		return SDK_STATUS_NO_MEMORY;
-	if (session->owner == SDK_VIDEO_STREAM_OWNER_MEDIA) {
-		if (!session->ops->configure_media ||
-		    !session->ops->configure_media(
-			    session->decoder, &session->media)) {
-			session->ops->destroy(session->decoder);
-			session->decoder = 0;
-			return SDK_STATUS_UNSUPPORTED;
-		}
+	if (!session->ops->configure_media ||
+	    !session->ops->configure_media(session->decoder, &session->media)) {
+		session->ops->destroy(session->decoder);
+		session->decoder = 0;
+		return SDK_STATUS_UNSUPPORTED;
 	}
 	return SDK_STATUS_OK;
 }
@@ -183,16 +178,9 @@ uint32_t sdk_video_stream_active_count(void)
 	return count;
 }
 
-int sdk_video_stream_session_core1(uint32_t session)
+int sdk_video_stream_session_live(uint32_t session)
 {
-	return find_session(session) ? 1 : -1;
-}
-
-int sdk_video_stream_session_owner(uint32_t session)
-{
-	struct SDKVideoStreamSession *found = find_session(session);
-
-	return found ? (int)found->owner : -1;
+	return find_session(session) != 0;
 }
 
 uint32_t sdk_video_stream_session_height(uint32_t session)
@@ -247,8 +235,8 @@ int sdk_video_stream_get_media_info(
 {
 	struct SDKVideoStreamSession *session = find_session(id);
 
-	if (!session || !info || session->owner != SDK_VIDEO_STREAM_OWNER_MEDIA ||
-	    !session->decoder || !session->ops->get_media_info)
+	if (!session || !info || !session->decoder ||
+	    !session->ops->get_media_info)
 		return 0;
 	return session->ops->get_media_info(session->decoder, info);
 }
@@ -257,8 +245,7 @@ int sdk_video_stream_ack_media(uint32_t id, uint64_t acknowledged)
 {
 	struct SDKVideoStreamSession *session = find_session(id);
 
-	if (!session || session->owner != SDK_VIDEO_STREAM_OWNER_MEDIA ||
-	    !session->ops->ack_media)
+	if (!session || !session->ops->ack_media)
 		return 0;
 	/* MEDIA_SESSION_AUDIO_READ doubles as the audio-status poll. Before the
 	 * first input write, decoder creation is intentionally lazy, so an empty
@@ -282,23 +269,15 @@ static void log_module_begin_failure(uint32_t module_id, const char *step,
 	printf("[ZZM] begin %s %s status %u\n", module, step,
 	       (unsigned)status);
 }
-uint16_t sdk_video_stream_begin(const struct SDKVideoStreamBegin *begin,
-	                            struct SDKVideoStreamResult *result)
-{
-	return sdk_video_stream_begin_owned(
-		begin, SDK_VIDEO_STREAM_OWNER_LEGACY, result);
-}
 
-static uint16_t sdk_video_stream_begin_owned_locked(
-	const struct SDKVideoStreamBegin *begin, uint32_t owner,
+static uint16_t sdk_video_stream_begin_locked(
+	const struct SDKVideoStreamBegin *begin,
 	struct SDKVideoStreamResult *result)
 {
 	const struct SDKVideoDecoderOps *ops;
 	struct SDKVideoStreamSession *session;
 	uint32_t module_id = 0U;
 	if (!begin || !result ||
-	    (owner != SDK_VIDEO_STREAM_OWNER_LEGACY &&
-	     owner != SDK_VIDEO_STREAM_OWNER_MEDIA) ||
 	    begin->flags != 0U ||
 	    begin->output_format != SDK_VIDEO_OUTPUT_DIRECT_OVERLAY ||
 	    begin->width == 0U || begin->height == 0U)
@@ -339,17 +318,10 @@ static uint16_t sdk_video_stream_begin_owned_locked(
 		   begin->width > SDK_VIDEO_MAX_PIXELS / begin->height) {
 		return SDK_STATUS_BAD_REQUEST;
 	}
-	if (owner == SDK_VIDEO_STREAM_OWNER_LEGACY &&
-	    (begin->audio_codec != SDK_VIDEO_MEDIA_AUDIO_NONE ||
-	     begin->pcm_ring || begin->pcm_ring_capacity != 0U ||
-	     begin->pcm_low_water_bytes != 0U ||
-	     begin->pcm_high_water_bytes != 0U))
-		return SDK_STATUS_BAD_REQUEST;
 	/* Media audio this firmware offers clients. Like the WebM codecs,
 	 * LPCM and AC-3 (MPEG-2 Program Stream) are always accepted; only
 	 * their service flag waits for qualification. */
-	if (owner == SDK_VIDEO_STREAM_OWNER_MEDIA &&
-	    begin->audio_codec != SDK_VIDEO_MEDIA_AUDIO_NONE &&
+	if (begin->audio_codec != SDK_VIDEO_MEDIA_AUDIO_NONE &&
 	    begin->audio_codec != SDK_VIDEO_MEDIA_AUDIO_MP2 &&
 	    begin->audio_codec != SDK_VIDEO_MEDIA_AUDIO_LPCM &&
 	    begin->audio_codec != SDK_VIDEO_MEDIA_AUDIO_AC3 &&
@@ -357,8 +329,7 @@ static uint16_t sdk_video_stream_begin_owned_locked(
 	    begin->audio_codec != SDK_VIDEO_MEDIA_AUDIO_VORBIS)
 		return SDK_STATUS_UNSUPPORTED;
 	/* Which of those a container can carry belongs to its backend. */
-	if (owner == SDK_VIDEO_STREAM_OWNER_MEDIA && ops && ops->audio_ok &&
-	    !ops->audio_ok(begin->audio_codec))
+	if (ops && ops->audio_ok && !ops->audio_ok(begin->audio_codec))
 		return SDK_STATUS_UNSUPPORTED;
 	if (!ops) {
 		if (module_id != 0U)
@@ -393,16 +364,14 @@ static uint16_t sdk_video_stream_begin_owned_locked(
 	session->media.pcm_high_water_bytes =
 		begin->pcm_high_water_bytes;
 	session->pool_owner = session_pool_owner(session);
-	session->owner = (uint8_t)owner;
 	session->in_use = 1U;
 	fill_result(session, SDK_VIDEO_SESSION_STATE_NEED_INPUT, 0U,
 	            SDK_VIDEO_SESSION_RESULT_NEED_INPUT, result);
 	return SDK_STATUS_OK;
 }
 
-uint16_t sdk_video_stream_begin_owned(
-	const struct SDKVideoStreamBegin *begin, uint32_t owner,
-	struct SDKVideoStreamResult *result)
+uint16_t sdk_video_stream_begin(const struct SDKVideoStreamBegin *begin,
+	                            struct SDKVideoStreamResult *result)
 {
 	uint16_t status;
 
@@ -412,7 +381,7 @@ uint16_t sdk_video_stream_begin_owned(
 	 * progress without touching the registry. */
 	if (!zzm_loader_session_begin_enter())
 		return SDK_TASK_IN_PROGRESS;
-	status = sdk_video_stream_begin_owned_locked(begin, owner, result);
+	status = sdk_video_stream_begin_locked(begin, result);
 	zzm_loader_session_begin_unlock();
 	return status;
 }
@@ -562,34 +531,3 @@ uint16_t sdk_video_stream_close(uint32_t id,
 	memset(session, 0, sizeof(*session));
 	return SDK_STATUS_OK;
 }
-
-int sdk_video_stream_set_client_owner(uint32_t session, uint16_t owner_id)
-{
-	struct SDKVideoStreamSession *state = find_session(session);
-
-	if (!state)
-		return 0;
-	state->client_owner_id = owner_id;
-	return 1;
-}
-
-int sdk_video_stream_release_client(uint16_t owner_id, uint32_t *close_session)
-{
-	uint32_t i;
-
-	if (close_session)
-		*close_session = 0U;
-	for (i = 0U; i < SDK_MAX_VIDEO_SESSIONS; i++) {
-		struct SDKVideoStreamSession *session = &video_sessions[i];
-
-		if (!session->in_use ||
-		    session->owner != SDK_VIDEO_STREAM_OWNER_LEGACY ||
-		    session->client_owner_id != owner_id)
-			continue;
-		if (close_session)
-			*close_session = session->id;
-		return 0;
-	}
-	return 1;
-}
-

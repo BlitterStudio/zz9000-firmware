@@ -55,13 +55,9 @@ struct SDKVideoStreamResult {
 	uint32_t display_fields;
 };
 
-#define SDK_VIDEO_STREAM_OWNER_LEGACY 0U
-#define SDK_VIDEO_STREAM_OWNER_MEDIA  1U
-
 void sdk_video_stream_init(void);
 uint32_t sdk_video_stream_active_count(void);
-int sdk_video_stream_session_core1(uint32_t session);
-int sdk_video_stream_session_owner(uint32_t session);
+int sdk_video_stream_session_live(uint32_t session);
 uint32_t sdk_video_stream_session_height(uint32_t session);
 int sdk_video_stream_has_core1_sessions(void);
 void sdk_video_stream_poison_core1_sessions(void);
@@ -73,17 +69,12 @@ int sdk_video_stream_ack_media(uint32_t session, uint64_t acknowledged);
 
 uint16_t sdk_video_stream_begin(const struct SDKVideoStreamBegin *begin,
 	                            struct SDKVideoStreamResult *result);
-uint16_t sdk_video_stream_begin_owned(
-	const struct SDKVideoStreamBegin *begin, uint32_t owner,
-	struct SDKVideoStreamResult *result);
 uint16_t sdk_video_stream_write(const struct SDKVideoStreamWrite *write,
 	                            struct SDKVideoStreamResult *result);
 uint16_t sdk_video_stream_decode(const struct SDKVideoStreamDecode *decode,
 	                             struct SDKVideoStreamResult *result);
 uint16_t sdk_video_stream_close(uint32_t session,
 	                            struct SDKVideoStreamResult *result);
-int sdk_video_stream_set_client_owner(uint32_t session, uint16_t owner_id);
-int sdk_video_stream_release_client(uint16_t owner_id, uint32_t *close_session);
 #ifdef SDK_VIDEO_HOST_TEST
 void sdk_video_stream_test_set_next_session_id(uint32_t id);
 #endif

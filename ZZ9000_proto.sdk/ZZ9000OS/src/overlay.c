@@ -766,9 +766,8 @@ void overlay_scheduler_reset(void)
 
 int overlay_video_frame_ready(uint32_t session)
 {
-	/* Legacy decode retirement runs before overlay_main_poll. Media sessions
-	 * additionally keep their decoder frame held until that poll confirms the
-	 * compose was enqueued ahead of any later decode. */
+	/* Media sessions keep their decoder frame held until overlay_main_poll
+	 * confirms the compose was enqueued ahead of any later decode. */
 	if (!ov.configured || !ov.active)
 		return 0;
 	/* Decoder-owned planar420 is packed into the non-scanned YUV staging

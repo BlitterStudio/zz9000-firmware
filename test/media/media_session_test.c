@@ -50,13 +50,10 @@ static void fill_video_result(struct SDKVideoStreamResult *result,
 	result->display_fields = mock_display_fields;
 }
 
-uint16_t sdk_video_stream_begin_owned(
-	const struct SDKVideoStreamBegin *begin, uint32_t owner,
-	struct SDKVideoStreamResult *result)
+uint16_t sdk_video_stream_begin(const struct SDKVideoStreamBegin *begin,
+	                            struct SDKVideoStreamResult *result)
 {
 	(void)begin;
-	if (owner != SDK_VIDEO_STREAM_OWNER_MEDIA)
-		return SDK_STATUS_BAD_REQUEST;
 	if (mock_video_active)
 		return SDK_STATUS_NO_MEMORY;
 	begin_calls++;
@@ -108,10 +105,9 @@ uint16_t sdk_video_stream_close(uint32_t session,
 	return SDK_STATUS_OK;
 }
 
-int sdk_video_stream_session_owner(uint32_t session)
+int sdk_video_stream_session_live(uint32_t session)
 {
-	return mock_video_active && session == mock_session
-		? (int)SDK_VIDEO_STREAM_OWNER_MEDIA : -1;
+	return mock_video_active && session == mock_session;
 }
 
 int sdk_video_stream_get_media_info(

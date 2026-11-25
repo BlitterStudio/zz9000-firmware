@@ -748,50 +748,6 @@ static inline int zz9k_reply_audio_output_clock_result(
   return ZZ9K_STATUS_OK;
 }
 
-static inline int zz9k_reply_video_session_result(
-    const ZZ9KMailboxEntry *reply,
-    uint16_t opcode,
-    ZZ9KVideoSessionResult *result)
-{
-  const uint8_t *payload;
-  int status;
-
-  if (!result ||
-      (opcode != ZZ9K_OP_VIDEO_SESSION_BEGIN &&
-       opcode != ZZ9K_OP_VIDEO_SESSION_WRITE &&
-       opcode != ZZ9K_OP_VIDEO_SESSION_DECODE &&
-       opcode != ZZ9K_OP_VIDEO_SESSION_CLOSE)) {
-    return ZZ9K_STATUS_BAD_REQUEST;
-  }
-
-  memset(result, 0, sizeof(*result));
-  status = zz9k_reply_require(reply, opcode,
-                              sizeof(ZZ9KVideoSessionResultPayload));
-  if (status != ZZ9K_STATUS_OK) {
-    return status;
-  }
-
-  payload = reply->payload.inline_data;
-  result->session = zz9k_get_be32(&payload[0]);
-  result->state = zz9k_get_be32(&payload[4]);
-  result->width = zz9k_get_be32(&payload[8]);
-  result->height = zz9k_get_be32(&payload[12]);
-  result->frame_rate_milli = zz9k_get_be32(&payload[16]);
-  result->frame_number = zz9k_get_be32(&payload[20]);
-  result->frame_time_millis = zz9k_get_be32(&payload[24]);
-  result->bytes_accepted = zz9k_get_be32(&payload[28]);
-  result->bytes_written = zz9k_get_be32(&payload[32]);
-  result->flags = zz9k_get_be32(&payload[36]);
-
-  if (result->session == 0U ||
-      result->state < ZZ9K_VIDEO_SESSION_STATE_NEED_INPUT ||
-      result->state > ZZ9K_VIDEO_SESSION_STATE_ERROR) {
-    memset(result, 0, sizeof(*result));
-    return ZZ9K_STATUS_INTERNAL_ERROR;
-  }
-  return ZZ9K_STATUS_OK;
-}
-
 static inline int zz9k_media_main_opcode_known(uint16_t opcode)
 {
   return opcode == ZZ9K_OP_MEDIA_SESSION_BEGIN ||
