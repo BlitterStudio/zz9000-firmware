@@ -1153,8 +1153,46 @@ The largest maximum, 4565.68 us, is below the 5000 us render budget, and the
 cubic runs cost about 1.2 ms over linear. The firmware advertises
 `ZZ9K_VOICE_FEATURE_CUBIC` and `ZZ9K_VOICE_FEATURE_VOICE_INTERP` (features
 word 0x8F) on this evidence. It covers the listed loads, not every command
-pattern. These are timing and cleanliness results only: nobody has listened
-to cubic output yet, and no claim is made about how it sounds.
+pattern. These are timing and cleanliness results only. The first cubic
+listening is in the next section.
+
+### Listening session
+
+This is part of the listening gate, not all of it. The card was the
+same Zorro III A4000/68060 on production firmware `3671df80` (features word
+0x8F), the maintainer listened to four pairs (eight clips), and no bench
+budget was measured. There was no analogue capture and no independent PCM
+measurement, so each result is what one listener heard plus the counters the
+tools printed. No oversampling, envelope or event feature was requested.
+
+| Pair | Commands | Heard | Counters |
+| --- | --- | --- | --- |
+| Limiter, 4 s each | `zz9k-voiceplay LOAD VOICES=32 SECONDS=4 GAIN=65535 RAMP=256 INTERP=cubic`, then the same with `LIMITER` | A pulse in both, no big difference. The second clip may have been less harsh. The listener was unsure what to listen for | 0 late, 0 rejected, 0 underruns, 0 dropped, 1 ring-full wait per clip |
+| Ramp on a module, 24 s each | `zz9k-voiceplay 8ch.mod SECONDS=24 RAMP=0 INTERP=cubic LIMITER`, then `RAMP=256` (about 5.33 ms) | The second had fewer clicks and smoother transitions | 0 late, 0 rejected, 0 underruns, 0 dropped, 0 ring-full waits per clip |
+| AHI sweeps | `ZZAXVoiceTest MODE 0xCAFE0003 SCENARIO S6 SECONDS 2 ANTICLICK 240` (linear), then `MODE 0xCAFE0004` (cubic) | Both clean and similar, no preference | `S6 PASS` for 8-bit and 16-bit, forward and backward; all nine error fields 0; ramp 240, limiter 1 |
+| Slides and cuts fixture, 6 s each | `zz9k-voiceplay u9-slides-cuts.mod SECONDS=6 RAMP=0 INTERP=cubic LIMITER`, then `RAMP=256` | Both clean and similar, no clear difference | 0 late, 0 rejected, 0 underruns, 0 dropped, 0 ring-full waits per clip |
+
+The limiter pair gives no limiter preference and no fault diagnosis. The
+listener heard the pulse with and without the knee and noticed at most a
+small difference. Each clip played the 32 starts of the load with no
+restarts.
+
+The 8-channel module (`8ch.mod`, SHA-256 `50a76d2c...2f5a`) played the same
+way in both clips with cubic and the limiter on; only the ramp changed. Its
+24 s include retriggers and volume changes. They do not reach the later
+`Axx` volume slides, and the module has no `ECx` note cuts.
+
+A separate generated fixture covers those effects. `u9-slides-cuts.mod`
+(SHA-256 `c985c588...a510`, 2172 bytes, 4 channels, quiet, 2 active voices
+on the left and right) uses `A04`, `A01` and `A08` volume slides, `EC2` and
+`EC3` note cuts, and `C40` and `C00` volume sets. The two 6 s clips (288000
+frames each) differed only in the ramp, with cubic and the limiter on. The
+listener heard both as clean with no clear difference. This is a listening
+check of the effect handling, not a measurement of the ramp.
+
+Still open after these four pairs: the held oversampling and envelope
+listening, and the full-load video, Zorro II, mailbox and window-open
+checks. These sessions do not qualify any of them.
 
 ### Low-latency sessions
 
