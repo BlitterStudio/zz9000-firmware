@@ -34,8 +34,6 @@ struct record {
 	uint16_t fw_code;
 	int fw_failed;
 	int zzm_load;
-	int video_closed;
-	uint32_t video_session;
 	int media_retired;
 	uint32_t media_session;
 	int pcm_released;
@@ -49,7 +47,6 @@ static void on_compose(int ok) { rec.compose++; rec.compose_ok = ok; }
 static void on_fw_retire(uint16_t code) { rec.fw_retire++; rec.fw_code = code; }
 static void on_fw_failed(void) { rec.fw_failed++; }
 static void on_zzm_load(int ok) { (void)ok; rec.zzm_load++; }
-static void on_video_closed(uint32_t s) { rec.video_closed++; rec.video_session = s; }
 static void on_media_retired(uint32_t s) { rec.media_retired++; rec.media_session = s; }
 static void on_pcm_release(uint32_t s) { rec.pcm_released++; rec.pcm_session = s; }
 static void on_ax_refill(void) { rec.ax_refill++; }
@@ -59,7 +56,6 @@ static const struct sdk_internal_completion_hooks hooks = {
 	.fw_update_retire = on_fw_retire,
 	.fw_update_retire_failed = on_fw_failed,
 	.zzm_load_finished = on_zzm_load,
-	.overlay_video_closed = on_video_closed,
 	.media_close_retired = on_media_retired,
 	.pcm_ring_release = on_pcm_release,
 	.ax_refill_done = on_ax_refill,
@@ -92,7 +88,6 @@ static void test_media_close_releases_session_and_ring(void)
 	CHECK(rec.pcm_released == 1);
 	CHECK(rec.pcm_session == 0x00010203U);
 	CHECK(rec.ax_refill == 0);
-	CHECK(rec.video_closed == 0);
 }
 
 static void test_failed_media_close_retires_nothing(void)
@@ -106,25 +101,10 @@ static void test_failed_media_close_retires_nothing(void)
 	CHECK(rec.ax_refill == 0);
 }
 
-static void test_video_close_retires_overlay_only(void)
-{
-	uint8_t payload[16];
-
-	session_payload(payload, 0x0000beefU);
-	dispatch(SDK_OP_VIDEO_SESSION_CLOSE, SDK_STATUS_OK, payload, 16);
-	CHECK(rec.video_closed == 1);
-	CHECK(rec.video_session == 0x0000beefU);
-	CHECK(rec.media_retired == 0);
-	CHECK(rec.pcm_released == 0);
-	CHECK(rec.ax_refill == 0);
-}
-
 static void test_short_payload_identifies_no_session(void)
 {
 	uint8_t payload[2] = { 0, 1 };
 
-	dispatch(SDK_OP_VIDEO_SESSION_CLOSE, SDK_STATUS_OK, payload, 2);
-	CHECK(rec.video_closed == 0);
 	dispatch(SDK_OP_MEDIA_SESSION_CLOSE, SDK_STATUS_OK, payload, 2);
 	CHECK(rec.media_retired == 0);
 	CHECK(rec.pcm_released == 0);
@@ -147,7 +127,7 @@ static void test_ax_refill_clears_its_marker(void)
 	dispatch(SDK_OP_AUDIO_STREAM_FEED, SDK_STATUS_OK, 0, 0);
 	CHECK(rec.ax_refill == 1);
 	CHECK(rec.media_retired == 0);
-	CHECK(rec.video_closed == 0);
+	CHECK(rec.pcm_released == 0);
 }
 
 static void test_other_internal_producers_keep_their_routes(void)
@@ -168,7 +148,6 @@ int main(void)
 {
 	test_media_close_releases_session_and_ring();
 	test_failed_media_close_retires_nothing();
-	test_video_close_retires_overlay_only();
 	test_short_payload_identifies_no_session();
 	test_close_opcodes_leave_refill_marker_alone();
 	test_ax_refill_clears_its_marker();

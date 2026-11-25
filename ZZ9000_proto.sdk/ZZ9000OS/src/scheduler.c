@@ -456,9 +456,6 @@ taskq_class_t taskq_class_for_opcode(uint32_t opcode, uint32_t in_len)
      * Vorbis stream's decoder heap) is cache-owned by core 1 for
      * core-1-affine streams. */
     return TASK_LONG;
-  case TASKQ_OP_VIDEO_SESSION_WRITE:
-  case TASKQ_OP_VIDEO_SESSION_DECODE:
-  case TASKQ_OP_VIDEO_SESSION_CLOSE:
   case TASKQ_OP_MEDIA_SESSION_WRITE:
   case TASKQ_OP_MEDIA_SESSION_DECODE:
   case TASKQ_OP_MEDIA_SESSION_AUDIO_READ:

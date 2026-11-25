@@ -1001,7 +1001,7 @@ static uint64_t clock_picture(struct sdk_video_mpeg2 *d,
 
 	picture_timestamps(d, picture, raw_pts, raw_dts);
 	/* The slot ends after the preceding picture's duration. Keep a
-	 * separate integer clock for VIDEO_SESSION's millisecond timestamp. */
+	 * separate integer clock for the millisecond frame time. */
 	if (d->video_frames != 0U) {
 		if (d->legacy_video_rate_milli != per_second) {
 			d->legacy_video_remainder = 0U;

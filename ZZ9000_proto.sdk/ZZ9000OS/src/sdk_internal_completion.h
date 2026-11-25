@@ -24,17 +24,16 @@ struct sdk_internal_completion_hooks {
 	void (*fw_update_retire)(uint16_t code);
 	void (*fw_update_retire_failed)(void);
 	void (*zzm_load_finished)(int ok);
-	void (*overlay_video_closed)(uint32_t session);
 	void (*media_close_retired)(uint32_t session);
 	void (*pcm_ring_release)(uint32_t session);
 	void (*ax_refill_done)(void);
 };
 
 /*
- * Both session-bearing result payloads (SDKVideoSessionResultPayload,
- * SDKMediaSessionMainResultPayload) lead with the big-endian session id, so
- * the dispatch reads it generically; a payload shorter than the session word
- * cannot identify a session and retires nothing.
+ * The session-bearing result payload (SDKMediaSessionMainResultPayload) leads
+ * with the big-endian session id, so the dispatch reads it generically; a
+ * payload shorter than the session word cannot identify a session and
+ * retires nothing.
  */
 static inline uint32_t sdk_internal_payload_session(const uint8_t *payload,
                                                     uint16_t payload_len)
@@ -63,10 +62,6 @@ static inline void sdk_internal_completion_dispatch(
 		/* Background close: the audio-stream reap clears the slot. */
 	} else if (opcode == (uint16_t)SDK_OP_IMAGE_SESSION_CLOSE) {
 		/* Core-1 session teardown has no mailbox-side retirement. */
-	} else if (opcode == (uint16_t)SDK_OP_VIDEO_SESSION_CLOSE) {
-		if (status == SDK_STATUS_OK && payload_len >= 4U)
-			hooks->overlay_video_closed(
-			    sdk_internal_payload_session(payload, payload_len));
 	} else if (opcode == (uint16_t)SDK_OP_MEDIA_SESSION_CLOSE) {
 		if (status == SDK_STATUS_OK && payload_len >= 4U) {
 			uint32_t session =

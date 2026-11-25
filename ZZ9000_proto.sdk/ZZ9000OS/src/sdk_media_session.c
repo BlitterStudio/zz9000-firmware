@@ -335,8 +335,7 @@ static void fill_main(uint32_t bytes_written, uint32_t extra_flags,
 static int active_session(uint32_t session)
 {
 	return media.active && media.session == session &&
-	       sdk_video_stream_session_owner(session) ==
-	           SDK_VIDEO_STREAM_OWNER_MEDIA;
+	       sdk_video_stream_session_live(session);
 }
 
 static void advance_video_pts(const struct SDKVideoStreamResult *video)
@@ -484,8 +483,7 @@ uint16_t sdk_media_session_begin_owned(
 	video_begin.pcm_ring_capacity = begin->pcm_ring_capacity;
 	video_begin.pcm_low_water_bytes = begin->pcm_low_water_bytes;
 	video_begin.pcm_high_water_bytes = begin->pcm_high_water_bytes;
-	status = sdk_video_stream_begin_owned(
-		&video_begin, SDK_VIDEO_STREAM_OWNER_MEDIA, &video_result);
+	status = sdk_video_stream_begin(&video_begin, &video_result);
 	if (status != SDK_STATUS_OK)
 		return status;
 

@@ -459,10 +459,9 @@ struct SDKModuleStatusPayload {
 	uint8_t detail[4];
 };
 
-#define SDK_OP_VIDEO_SESSION_BEGIN     0x0b00U
-#define SDK_OP_VIDEO_SESSION_WRITE     0x0b01U
-#define SDK_OP_VIDEO_SESSION_DECODE    0x0b02U
-#define SDK_OP_VIDEO_SESSION_CLOSE     0x0b03U
+/* 0x0b00..0x0b03 were the experimental legacy video-session ops (begin,
+ * write, decode, close). They are retired and stay reserved: the firmware
+ * answers them SDK_STATUS_UNSUPPORTED and never reuses the numbers. */
 #define SDK_OP_MEDIA_SESSION_BEGIN     0x0b04U
 #define SDK_OP_MEDIA_SESSION_WRITE     0x0b05U
 #define SDK_OP_MEDIA_SESSION_DECODE    0x0b06U

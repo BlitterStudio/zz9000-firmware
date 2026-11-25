@@ -215,7 +215,8 @@ static int test_request_builders(void)
       return 13;
   }
   if (zz9k_request_media_session_command(
-          &request, ZZ9K_OP_VIDEO_SESSION_CLOSE, 9U, 0U) !=
+          &request, (uint16_t)0x0b03U /* retired video-session close */, 9U,
+          0U) !=
       ZZ9K_STATUS_BAD_REQUEST)
     return 14;
   if (zz9k_request_media_session_command(

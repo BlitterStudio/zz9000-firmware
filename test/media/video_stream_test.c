@@ -211,8 +211,7 @@ static int test_zero_ack_before_lazy_decoder(void)
 	begin.pcm_high_water_bytes = 6144U;
 
 	sdk_video_stream_init();
-	if (sdk_video_stream_begin_owned(
-		    &begin, SDK_VIDEO_STREAM_OWNER_MEDIA, &result) !=
+	if (sdk_video_stream_begin(&begin, &result) !=
 	        SDK_STATUS_OK)
 		return 1;
 	session = result.session;
@@ -257,22 +256,19 @@ static int test_webm_stream_envelopes(void)
 	/* Oversize width or height -> UNSUPPORTED, not BAD_REQUEST. */
 	begin.width = 2560U;
 	begin.height = 1440U;
-	if (sdk_video_stream_begin_owned(
-		    &begin, SDK_VIDEO_STREAM_OWNER_MEDIA, &result) !=
+	if (sdk_video_stream_begin(&begin, &result) !=
 	    SDK_STATUS_UNSUPPORTED)
 		return 10;
 
 	begin.width = 1920U;
 	begin.height = 1089U;
-	if (sdk_video_stream_begin_owned(
-		    &begin, SDK_VIDEO_STREAM_OWNER_MEDIA, &result) !=
+	if (sdk_video_stream_begin(&begin, &result) !=
 	    SDK_STATUS_UNSUPPORTED)
 		return 11;
 
 	begin.width = 1921U;
 	begin.height = 1080U;
-	if (sdk_video_stream_begin_owned(
-		    &begin, SDK_VIDEO_STREAM_OWNER_MEDIA, &result) !=
+	if (sdk_video_stream_begin(&begin, &result) !=
 	    SDK_STATUS_UNSUPPORTED)
 		return 12;
 	/* The backend, not the session layer, owns the WebM caps. */
@@ -281,8 +277,7 @@ static int test_webm_stream_envelopes(void)
 	/* Zero dimension -> BAD_REQUEST. */
 	begin.width = 0U;
 	begin.height = 120U;
-	if (sdk_video_stream_begin_owned(
-		    &begin, SDK_VIDEO_STREAM_OWNER_MEDIA, &result) !=
+	if (sdk_video_stream_begin(&begin, &result) !=
 	    SDK_STATUS_BAD_REQUEST)
 		return 13;
 
@@ -298,19 +293,16 @@ static int test_webm_stream_envelopes(void)
 	begin.width = 320U;
 	begin.height = 240U;
 	begin.audio_codec = SDK_MEDIA_AUDIO_MP2;
-	if (sdk_video_stream_begin_owned(
-		    &begin, SDK_VIDEO_STREAM_OWNER_MEDIA, &result) !=
+	if (sdk_video_stream_begin(&begin, &result) !=
 	    SDK_STATUS_OK)
 		return 19;
 	sdk_video_stream_close(result.session, &result);
 	begin.audio_codec = SDK_MEDIA_AUDIO_OPUS;
-	if (sdk_video_stream_begin_owned(
-		    &begin, SDK_VIDEO_STREAM_OWNER_MEDIA, &result) !=
+	if (sdk_video_stream_begin(&begin, &result) !=
 	    SDK_STATUS_UNSUPPORTED)
 		return 14;
 	begin.audio_codec = SDK_MEDIA_AUDIO_VORBIS;
-	if (sdk_video_stream_begin_owned(
-		    &begin, SDK_VIDEO_STREAM_OWNER_MEDIA, &result) !=
+	if (sdk_video_stream_begin(&begin, &result) !=
 	    SDK_STATUS_UNSUPPORTED)
 		return 15;
 	/* LPCM and AC-3 (MPEG-2 Program Stream) pass the media list; which
@@ -318,14 +310,12 @@ static int test_webm_stream_envelopes(void)
 	 * rule they begin. Before, the stream layer refused both. */
 	mock_ops.audio_ok = 0;
 	begin.audio_codec = SDK_MEDIA_AUDIO_LPCM;
-	if (sdk_video_stream_begin_owned(
-		    &begin, SDK_VIDEO_STREAM_OWNER_MEDIA, &result) !=
+	if (sdk_video_stream_begin(&begin, &result) !=
 	    SDK_STATUS_OK)
 		return 20;
 	sdk_video_stream_close(result.session, &result);
 	begin.audio_codec = SDK_MEDIA_AUDIO_AC3;
-	if (sdk_video_stream_begin_owned(
-		    &begin, SDK_VIDEO_STREAM_OWNER_MEDIA, &result) !=
+	if (sdk_video_stream_begin(&begin, &result) !=
 	    SDK_STATUS_OK)
 		return 21;
 	sdk_video_stream_close(result.session, &result);
@@ -340,16 +330,14 @@ static int test_webm_stream_envelopes(void)
 	begin.audio_codec = SDK_MEDIA_AUDIO_NONE;
 	begin.width = 1080U;
 	begin.height = 1920U;
-	if (sdk_video_stream_begin_owned(
-		    &begin, SDK_VIDEO_STREAM_OWNER_MEDIA, &result) !=
+	if (sdk_video_stream_begin(&begin, &result) !=
 	    SDK_STATUS_OK)
 		return 16;
 	sdk_video_stream_close(result.session, &result);
 
 	begin.width = 271U;
 	begin.height = 481U;
-	if (sdk_video_stream_begin_owned(
-		    &begin, SDK_VIDEO_STREAM_OWNER_MEDIA, &result) !=
+	if (sdk_video_stream_begin(&begin, &result) !=
 	    SDK_STATUS_OK)
 		return 17;
 	sdk_video_stream_close(result.session, &result);
@@ -412,8 +400,7 @@ static int test_decode_flag_forwarding(void)
 	begin.width = 320U;
 	begin.height = 240U;
 	begin.output_format = SDK_VIDEO_OUTPUT_DIRECT_OVERLAY;
-	if (sdk_video_stream_begin_owned(
-		    &begin, SDK_VIDEO_STREAM_OWNER_MEDIA, &result) !=
+	if (sdk_video_stream_begin(&begin, &result) !=
 	    SDK_STATUS_OK)
 		return 20;
 
@@ -449,8 +436,7 @@ static int test_partial_write_progress(void)
 	begin.width = 320U;
 	begin.height = 240U;
 	begin.output_format = SDK_VIDEO_OUTPUT_DIRECT_OVERLAY;
-	if (sdk_video_stream_begin_owned(
-		    &begin, SDK_VIDEO_STREAM_OWNER_MEDIA, &result) !=
+	if (sdk_video_stream_begin(&begin, &result) !=
 	    SDK_STATUS_OK)
 		return 30;
 
@@ -473,7 +459,7 @@ static int test_partial_write_progress(void)
 	return 0;
 }
 
-static int begin_and_write(uint32_t owner, uint32_t *session)
+static int begin_and_write(uint32_t *session)
 {
 	struct SDKVideoStreamBegin begin;
 	struct SDKVideoStreamWrite write;
@@ -486,8 +472,7 @@ static int begin_and_write(uint32_t owner, uint32_t *session)
 	begin.width = 320U;
 	begin.height = 240U;
 	begin.output_format = SDK_VIDEO_OUTPUT_DIRECT_OVERLAY;
-	if (sdk_video_stream_begin_owned(&begin, owner, &result) !=
-	    SDK_STATUS_OK)
+	if (sdk_video_stream_begin(&begin, &result) != SDK_STATUS_OK)
 		return 0;
 	*session = result.session;
 	memset(&write, 0, sizeof(write));
@@ -511,7 +496,7 @@ static int test_pool_owner_per_session(void)
 	sdk_video_stream_init();
 
 	created_pool_owner = 0U;
-	if (!begin_and_write(SDK_VIDEO_STREAM_OWNER_MEDIA, &session))
+	if (!begin_and_write(&session))
 		return 40;
 	owner_a = created_pool_owner;
 	if (CARD_POOL_OWNER_CLASS(owner_a) != CARD_POOL_CLASS_MEDIA)
@@ -519,7 +504,7 @@ static int test_pool_owner_per_session(void)
 	sdk_video_stream_close(session, &result);
 
 	created_pool_owner = 0U;
-	if (!begin_and_write(SDK_VIDEO_STREAM_OWNER_LEGACY, &session))
+	if (!begin_and_write(&session))
 		return 42;
 	owner_b = created_pool_owner;
 	if (CARD_POOL_OWNER_CLASS(owner_b) != CARD_POOL_CLASS_MEDIA ||
@@ -551,7 +536,7 @@ static int test_public_session_rollover_keeps_owner_reserved(void)
 	sdk_video_stream_test_set_next_session_id(expected[0]);
 	for (i = 0U; i < sizeof(expected) / sizeof(expected[0]); ++i) {
 		created_pool_owner = 0U;
-		if (!begin_and_write(SDK_VIDEO_STREAM_OWNER_MEDIA, &session))
+		if (!begin_and_write(&session))
 			return 46;
 		if (session != expected[i] ||
 		    (created_pool_owner & 0x00ffffffU) >=
@@ -580,12 +565,12 @@ static int test_app_owner_does_not_reclaim_video_session(void)
 	card_pool_open_range(&card_pool, 0);
 	sdk_video_stream_init();
 	for (i = 0U; i < 3U; i++) {
-		if (!begin_and_write(SDK_VIDEO_STREAM_OWNER_MEDIA, &session))
+		if (!begin_and_write(&session))
 			return 50;
 		sdk_video_stream_close(session, &result);
 	}
 	created_pool_owner = 0U;
-	if (!begin_and_write(SDK_VIDEO_STREAM_OWNER_MEDIA, &session))
+	if (!begin_and_write(&session))
 		return 51;
 	if (session != 4U)
 		return 52;

@@ -56,25 +56,11 @@ static int expect_contains(const char *source, const char *label,
 	return 0;
 }
 
-static unsigned count_occurrences(const char *source, const char *needle)
-{
-	unsigned count = 0U;
-	const char *cursor = source;
-	size_t length = strlen(needle);
-
-	while ((cursor = strstr(cursor, needle)) != 0) {
-		count++;
-		cursor += length;
-	}
-	return count;
-}
-
 int main(int argc, char **argv)
 {
 	char *mailbox_source;
 	char *mailbox_header;
 	char *makefile_source;
-	unsigned legacy_owner_checks;
 	int ok = 1;
 
 	if (argc != 4) {
@@ -255,15 +241,6 @@ int main(int argc, char **argv)
 	                      "case SDK_OP_MEDIA_SESSION_CLOSE:");
 	ok &= expect_contains(mailbox_source, "sdk_mailbox.c",
 	                      "sdk_media_session_close_retired");
-
-	legacy_owner_checks = count_occurrences(
-		mailbox_source, "SDK_VIDEO_STREAM_OWNER_LEGACY");
-	if (legacy_owner_checks < 3U) {
-		printf("sdk_mailbox.c: legacy VIDEO_SESSION write/decode/close "
-		       "must reject media-owned sessions (found %u owner checks)\n",
-		       legacy_owner_checks);
-		ok = 0;
-	}
 
 	ok &= expect_contains(makefile_source, "Makefile",
 	                      "$(SRC_DIR)/sdk_compression.c");
