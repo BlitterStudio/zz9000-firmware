@@ -458,7 +458,7 @@ All multi-byte mailbox fields use the byte order defined by `zz9k/abi.h`. The se
 | --- | --- |
 | Core | `0x0000` NOP, `0x0001` QUERY_CAPS, `0x0002` PING, `0x0003` CANCEL, `0x0004` QUERY_SERVICE, `0x0005` QUERY_APERTURE_LAYOUT |
 | Memory | `0x0100` ALLOC_SHARED, `0x0101` FREE_SHARED, `0x0102` MEM_FILL, `0x0103` MEM_COPY |
-| Surface | `0x0200` ALLOC_SURFACE, `0x0201` FREE_SURFACE, `0x0202` MAP_FRAMEBUFFER_SURFACE, `0x0203` FILL_SURFACE, `0x0204` COPY_SURFACE, `0x0205` QUERY_PALETTE |
+| Surface | `0x0200` ALLOC_SURFACE, `0x0201` FREE_SURFACE, `0x0202` MAP_FRAMEBUFFER_SURFACE, `0x0203` FILL_SURFACE, `0x0204` COPY_SURFACE, `0x0205` QUERY_PALETTE (Zorro III only) |
 | Image | `0x0400` SCALE_IMAGE, `0x0401` DECODE_JPEG, `0x0402` DECODE_PNG, `0x0403` DECODE_GIF, `0x0404` IMAGE_SESSION_BEGIN, `0x0405` IMAGE_SESSION_FEED, `0x0406` IMAGE_SESSION_CLOSE, `0x0407` SCALE_IMAGE_CLIPPED, `0x0408` IMAGE_ANIMATION_FRAME_NEXT, `0x0409` IMAGE_ANIMATION_FRAME_PRESENT, `0x040a` IMAGE_ANIMATION_FRAME_RETIRE, `0x040b` IMAGE_ANIMATION_RESTART |
 | Audio | `0x0500` DECODE_MP3, `0x0501` MIX_AUDIO, `0x0502` RESAMPLE_AUDIO, `0x0503` STREAM_BEGIN, `0x0504` STREAM_FEED, `0x0505` STREAM_READ, `0x0506` STREAM_CLOSE, `0x0507` STREAM_PLAY, `0x0508` STREAM_STOP, `0x0509`–`0x050e` control and metering, `0x0512` FABRIC_STATE_GET, `0x0513` RING_ACQUIRE, `0x0514` RING_RELEASE, `0x0515` STREAM_GAIN, `0x0516` STREAM_BEGIN_EX, `0x0517` OUTPUT_CLOCK, `0x0518` VOICE_OPEN, `0x0519` VOICE_CLOSE, `0x051a` VOICE_RESET, `0x051b` VOICE_UPLOAD |
 | Codec | `0x0600` DECOMPRESS, `0x0601` DECOMPRESS_TEST, `0x0602` STREAM_BEGIN, `0x0603` STREAM_READ, `0x0604` STREAM_CLOSE, `0x0605` STREAM_FEED, `0x0606` DECOMPRESS_BATCH |
@@ -679,6 +679,8 @@ implementation (Zorro II vs III, accelerator bus bridges).
 ### Palette query
 
 `ZZ9KQueryPalette()` reads the display-global INDEX8 CLUT into a caller-provided shared buffer. Set `ZZ9KPaletteQueryDesc.start` and `count` (at most `ZZ9K_PALETTE_MAX_ENTRIES`) and provide room for `count * ZZ9K_PALETTE_ENTRY_BYTES`. Entries are consecutive `0x00RRGGBB` words because the full 256-entry table does not fit in the 48-byte reply. `desc.surface` is reserved for future per-surface tables and does not select a palette. `ZZ9K_PALETTE_QUERY_FLAG_SECONDARY` is reserved; firmware returns `ZZ9K_STATUS_UNSUPPORTED` because it does not shadow the secondary CLUT. Require `ZZ9K_LIBRARY_MIN_REVISION_QUERY_PALETTE` and `ZZ9K_SERVICE_FLAG_SURFACE_PALETTE_QUERY`.
+
+The palette query is Zorro III only. Firmware shadows the CLUT only from the upload path the Zorro III RTG driver uses, so on Zorro II the shadow never fills. A Zorro II card does not advertise `ZZ9K_SERVICE_FLAG_SURFACE_PALETTE_QUERY`, and `ZZ9K_OP_QUERY_PALETTE` returns `ZZ9K_STATUS_UNSUPPORTED` there whatever the arguments are. The shadow is cleared at card init and at an Amiga reset. Otherwise it follows the palette uploads, so it matches the display CLUT, which a video mode change does not clear.
 
 ## Image Scaling
 

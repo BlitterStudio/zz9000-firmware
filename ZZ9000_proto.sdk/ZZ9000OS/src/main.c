@@ -79,6 +79,7 @@ void Xil_AssertNonVoid() {}
 #include "usb_proxy.h"
 #include "sdk_mailbox.h"
 #include "sdk_aperture_layout.h"
+#include "sdk_palette.h"
 #include "surface_allocator.h"
 #include "mmu_page.h"
 #include "zzapp_as.h"
@@ -1063,6 +1064,8 @@ void handle_amiga_reset(enum amiga_reset_mode mode) {
 	sdk_aperture_runtime_init(MNTZORRO_REG7_APERTURE_SIZE(
 			mntzorro_read(MNTZ_BASE_ADDR, MNTZORRO_REG7)),
 		(mntzorro_read(MNTZ_BASE_ADDR, MNTZORRO_REG3) & (1UL << 25)) != 0U);
+	/* A new Amiga session must not read the previous session's CLUT. */
+	sdk_palette_reset();
 	apply_aperture_framebuffer_limit();
 	clear_runtime_gfxdata();
 	/* The alloc-clear protocol handshake is driver-init state: a warm
@@ -1185,6 +1188,8 @@ int main() {
 	sdk_aperture_runtime_init(MNTZORRO_REG7_APERTURE_SIZE(
 			mntzorro_read(MNTZ_BASE_ADDR, MNTZORRO_REG7)),
 		(mntzorro_read(MNTZ_BASE_ADDR, MNTZORRO_REG3) & (1UL << 25)) != 0U);
+	/* The CLUT shadow behind SDK_OP_QUERY_PALETTE starts empty. */
+	sdk_palette_reset();
 	/* The host-written command region must be mapped before core 1 and
 	 * interrupts run. Z2 keeps its existing mailbox page. */
 	sdk_mailbox_map_z2_page();

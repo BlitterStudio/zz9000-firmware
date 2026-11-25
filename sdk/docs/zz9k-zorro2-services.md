@@ -43,6 +43,7 @@ allocator.
 | `zz9k-archive` streamed decode, test, and extract | Yes | Yes | Decode and extract use a combined CPU-visible budget of `min(48 KiB, host window)`, split between input and output. Verify-only output can be card-only. The 16 KiB profile therefore starts with 8 KiB chunks. A failed pair allocation retries at half size down to 4 KiB. |
 | ZZ9000AX voice engine (`ZZ9KVoice*`, [zz9k-voice.md](zz9k-voice.md)) | Yes | Yes | The session needs three host-window buffers: a command ring (2 KiB by default), a 64-byte status block and an upload staging buffer (4 KiB by default). The defaults take 6,208 bytes of the 16 KiB window, plus alignment. The sample bank, up to 32 MiB, is card memory. The firmware refuses an open whose buffers are not host-window buffers. Qualified on Zorro III hardware, where the firmware advertises `ZZ9K_SERVICE_FLAG_AUDIO_VOICE` and `ZZ9K_SERVICE_FLAG_AUDIO_VOICE_STEREO`. Not yet tested on a Zorro II machine, so the flags are not set there. |
 | ZZPlay MPEG Program Stream video/PIP | No | No | Current code accepts only an acknowledged generation-1 PIP layout. On that legacy 4 MiB layout, the 224 KiB pool fits a 352x288 YUY2 frame (202,752 bytes) and rejects 640x360 (460,800 bytes). |
+| `zz9k-palette` and `ZZ9KQueryPalette()` | No | No | Not available on Zorro II. Firmware does not advertise `ZZ9K_SERVICE_FLAG_SURFACE_PALETTE_QUERY` there and `ZZ9K_OP_QUERY_PALETTE` returns `ZZ9K_STATUS_UNSUPPORTED`, because firmware shadows the CLUT only from the Zorro III upload path. |
 
 ## External integration notes
 
