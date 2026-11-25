@@ -1153,8 +1153,46 @@ The largest maximum, 4565.68 us, is below the 5000 us render budget, and the
 cubic runs cost about 1.2 ms over linear. The firmware advertises
 `ZZ9K_VOICE_FEATURE_CUBIC` and `ZZ9K_VOICE_FEATURE_VOICE_INTERP` (features
 word 0x8F) on this evidence. It covers the listed loads, not every command
-pattern. These are timing and cleanliness results only: nobody has listened
-to cubic output yet, and no claim is made about how it sounds.
+pattern. These are timing and cleanliness results only. The first cubic
+listening is in the next section.
+
+### Listening session
+
+This is part of the listening gate, not all of it. The card was the
+same Zorro III A4000/68060 on production firmware `3671df80` (features word
+0x8F), the maintainer listened to four pairs (eight clips), and no bench
+budget was measured. There was no analogue capture and no independent PCM
+measurement, so each result is what one listener heard plus the counters the
+tools printed. No oversampling, envelope or event feature was requested.
+
+| Pair | Commands | Heard | Counters |
+| --- | --- | --- | --- |
+| Limiter, 4 s each | `zz9k-voiceplay LOAD VOICES=32 SECONDS=4 GAIN=65535 RAMP=256 INTERP=cubic`, then the same with `LIMITER` | A pulse in both, no big difference. The second clip may have been less harsh. The listener was unsure what to listen for | 0 late, 0 rejected, 0 underruns, 0 dropped, 1 ring-full wait per clip |
+| Ramp on a module, 24 s each | `zz9k-voiceplay 8ch.mod SECONDS=24 RAMP=0 INTERP=cubic LIMITER`, then `RAMP=256` (about 5.33 ms) | The second had fewer clicks and smoother transitions | 0 late, 0 rejected, 0 underruns, 0 dropped, 0 ring-full waits per clip |
+| AHI sweeps | `ZZAXVoiceTest MODE 0xCAFE0003 SCENARIO S6 SECONDS 2 ANTICLICK 240` (linear), then `MODE 0xCAFE0004` (cubic) | Both clean and similar, no preference | `S6 PASS` for 8-bit and 16-bit, forward and backward; all nine error fields 0; ramp 240, limiter 1 |
+| Slides and cuts fixture, 6 s each | `zz9k-voiceplay u9-slides-cuts.mod SECONDS=6 RAMP=0 INTERP=cubic LIMITER`, then `RAMP=256` | Both clean and similar, no clear difference | 0 late, 0 rejected, 0 underruns, 0 dropped, 0 ring-full waits per clip |
+
+The limiter pair gives no limiter preference and no fault diagnosis. The
+listener heard the pulse with and without the knee and noticed at most a
+small difference. Each clip played the 32 starts of the load with no
+restarts.
+
+The 8-channel module (`8ch.mod`, SHA-256 `50a76d2c...2f5a`) played the same
+way in both clips with cubic and the limiter on; only the ramp changed. Its
+24 s include retriggers and volume changes. They do not reach the later
+`Axx` volume slides, and the module has no `ECx` note cuts.
+
+A separate generated fixture covers those effects. `u9-slides-cuts.mod`
+(SHA-256 `c985c588...a510`, 2172 bytes, 4 channels, quiet, 2 active voices
+on the left and right) uses `A04`, `A01` and `A08` volume slides, `EC2` and
+`EC3` note cuts, and `C40` and `C00` volume sets. The two 6 s clips (288000
+frames each) differed only in the ramp, with cubic and the limiter on. The
+listener heard both as clean with no clear difference. This is a listening
+check of the effect handling, not a measurement of the ramp.
+
+Still open after these four pairs: the held oversampling and envelope
+listening, and Zorro II. These sessions do not qualify any of them. Full-load
+video and window-open timing were measured separately, see the next section.
 
 ### Low-latency sessions
 
@@ -1175,7 +1213,35 @@ a low-latency session and 7680 frames (160 ms) in a standard one. The
 maintainer judged the low-latency session tighter when playing from the
 keyboard. Of 41 keys in the first low-latency run, 2 notes were late.
 
-One gap remains. While a program opens its window, the firmware once stood
-still for about 255 ms in these runs. A low-latency session underruns during
-such a pause (48 underruns in one run), a standard session mostly rides it
-out. Keep that in mind when a tracker window opens during playback.
+On firmware before the mailbox changes of #297 and #298, the firmware once
+stood still for about 255 ms while a program opened its window, and a
+low-latency session underran (48 underruns in one run). This no longer
+reproduces on master (2026-11-25):
+
+| Load | Session | Result | Longest firmware poll gap |
+| --- | --- | --- | --- |
+| ZZPlay starts and opens its window during the session | Low latency | 0 underruns, 240 records late in one tick | 8.6 ms |
+| Four shell windows opened during the session | Low latency | 0 late, 0 underruns | 3.8 ms |
+
+The late tick fits the Exec time slice: ZZPlay and `zz9k-voiceplay` both ran
+at priority 0, and a slice of 80 ms is longer than the 60 ms lead. This start
+case was not rerun with the producer above priority 0; in the full-load run
+below, a producer at priority 1 had nothing late. A low-latency producer
+should run above the programs it competes with.
+
+### Full load with video
+
+ZZPlay played a 30 s PAL MPEG-2 file (750 pictures, direct AX audio) while
+`zz9k-voiceplay LOAD VOICES=32 STEREO RATE=96000 RAMP=256 GAIN=65535 CHURN
+LIMITER LINEAR` ran for 20 s, both at priority 0, on master (2026-11-25):
+
+| Session | Pictures presented | Voice late, underruns |
+| --- | --- | --- |
+| Low latency | 750 of 750 | 0, 0 |
+| Low latency, repeated | 745 of 750 | 0, 0 |
+| Standard | 749 of 750 | 0, 0 |
+
+Before #297 and #298 the same test presented 477 of 750 pictures. When both
+programs ran below priority 0, the video dropped 17 to 20 pictures and the
+low-latency session reported late records, so measure coexistence at the
+priority a user would start the programs with.
