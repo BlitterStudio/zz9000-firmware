@@ -380,8 +380,20 @@ static void w_DeleteTextures(int32_t n, const uint32_t *textures) { ENTER(); GLD
 static void w_BindTexture(uint32_t target, uint32_t texture) { ENTER(); GLBindTexture(CTX, target, texture); LEAVE(); }
 static void w_Finish(void) { ENTER(); GLFinish(CTX); LEAVE(); }
 static void w_Flush(void) { ENTER(); GLFlush(CTX); LEAVE(); }
-static void w_DrawBuffer(uint32_t mode) { ENTER(); GLDrawBuffer(CTX, mode); LEAVE(); }
-static void w_ReadBuffer(uint32_t mode) { ENTER(); GLReadBuffer(CTX, mode); LEAVE(); }
+/* The binding rotates three colour targets and presents the back one, while
+ * the front target is the frame the last swap queued.  The front names
+ * therefore select the swap target too: the front end's own in-process rule
+ * is that its one target answers to both. */
+#define ZZAPP_GL_FRONT_LEFT 0x0400U
+#define ZZAPP_GL_FRONT 0x0404U
+#define ZZAPP_GL_BACK 0x0405U
+static uint32_t swap_target_name(uint32_t mode)
+{
+    return mode == ZZAPP_GL_FRONT || mode == ZZAPP_GL_FRONT_LEFT ?
+           ZZAPP_GL_BACK : mode;
+}
+static void w_DrawBuffer(uint32_t mode) { ENTER(); GLDrawBuffer(CTX, swap_target_name(mode)); LEAVE(); }
+static void w_ReadBuffer(uint32_t mode) { ENTER(); GLReadBuffer(CTX, swap_target_name(mode)); LEAVE(); }
 static void w_ReadPixels(int32_t x, int32_t y, int32_t width, int32_t height, uint32_t format, uint32_t type, void *pixels) {
     ENTER(); GLReadPixels(CTX, x, y, width, height, format, type, pixels); LEAVE();
 }
@@ -526,6 +538,15 @@ static int zzapp_gl_configure_targets(uint32_t width, uint32_t height,
     mw_put_be32(payload + 12U, 24U);
     mw_put_be32(payload + 16U, width);
     mw_put_be32(payload + 20U, height);
+    if (!amiberry_flush(guest))
+        return 0;
+    /* The front end opens a one-buffer context drawing and reading the front
+     * target.  With these rotating targets that is the frame the last swap
+     * queued: the draws of each frame landed in the previous frame's buffer,
+     * and the buffer a swap sealed kept its initial 0x000000ff fill (or an
+     * older frame) until a later swap drew into it. */
+    GLDrawBuffer(CTX, ZZAPP_GL_BACK);
+    GLReadBuffer(CTX, ZZAPP_GL_BACK);
     return amiberry_flush(guest);
 }
 

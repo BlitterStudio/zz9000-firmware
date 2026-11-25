@@ -106,6 +106,14 @@ reclaim release the binding and its module reference. The runtime exposes
 the GL table through SVC veneers rather than making module addresses callable
 from user mode.
 
+The binding draws into and reads the swap target. In copy mode it rotates
+three colour targets and presents the back one; the front target is the frame
+the last swap queued. The front end opens an in-process context drawing and
+reading the front target, so the module selects `GL_BACK` for both at bind and
+maps `glDrawBuffer` and `glReadBuffer` of `GL_FRONT` and `GL_FRONT_LEFT` to it.
+Without that, each frame's draws land in the previous frame's buffer and the
+buffer a swap seals keeps its initial `0x000000ff` fill or an older frame.
+
 The [app runtime's extension table](app-runtime.md#app-interface) describes
 firmware and module build-id reporting.
 
