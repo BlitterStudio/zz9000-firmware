@@ -122,30 +122,38 @@ module dtack_order_tb;
   end
 
   // -- pin monitor ------------------------------------------------------------
-  // Everything read here is the value before the edge's own updates.
+  // Everything the monitor reads from the DUT is the value before the edge's
+  // own updates: the DUT registers change in the non-blocking region, after
+  // this block has run. The monitor assigns only with blocking assignments
+  // and is the only writer of its own variables (the test task reads them and
+  // communicates through want_now/want_id), so no result depends on how a
+  // simulator version orders blocking and non-blocking updates of one signal.
+  // A DTACK edge is counted when ZORRO_NDTACK is first seen high, one edge
+  // after the DUT set dtack; pins_prev is what the pins carried at that edge.
   reg [31:0] pins_prev = 0;
   reg        nd_prev = 0;
-  reg        assert_seen = 0;
   reg [31:0] assert_pins = 0;
   // lead: clocks from the first edge at which the pins carry the expected
   // value to the edge that sets DTACK (1 = the data is on the pins one full
   // clock before DTACK)
   reg [31:0] want_now = 0;
-  reg        want_valid = 0;
-  integer    ecount = 0, data_k = -1, assert_lead = 0;
+  integer    want_id = 0, seen_id = 0;
+  integer    ecount = 0, data_k = -1, assert_lead = 0, assert_count = 0;
   wire [31:0] pins_now = {ZORRO_DATA, ZORRO_ADDR[22:7]};
   always @(posedge clk) begin
     ecount = ecount + 1;
-    if (want_valid && data_k < 0 && pins_now === want_now) data_k = ecount;
-    if (ZORRO_NDTACK === 1'b1 && !nd_prev) begin
-      // DTACK was set at the previous edge; pins_prev is what the pins
-      // carried at that edge
-      assert_seen <= 1;
-      assert_pins <= pins_prev;
-      assert_lead = (data_k < 0) ? -99 : ecount - data_k;
+    if (seen_id != want_id) begin      // a new read: forget the last one
+      seen_id = want_id;
+      data_k = -1;
     end
-    nd_prev   <= (ZORRO_NDTACK === 1'b1);
-    pins_prev <= pins_now;
+    if (want_id != 0 && data_k < 0 && pins_now === want_now) data_k = ecount;
+    if (ZORRO_NDTACK === 1'b1 && !nd_prev) begin
+      assert_pins = pins_prev;
+      assert_lead = (data_k < 0) ? -99 : ecount - data_k;
+      assert_count = assert_count + 1;
+    end
+    nd_prev   = (ZORRO_NDTACK === 1'b1);
+    pins_prev = pins_now;
   end
 
   integer errors = 0, checks = 0, lead_min = 99, lead_max = -99;
@@ -153,10 +161,11 @@ module dtack_order_tb;
 
   // one Zorro III longword read at absolute address a, expecting pins == want
   task z3_read(input [31:0] a, input [31:0] want, input [8*8-1:0] what);
-    integer timeout;
+    integer timeout, count0;
     reg [31:0] late;
     begin
-      assert_seen = 0; data_k = -1; want_now = want; want_valid = 1;
+      count0 = assert_count;
+      want_now = want; want_id = want_id + 1;
       za_drv = {a[23:2], 1'b0};
       zd_drv = {a[31:24], 8'h00};
       za_oe = 1; zd_oe = 1; ZORRO_READ = 1;
@@ -173,7 +182,7 @@ module dtack_order_tb;
         checks = checks + 1;
         if (assert_lead < lead_min) lead_min = assert_lead;
         if (assert_lead > lead_max) lead_max = assert_lead;
-        if (!assert_seen) begin
+        if (assert_count == count0) begin
           $display("FAIL %0s read %h: monitor missed the DTACK edge", what, a); errors = errors + 1;
         end else if (assert_pins !== want) begin
           $display("FAIL %0s read %h: pins %h at the DTACK edge, want %h", what, a, assert_pins, want);
@@ -184,7 +193,6 @@ module dtack_order_tb;
           errors = errors + 1;
         end
       end
-      want_valid = 0;
       ZORRO_NUDS = 1; ZORRO_NLDS = 1; ZORRO_NDS1 = 1; ZORRO_NDS0 = 1;
       ZORRO_DOE = 0;
       #10 ZORRO_NFCS = 1;
@@ -200,6 +208,11 @@ module dtack_order_tb;
       n_arm = n_arm + 1;
     end
   endtask
+
+  // force again whenever the model changes: a force with a variable on the
+  // right is not tracked by every Verilator version
+  always @(arm_flag) force dut.zorro_ram_read_flag = arm_flag;
+  always @(arm_data) force dut.axi_reg1 = arm_data;
 
   integer i;
   initial begin
