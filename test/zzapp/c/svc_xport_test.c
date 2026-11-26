@@ -1551,16 +1551,38 @@ static void test_events_messages(void)
 	CHECK(mbox(ZZAPP_OP_RELEASE, handle, 0U, 0U, NULL, NULL) == SDK_STATUS_OK);
 }
 
-static void post_mouse(client_t *c, int16_t dx, int16_t dy, uint16_t buttons)
+static void post_mouse_at(client_t *c, int16_t dx, int16_t dy, uint16_t buttons,
+			  uint16_t code, uint32_t time_ms)
 {
 	aar_event in;
 
 	memset(&in, 0, sizeof(in));
 	in.type = AAR_EV_MOUSE;
+	in.code = code;
 	in.dx = dx;
 	in.dy = dy;
 	in.buttons = buttons;
+	in.time_ms = time_ms;
 	CHECK(aar_queue_post_event(&c->cq, &in, NULL, NULL) == AAR_OK);
+}
+
+static void post_mouse(client_t *c, int16_t dx, int16_t dy, uint16_t buttons)
+{
+	post_mouse_at(c, dx, dy, buttons, 0U, 0U);
+}
+
+/* Takes the 64 keys of a full ring and then the one held mouse event after
+ * them, and nothing more. */
+static void take_full_ring_and_held(zzapp_rec_t *rec, aar_event *held)
+{
+	aar_event ev;
+	uint32_t i;
+
+	for (i = 0U; i < ZZAPP_XPORT_EVENT_ENTRIES; i++)
+		CHECK(zzapp_xport_take_event(rec, &ev) == 1 &&
+		      ev.type == AAR_EV_KEY_DOWN && ev.code == i);
+	CHECK(zzapp_xport_take_event(rec, held) == 1);
+	CHECK(zzapp_xport_take_event(rec, &ev) == 0);
 }
 
 /* Fills the event ring with ZZAPP_XPORT_EVENT_ENTRIES key events. */
@@ -1655,6 +1677,71 @@ static void test_event_ring_full_mouse(void)
 	CHECK(zzapp_xport_pump(rec) == 2);
 	drain_events(&d);
 	CHECK(d.mice == 1U && d.dx == 32767);
+	CHECK(mbox(ZZAPP_OP_RELEASE, handle, 0U, 0U, NULL, NULL) == SDK_STATUS_OK);
+}
+
+/* An absolute mouse event (AAR_MOUSE_ABSOLUTE in buttons) is a position: the
+ * merge while the ring is full keeps the latest one with its time, never sums
+ * it and never saturates it as a delta; the flag and code stay as posted.
+ * Absolute and relative motion, and different buttons, are not folded into
+ * each other: the second one is dropped and counted (spec 8.3). */
+static void test_event_ring_full_absolute_mouse(void)
+{
+	client_t c;
+	zzapp_rec_t *rec;
+	aar_event held;
+	uint32_t handle, dropped, i;
+
+	reset_all();
+	rec = claim(&c, &handle);
+
+	/* 20 positions (10 i, 5 i): one event, the last position, the flag kept. */
+	fill_event_ring(&c, rec);
+	dropped = zzapp_xport_stats(rec)->events_dropped;
+	for (i = 1U; i <= 20U; i++)
+		post_mouse_at(&c, (int16_t)(10U * i), (int16_t)(5U * i),
+			      AAR_MOUSE_ABSOLUTE, 0U, 1000U + i);
+	CHECK(zzapp_xport_pump(rec) == 20);
+	CHECK(zzapp_xport_stats(rec)->events_dropped == dropped);
+	take_full_ring_and_held(rec, &held);
+	CHECK(held.type == AAR_EV_MOUSE && held.code == 0U);
+	CHECK(held.dx == 200 && held.dy == 100);
+	CHECK(held.buttons == AAR_MOUSE_ABSOLUTE && held.time_ms == 1020U);
+
+	/* A held button stays set even at coordinates near the int16 limits. */
+	fill_event_ring(&c, rec);
+	post_mouse_at(&c, 30000, -30000, AAR_MOUSE_ABSOLUTE | AAR_MOUSE_LEFT, 0U, 5U);
+	post_mouse_at(&c, -32768, 32767, AAR_MOUSE_ABSOLUTE | AAR_MOUSE_LEFT, 0U, 6U);
+	post_mouse_at(&c, 30000, 30000, AAR_MOUSE_ABSOLUTE | AAR_MOUSE_LEFT, 0U, 7U);
+	CHECK(zzapp_xport_pump(rec) == 3);
+	take_full_ring_and_held(rec, &held);
+	CHECK(held.dx == 30000 && held.dy == 30000 && held.code == 0U);
+	CHECK(held.buttons == (AAR_MOUSE_ABSOLUTE | AAR_MOUSE_LEFT) && held.time_ms == 7U);
+
+	/* Relative motion into a pending absolute event, a click into it, and
+	 * the reverse: dropped, not summed. The position is still the latest
+	 * absolute one. */
+	fill_event_ring(&c, rec);
+	dropped = zzapp_xport_stats(rec)->events_dropped;
+	post_mouse_at(&c, 7, 8, AAR_MOUSE_ABSOLUTE, 0U, 1U);
+	post_mouse_at(&c, 3, 3, 0U, 0U, 2U);
+	post_mouse_at(&c, 9, 9, AAR_MOUSE_ABSOLUTE | AAR_MOUSE_LEFT, 1U, 3U);
+	post_mouse_at(&c, 11, 12, AAR_MOUSE_ABSOLUTE, 0U, 4U);
+	CHECK(zzapp_xport_pump(rec) == 4);
+	CHECK(zzapp_xport_stats(rec)->events_dropped == dropped + 2U);
+	take_full_ring_and_held(rec, &held);
+	CHECK(held.dx == 11 && held.dy == 12 && held.buttons == AAR_MOUSE_ABSOLUTE &&
+	      held.time_ms == 4U);
+
+	fill_event_ring(&c, rec);
+	dropped = zzapp_xport_stats(rec)->events_dropped;
+	post_mouse_at(&c, 5, 6, 0U, 0U, 1U);
+	post_mouse_at(&c, 100, 100, AAR_MOUSE_ABSOLUTE, 0U, 2U);
+	post_mouse_at(&c, 1, 1, 0U, 0U, 3U);
+	CHECK(zzapp_xport_pump(rec) == 3);
+	CHECK(zzapp_xport_stats(rec)->events_dropped == dropped + 1U);
+	take_full_ring_and_held(rec, &held);
+	CHECK(held.dx == 6 && held.dy == 7 && held.buttons == 0U && held.time_ms == 3U);
 	CHECK(mbox(ZZAPP_OP_RELEASE, handle, 0U, 0U, NULL, NULL) == SDK_STATUS_OK);
 }
 
@@ -4004,6 +4091,7 @@ int main(void)
 	test_log();
 	test_events_messages();
 	test_event_ring_full_mouse();
+	test_event_ring_full_absolute_mouse();
 	test_pass_wakes();
 	test_display_pan();
 	test_display_vblank();

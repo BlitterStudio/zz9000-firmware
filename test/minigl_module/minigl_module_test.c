@@ -1083,6 +1083,21 @@ int main(void)
         draw->GetBooleanv(0x0c23U, mask); /* GL_COLOR_WRITEMASK */
         assert(mask[0] == 0U && mask[1] == 1U && mask[2] == 0U && mask[3] == 1U);
         draw->ColorMask(1U, 1U, 1U, 1U);
+        /* C-GL.14: no stencil buffer exists, so GL_STENCIL_BITS reads 0 and
+         * leaves no GL error. Only that name is special: an unknown name
+         * still writes 0 and records GL_INVALID_ENUM. */
+        {
+            int32_t bits = -1;
+
+            assert(draw->GetError() == 0U);
+            draw->GetIntegerv(0x0d57U, &bits); /* GL_STENCIL_BITS */
+            assert(bits == 0);
+            assert(draw->GetError() == 0U);
+            bits = -1;
+            draw->GetIntegerv(0xfffeU, &bits);
+            assert(bits == 0);
+            assert(draw->GetError() == 0x0500U); /* GL_INVALID_ENUM */
+        }
     }
     {
         const aar_gl *draw = (const aar_gl *)gl;

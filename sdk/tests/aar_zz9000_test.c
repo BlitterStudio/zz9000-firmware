@@ -1799,6 +1799,42 @@ static void test_events_coalescing_and_drops(void)
     dispatch();
     CHECK(zzapp_xport_pump(card.rec) == 1);
     CHECK(zzapp_xport_take_event(card.rec, &got) == 1 && got.dx == 32767);
+
+    /* Absolute positions (AAR_MOUSE_ABSOLUTE in buttons) with the CQ full and
+     * then the firmware's event ring full, as in conformance C-INPUT.16: 100
+     * keys (64 fit), 20 positions. The client holds the latest one; the card
+     * keeps the latest too, never the sum, and the flag and time stay. */
+    for (i = 0U; i < 100U; i++) {
+        aar_event k = key_event(AAR_EV_KEY_DOWN, (uint16_t)i);
+
+        CHECK(POST(h, &k) == (i < 64U ? AAR_OK : AAR_E_BUSY));
+    }
+    for (i = 1U; i <= 20U; i++) {
+        ev = key_event(AAR_EV_MOUSE, 0U);
+        ev.dx = (int16_t)(10U * i);
+        ev.dy = (int16_t)(5U * i);
+        ev.buttons = AAR_MOUSE_ABSOLUTE;
+        ev.time_ms = 2000U + i;
+        CHECK(POST(h, &ev) == AAR_OK);
+    }
+    CHECK(zzapp_xport_pump(card.rec) == 64);
+    dispatch();                                    /* the held position goes out */
+    for (i = 21U; i <= 25U; i++) {                 /* these ride the CQ one by one */
+        ev = key_event(AAR_EV_MOUSE, 0U);
+        ev.dx = (int16_t)(10U * i);
+        ev.dy = (int16_t)(5U * i);
+        ev.buttons = AAR_MOUSE_ABSOLUTE;
+        ev.time_ms = 2000U + i;
+        CHECK(POST(h, &ev) == AAR_OK);
+    }
+    CHECK(zzapp_xport_pump(card.rec) == 6);
+    for (i = 0U; i < 64U; i++)
+        CHECK(zzapp_xport_take_event(card.rec, &got) == 1 &&
+              got.type == AAR_EV_KEY_DOWN && got.code == i);
+    CHECK(zzapp_xport_take_event(card.rec, &got) == 1);
+    CHECK(got.type == AAR_EV_MOUSE && got.dx == 250 && got.dy == 125 &&
+          got.buttons == AAR_MOUSE_ABSOLUTE && got.time_ms == 2025U);
+    CHECK(zzapp_xport_take_event(card.rec, &got) == 0);
     CHECK(CLOSE(h) == AAR_OK);
 }
 
