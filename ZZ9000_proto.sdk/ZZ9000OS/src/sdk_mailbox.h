@@ -894,6 +894,9 @@ typedef char SDKAudioControlStateSaveStatus_must_be_at_offset_44[
 #define SDK_AUDIO_RING_CONTRACT_48K_STEREO_S16LE 1U
 #define SDK_AUDIO_RING_CONTRACT_SOURCE_RATE_STEREO_S16LE 2U
 #define SDK_AUDIO_RING_CONTRACT_SOURCE_RATE_STEREO_S16BE 4U
+/* Compressed-stream contract of a CODEC lease (flag bit 3): the ring
+ * bytes are a file stream, not PCM, and the card decodes them. */
+#define SDK_AUDIO_RING_CONTRACT_CODEC_STREAM 8U
 
 /* Acquire-request flags. SOURCE_RATE makes the carved
  * source_rate_hz word meaningful: the lease delivers stereo S16 at
@@ -914,10 +917,21 @@ typedef char SDKAudioControlStateSaveStatus_must_be_at_offset_44[
  * clears PAUSED without a heartbeat. Valid with or without SOURCE_RATE;
  * firmware without it answers BAD_REQUEST. */
 #define SDK_AUDIO_RING_ACQUIRE_FLAG_IDLE_PAUSED (1U << 2)
+/* CODEC: the ring carries a compressed elementary file stream (MP3, FLAC,
+ * Ogg Vorbis) or raw PCM that the card decodes, resamples to the 48 kHz
+ * output domain and mixes into the lease's slot. The producer announces
+ * each stream with a start marker in the producer line (stream_seq and
+ * the words after it) and firmware reports decode progress in the
+ * firmware line. Valid alone or with IDLE_PAUSED; combining it with
+ * SOURCE_RATE or SOURCE_S16BE, or a nonzero source_rate_hz, is
+ * BAD_REQUEST. Firmware without it answers BAD_REQUEST. The layout is in
+ * docs/audio-fabric.md. */
+#define SDK_AUDIO_RING_ACQUIRE_FLAG_CODEC (1U << 3)
 #define SDK_AUDIO_RING_ACQUIRE_FLAG_KNOWN \
 	(SDK_AUDIO_RING_ACQUIRE_FLAG_SOURCE_RATE | \
 	 SDK_AUDIO_RING_ACQUIRE_FLAG_SOURCE_S16BE | \
-	 SDK_AUDIO_RING_ACQUIRE_FLAG_IDLE_PAUSED)
+	 SDK_AUDIO_RING_ACQUIRE_FLAG_IDLE_PAUSED | \
+	 SDK_AUDIO_RING_ACQUIRE_FLAG_CODEC)
 
 /* Highest leaseable direct-ring slot index. Slot 0 is the firmware
  * pump and is never granted; the acquire result's slot_count reports
@@ -939,6 +953,38 @@ typedef char SDKAudioControlStateSaveStatus_must_be_at_offset_44[
 #define SDK_AUDIO_RING_STATUS_REVOKED_HEARTBEAT 1U
 #define SDK_AUDIO_RING_STATUS_FAULT_CURSOR      2U
 
+/* Stream codec ids of the producer line's stream_codec word. PCM is
+ * stereo S16LE at stream_param Hz (0 means 44100). MP3, FLAC and VORBIS
+ * equal SDK_AUDIO_CODEC_*. NONE flushes and leaves the lease idle. */
+#define SDK_AUDIO_RING_CODEC_PCM    0U
+#define SDK_AUDIO_RING_CODEC_MP3    1U
+#define SDK_AUDIO_RING_CODEC_FLAC   2U
+#define SDK_AUDIO_RING_CODEC_VORBIS 3U
+#define SDK_AUDIO_RING_CODEC_NONE   0xffffffffU
+
+/* Producer-line stream_flags. APPEND continues the running stream without
+ * flushing: it ends at stream_start and the new stream follows with no
+ * dropped audio. END says the stream's last byte is write_cursor - 1. */
+#define SDK_AUDIO_RING_STREAM_FLAG_APPEND (1U << 0)
+#define SDK_AUDIO_RING_STREAM_FLAG_END    (1U << 1)
+#define SDK_AUDIO_RING_STREAM_FLAG_KNOWN \
+	(SDK_AUDIO_RING_STREAM_FLAG_APPEND | SDK_AUDIO_RING_STREAM_FLAG_END)
+
+/* Firmware-line decode_state of a CODEC lease. */
+#define SDK_AUDIO_RING_DECODE_IDLE    0U
+#define SDK_AUDIO_RING_DECODE_RUNNING 1U
+#define SDK_AUDIO_RING_DECODE_DRAINED 2U
+#define SDK_AUDIO_RING_DECODE_ERROR   3U
+
+/* Firmware-line decode_error of a CODEC lease in the ERROR state. */
+#define SDK_AUDIO_RING_DECODE_ERR_NONE        0U
+#define SDK_AUDIO_RING_DECODE_ERR_BAD_CODEC   1U
+#define SDK_AUDIO_RING_DECODE_ERR_BAD_MARKER  2U
+#define SDK_AUDIO_RING_DECODE_ERR_UNSUPPORTED 3U
+#define SDK_AUDIO_RING_DECODE_ERR_CORRUPT     4U
+#define SDK_AUDIO_RING_DECODE_ERR_NO_MEMORY   5U
+#define SDK_AUDIO_RING_DECODE_ERR_EMPTY       6U
+
 /* Heartbeat age reported by FABRIC_STATE_GET when firmware has no
  * measurement for the slot (free, or not yet wired by the
  * direct-ring lifecycle). */
@@ -958,7 +1004,15 @@ typedef char SDKAudioControlStateSaveStatus_must_be_at_offset_44[
  * are committed (R6). heartbeat is a producer-refreshed liveness
  * token: any change refreshes it, and firmware measures its age
  * against its own clock (R11). flags carries
- * SDK_AUDIO_RING_PRODUCER_FLAG_*. */
+ * SDK_AUDIO_RING_PRODUCER_FLAG_*.
+ *
+ * The words from stream_seq on are the stream marker. Every lease honours
+ * a changed stream_seq as a flush mark; a CODEC lease also starts the
+ * announced stream. stream_seq 0 is no marker. stream_start is the byte
+ * cursor of the stream's first byte (the producer's write cursor when it
+ * began the stream); bytes below it are discarded unread. stream_param is
+ * the PCM sample rate for SDK_AUDIO_RING_CODEC_PCM (0 means 44100) and
+ * zero for the other codecs. */
 struct SDKAudioRingProducerLine {
 	uint8_t sequence[4];
 	uint8_t generation[4];
@@ -966,7 +1020,14 @@ struct SDKAudioRingProducerLine {
 	uint8_t write_cursor_lo[4];
 	uint8_t heartbeat[4];
 	uint8_t flags[4];
-	uint8_t reserved[40];
+	uint8_t stream_seq[4];
+	uint8_t stream_codec[4];
+	uint8_t stream_start_hi[4];
+	uint8_t stream_start_lo[4];
+	uint8_t stream_flags[4];
+	uint8_t stream_param[4];
+	uint8_t stream_gain[4];
+	uint8_t reserved[12];
 };
 
 /* Firmware-owned control line. sequence is the even/odd seqlock.
@@ -974,14 +1035,25 @@ struct SDKAudioRingProducerLine {
  * generation means the lease was revoked and the credits are void.
  * consumed_cursor is the monotonic 64-bit count of PCM bytes
  * firmware has consumed -- ring credit the producer may overwrite
- * (R7). status is a SDK_AUDIO_RING_STATUS_* value. */
+ * (R7). status is a SDK_AUDIO_RING_STATUS_* value.
+ *
+ * On a CODEC lease consumed_cursor counts the compressed bytes the decoder
+ * has taken from the ring. stream_seq is the marker the firmware has
+ * latched (a plain lease echoes its last flush mark). decode_state,
+ * decode_error, decoded_rate and decoded_channels describe the latched
+ * stream; they stay zero on a plain lease. */
 struct SDKAudioRingFirmwareLine {
 	uint8_t sequence[4];
 	uint8_t generation[4];
 	uint8_t consumed_cursor_hi[4];
 	uint8_t consumed_cursor_lo[4];
 	uint8_t status[4];
-	uint8_t reserved[44];
+	uint8_t stream_seq[4];
+	uint8_t decode_state[4];
+	uint8_t decode_error[4];
+	uint8_t decoded_rate[4];
+	uint8_t decoded_channels[4];
+	uint8_t reserved[24];
 };
 
 /* Producer intent for one direct-ring slot (SDK_OP_AUDIO_RING_ACQUIRE).
@@ -1121,6 +1193,22 @@ typedef char SDKAudioRingFirmwareLineFieldOffsets[
 	 offsetof(struct SDKAudioRingFirmwareLine, consumed_cursor_hi) == 8U &&
 	 offsetof(struct SDKAudioRingFirmwareLine, consumed_cursor_lo) == 12U &&
 	 offsetof(struct SDKAudioRingFirmwareLine, status) == 16U) ? 1 : -1];
+typedef char SDKAudioRingProducerLineStreamOffsets[
+	(offsetof(struct SDKAudioRingProducerLine, stream_seq) == 24U &&
+	 offsetof(struct SDKAudioRingProducerLine, stream_codec) == 28U &&
+	 offsetof(struct SDKAudioRingProducerLine, stream_start_hi) == 32U &&
+	 offsetof(struct SDKAudioRingProducerLine, stream_start_lo) == 36U &&
+	 offsetof(struct SDKAudioRingProducerLine, stream_flags) == 40U &&
+	 offsetof(struct SDKAudioRingProducerLine, stream_param) == 44U &&
+	 offsetof(struct SDKAudioRingProducerLine, stream_gain) == 48U) ?
+		1 : -1];
+typedef char SDKAudioRingFirmwareLineStreamOffsets[
+	(offsetof(struct SDKAudioRingFirmwareLine, stream_seq) == 20U &&
+	 offsetof(struct SDKAudioRingFirmwareLine, decode_state) == 24U &&
+	 offsetof(struct SDKAudioRingFirmwareLine, decode_error) == 28U &&
+	 offsetof(struct SDKAudioRingFirmwareLine, decoded_rate) == 32U &&
+	 offsetof(struct SDKAudioRingFirmwareLine, decoded_channels) == 36U) ?
+		1 : -1];
 typedef char SDKAudioRingControlBlockIsTwoLines[
 	(SDK_AUDIO_RING_CONTROL_SIZE ==
 	 2U * SDK_AUDIO_RING_CONTROL_LINE_SIZE &&

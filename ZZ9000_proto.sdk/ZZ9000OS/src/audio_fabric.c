@@ -117,7 +117,8 @@ void audio_fabric_host_set_tx_base(uint8_t *base)
  * ahead, and the queued-period rebuild replays at most the TX ring. */
 static uint8_t g_lease_staging
 	[AUDIO_FABRIC_LEASE_SLOTS]
-	[AUDIO_FABRIC_LEASE_STAGING_PERIODS * AUDIO_FABRIC_PERIOD_BYTES];
+	[AUDIO_FABRIC_LEASE_STAGING_PERIODS * AUDIO_FABRIC_PERIOD_BYTES]
+	__attribute__((aligned(64)));
 
 uint8_t *fabric_lease_staging_ring(uint32_t slot)
 {
@@ -235,8 +236,9 @@ static uint32_t fabric_catchup_ready_count(void)
 		if (l->ring != NULL && l->line_valid && l->paused == 0U &&
 		    !l->tearing) {
 			if (s->preconvert.active) {
-				if (l->write_cursor > s->preconvert.src_consumed ||
-				    s->preconvert.staged > s->preconvert.consumed)
+				if (s->preconvert.staged > s->preconvert.consumed ||
+				    (!l->codec.enabled &&
+				     l->write_cursor > s->preconvert.src_consumed))
 					count++;
 			} else if (l->write_cursor > l->consumed) {
 				count++;
@@ -459,13 +461,21 @@ void audio_fabric_bench_poll(void)
 /* Lease balance scale (post-fill pass, shared by every fill path). */
 static void fabric_apply_lease_gain(struct audio_fabric_slot *s)
 {
-	if (s->gain != AUDIO_FABRIC_GAIN_UNITY) {
+	uint32_t gain = s->gain;
+	uint32_t shift = 7U;
+
+	if (s->lease.codec.enabled &&
+	    s->lease.codec.current.codec != SDK_AUDIO_RING_CODEC_PCM &&
+	    s->lease.codec.gain < 32767U) {
+		gain = gain * s->lease.codec.gain >> 7;
+		shift = 15U;
+	}
+	if (gain != (1U << shift)) {
 		int16_t *out = (int16_t *)g_fabric_stereo;
-		uint32_t g = s->gain;
 		uint32_t i;
 
 		for (i = 0U; i < AUDIO_FABRIC_PERIOD_BYTES / 2U; i++) {
-			int32_t v = ((int32_t)out[i] * (int32_t)g) >> 7;
+			int32_t v = ((int32_t)out[i] * (int32_t)gain) >> shift;
 
 			if (v > 32767)
 				v = 32767;
@@ -513,7 +523,8 @@ static uint32_t fabric_slot_fill_lease_preconvert(
 	offset = (seq % AUDIO_FABRIC_LEASE_STAGING_PERIODS) *
 		AUDIO_FABRIC_PERIOD_BYTES;
 	memcpy(g_fabric_stereo, ring + offset, AUDIO_FABRIC_PERIOD_BYTES);
-	cost = p->cost[seq % AUDIO_FABRIC_LEASE_STAGING_PERIODS];
+	cost = s->lease.codec.enabled ? AUDIO_FABRIC_PERIOD_BYTES :
+		p->cost[seq % AUDIO_FABRIC_LEASE_STAGING_PERIODS];
 	if (!s->ops->stage(cost)) {
 		/* Tearing raced in: consumed stays, so the same staged
 		 * period is re-offered next pass. */

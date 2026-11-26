@@ -46,7 +46,7 @@ void flush_audio_pcm_written(const struct SDKAudioStream *stream,
 {
 	uint32_t first;
 
-	if (!stream || !dst || bytes == 0U || stream->pcm_capacity == 0U)
+	if (!stream || stream->pcm_local || !dst || bytes == 0U || stream->pcm_capacity == 0U)
 		return;
 	if (offset >= stream->pcm_capacity)
 		offset %= stream->pcm_capacity;

@@ -23,6 +23,21 @@ MPEG_LAYER2_TARGET := $(BUILD_DIR)/mpeg_layer2_decode_test
 MP3_END_TARGET := $(BUILD_DIR)/mp3_oneshot_end_test
 FABRIC_TARGET := $(BUILD_DIR)/audio_fabric_test
 RING_TARGET := $(BUILD_DIR)/audio_fabric_ring_test
+CODEC_RING_TARGET := $(BUILD_DIR)/audio_codec_ring_test
+FLAC_HOST := $(SRC_DIR)/../build/deps/flac/1.5.0/host
+VORBIS_HOST := $(SRC_DIR)/../build/deps/vorbis/ogg-1.3.6-tremor-820fb3237ea8/host
+CODEC_RING_LIBS := $(FLAC_HOST)/libflacdec.a $(VORBIS_HOST)/libvorbisdec.a
+CODEC_RING_SOURCES := \
+	audio_codec_ring_test.c fabric_test_common.c \
+	$(SRC_DIR)/audio_fabric.c $(SRC_DIR)/audio_fabric_lease.c \
+	$(SRC_DIR)/audio_fabric_stream_codec.c \
+	$(SRC_DIR)/audio_convert.c $(SRC_DIR)/audio_convert_tables.c \
+	$(SRC_DIR)/audio_reduce.c $(SRC_DIR)/mp3/decode_mp3.c \
+	$(SRC_DIR)/sdk_audio_stream.c $(SRC_DIR)/sdk_audio_stream_native.c \
+	$(SRC_DIR)/sdk_audio_flac.c $(SRC_DIR)/sdk_audio_vorbis.c \
+	$(SRC_DIR)/sdk_flac_alloc.c $(SRC_DIR)/sdk_vorbis_alloc.c \
+	$(SRC_DIR)/sdk_decode_reclaim.c $(SRC_DIR)/sdk_smp_lock.c \
+	$(SRC_DIR)/card_pool.c ../card_pool/host_card_pool.c ../flac/host_runtime.c
 BENCH_SMOKE_TARGET := $(BUILD_DIR)/bench_smoke_test
 MEDIA_VIEW_TARGET := $(BUILD_DIR)/audio_pump_media_view_test
 STREAM_DECODE_TARGET := $(BUILD_DIR)/audio_stream_decode_test
@@ -49,6 +64,7 @@ TARGETS := $(CONVERT_TARGET) $(CONVERT_EXACT_TARGET) $(CAPTURE_TARGET) $(PROFILE
 	$(VOICE_CUBIC_GUARD_TARGET) \
 	$(VOICE_PARITY_TARGET) \
 	$(VOICE_SESSION_TARGET)
+TARGETS += $(CODEC_RING_TARGET)
 
 # mock/ shadows ff.h and xil_cache.h for the TUs (zz_config.c) whose
 # real firmware dependencies are FatFs and the Zynq cache API. The
@@ -79,6 +95,7 @@ test: $(TARGETS)
 	$(FABRIC_TARGET) --srcdir $(SRC_DIR)
 	$(MEDIA_VIEW_TARGET)
 	$(RING_TARGET)
+	$(CODEC_RING_TARGET)
 	$(BENCH_SMOKE_TARGET)
 	$(STREAM_DECODE_TARGET) fixtures/tone.mp3
 	$(REDUCE_TARGET)
@@ -150,6 +167,22 @@ $(RING_TARGET): audio_fabric_ring_test.c \
 		-o $@ audio_fabric_ring_test.c fabric_test_common.c \
 		$(SRC_DIR)/audio_fabric.c $(SRC_DIR)/audio_fabric_lease.c \
 		$(SRC_DIR)/audio_convert.c $(SRC_DIR)/audio_convert_tables.c -lm
+
+$(FLAC_HOST)/libflacdec.a:
+	cd ../.. && bash ./build_flac.sh --host
+
+$(VORBIS_HOST)/libvorbisdec.a:
+	cd ../.. && bash ./build_vorbis.sh --host
+
+$(CODEC_RING_TARGET): $(CODEC_RING_SOURCES) $(CODEC_RING_LIBS) \
+	$(SRC_DIR)/audio_fabric_codec.h $(SRC_DIR)/audio_fabric_internal.h \
+	$(SRC_DIR)/sdk_audio_stream.h $(SRC_DIR)/sdk_mailbox.h \
+	../../sdk/include/zz9k/abi.h ../flac/flac_fixtures.h fabric_test_common.h
+	@mkdir -p $(BUILD_DIR)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -DAUDIO_FABRIC_HOST_TEST \
+		-I$(FLAC_HOST)/include -I$(VORBIS_HOST)/include \
+		-I../../sdk/include -I../flac -I../card_pool \
+		-o $@ $(CODEC_RING_SOURCES) $(CODEC_RING_LIBS) -lm
 
 $(CONVERT_TARGET): audio_convert_test.c $(SRC_DIR)/audio_convert.c \
 	$(SRC_DIR)/audio_convert.h $(SRC_DIR)/audio_convert_tables.c \

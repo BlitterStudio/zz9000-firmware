@@ -231,14 +231,13 @@ static uint32_t pump_standby_start(void)
 static int acquire_lease_rate(uint32_t slot, uint32_t gain,
 	uint32_t rate, struct audio_fabric_ring_grant *grant)
 {
-	/* The admission scenario deliberately passes out-of-range slots
-	 * (PR #88 review): never index the producer model with them. */
-	if (slot >= AUDIO_FABRIC_SLOT_COUNT)
-		return audio_fabric_ring_acquire(slot,
-			SDK_AUDIO_METER_IDENTITY_MEDIA, gain, rate, grant);
-	memset(&g_producer[slot], 0, sizeof(g_producer[slot]));
+	uint32_t flags = rate != 0U ? SDK_AUDIO_RING_ACQUIRE_FLAG_SOURCE_RATE : 0U;
+
+	/* The admission scenario deliberately passes out-of-range slots. */
+	if (slot < AUDIO_FABRIC_SLOT_COUNT)
+		memset(&g_producer[slot], 0, sizeof(g_producer[slot]));
 	return audio_fabric_ring_acquire(slot,
-		SDK_AUDIO_METER_IDENTITY_MEDIA, gain, rate, grant);
+		SDK_AUDIO_METER_IDENTITY_MEDIA, gain, rate, flags, grant);
 }
 
 static int acquire_lease(uint32_t slot, uint32_t gain,
@@ -981,9 +980,12 @@ static void scenario_idle_paused(void)
 	      "idle paused: a plain paused lease still expires", "");
 
 	/* With the flag a paused line is never aged. */
-	check(acquire_lease(AUDIO_FABRIC_SLOT_MAILBOX, 128U, &grant) ==
+	memset(&g_producer[AUDIO_FABRIC_SLOT_MAILBOX], 0,
+		sizeof(g_producer[AUDIO_FABRIC_SLOT_MAILBOX]));
+	check(audio_fabric_ring_acquire(AUDIO_FABRIC_SLOT_MAILBOX,
+		SDK_AUDIO_METER_IDENTITY_MEDIA, 128U, 0U,
+		SDK_AUDIO_RING_ACQUIRE_FLAG_IDLE_PAUSED, &grant) ==
 	      AUDIO_FABRIC_LEASE_OK, "idle paused: acquire", "");
-	audio_fabric_lease_idle_paused(AUDIO_FABRIC_SLOT_MAILBOX, 1);
 	g_producer[AUDIO_FABRIC_SLOT_MAILBOX].generation = grant.generation;
 	producer_publish(AUDIO_FABRIC_SLOT_MAILBOX, 0U,
 		SDK_AUDIO_RING_PRODUCER_FLAG_PAUSED);

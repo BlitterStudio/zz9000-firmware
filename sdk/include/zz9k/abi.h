@@ -1337,6 +1337,7 @@ typedef struct ZZ9KAudioControlStateResultPayload {
 #define ZZ9K_AUDIO_RING_CONTRACT_NONE             0U
 #define ZZ9K_AUDIO_RING_CONTRACT_48K_STEREO_S16LE 1U
 #define ZZ9K_AUDIO_RING_CONTRACT_SOURCE_RATE_STEREO_S16LE 2U
+#define ZZ9K_AUDIO_RING_CONTRACT_CODEC_STREAM 8U
 
 
 /* Highest leaseable direct-ring slot index. Slot 0 is the firmware
@@ -1371,9 +1372,15 @@ typedef struct ZZ9KAudioControlStateResultPayload {
  * is reserved for a firmware-side source byte order flag the SDK does
  * not define. */
 #define ZZ9K_AUDIO_RING_ACQUIRE_FLAG_IDLE_PAUSED (1U << 2)
+/* A file stream decoded and mixed on the card. Valid alone or with
+ * IDLE_PAUSED: no SOURCE_RATE and source_rate_hz must be zero.
+ * The grant reports CODEC_STREAM and source_rate zero. Older firmware
+ * answers BAD_REQUEST. See docs/audio-fabric.md for the wire protocol. */
+#define ZZ9K_AUDIO_RING_ACQUIRE_FLAG_CODEC (1U << 3)
 #define ZZ9K_AUDIO_RING_ACQUIRE_FLAG_KNOWN \
   (ZZ9K_AUDIO_RING_ACQUIRE_FLAG_SOURCE_RATE | \
-   ZZ9K_AUDIO_RING_ACQUIRE_FLAG_IDLE_PAUSED)
+   ZZ9K_AUDIO_RING_ACQUIRE_FLAG_IDLE_PAUSED | \
+   ZZ9K_AUDIO_RING_ACQUIRE_FLAG_CODEC)
 
 /* Firmware-line status. REVOKED_HEARTBEAT and FAULT_CURSOR both
  * invalidate the generation: consumption stops and the slot may be
@@ -1381,6 +1388,34 @@ typedef struct ZZ9KAudioControlStateResultPayload {
 #define ZZ9K_AUDIO_RING_STATUS_OK                0U
 #define ZZ9K_AUDIO_RING_STATUS_REVOKED_HEARTBEAT 1U
 #define ZZ9K_AUDIO_RING_STATUS_FAULT_CURSOR      2U
+
+/* stream_codec: NONE stops, PCM is raw S16LE stereo at stream_param
+ * Hz (zero means 44100), and the others take file bytes from byte zero. */
+#define ZZ9K_AUDIO_RING_CODEC_PCM    0U
+#define ZZ9K_AUDIO_RING_CODEC_MP3    1U
+#define ZZ9K_AUDIO_RING_CODEC_FLAC   2U
+#define ZZ9K_AUDIO_RING_CODEC_VORBIS 3U
+#define ZZ9K_AUDIO_RING_CODEC_NONE   0xffffffffU
+
+/* APPEND ends the current stream at stream_start without dropping its
+ * queued output. END says no more bytes follow this write_cursor. */
+#define ZZ9K_AUDIO_RING_STREAM_FLAG_APPEND (1U << 0)
+#define ZZ9K_AUDIO_RING_STREAM_FLAG_END    (1U << 1)
+#define ZZ9K_AUDIO_RING_STREAM_FLAG_KNOWN \
+  (ZZ9K_AUDIO_RING_STREAM_FLAG_APPEND | ZZ9K_AUDIO_RING_STREAM_FLAG_END)
+
+#define ZZ9K_AUDIO_RING_DECODE_IDLE    0U
+#define ZZ9K_AUDIO_RING_DECODE_RUNNING 1U
+#define ZZ9K_AUDIO_RING_DECODE_DRAINED 2U
+#define ZZ9K_AUDIO_RING_DECODE_ERROR   3U
+
+#define ZZ9K_AUDIO_RING_DECODE_ERR_NONE        0U
+#define ZZ9K_AUDIO_RING_DECODE_ERR_BAD_CODEC   1U
+#define ZZ9K_AUDIO_RING_DECODE_ERR_BAD_MARKER  2U
+#define ZZ9K_AUDIO_RING_DECODE_ERR_UNSUPPORTED 3U
+#define ZZ9K_AUDIO_RING_DECODE_ERR_CORRUPT     4U
+#define ZZ9K_AUDIO_RING_DECODE_ERR_NO_MEMORY   5U
+#define ZZ9K_AUDIO_RING_DECODE_ERR_EMPTY       6U
 
 /* Heartbeat age reported by FABRIC_STATE_GET when firmware has no
  * measurement for the slot (free, or not yet wired by the
@@ -1401,7 +1436,14 @@ typedef struct ZZ9KAudioControlStateResultPayload {
  * are committed (R6). heartbeat is a producer-refreshed liveness
  * token: any change refreshes it, and firmware measures its age
  * against its own clock (R11). flags carries
- * ZZ9K_AUDIO_RING_PRODUCER_FLAG_*. */
+ * ZZ9K_AUDIO_RING_PRODUCER_FLAG_*.
+ *
+ * A changed nonzero stream_seq marks stream_start (the write cursor before
+ * the first byte of the new stream). Firmware drops queued periods and
+ * discards bytes below that cursor, unless a codec lease uses APPEND.
+ * Leave the marker words zero for the original PCM lease behavior.
+ * stream_param is zero except for raw PCM. stream_gain is 0..32767
+ * (mute to unity) for MP3, FLAC, and Vorbis. */
 typedef struct ZZ9KAudioRingProducerLine {
   uint8_t sequence[4];
   uint8_t generation[4];
@@ -1409,7 +1451,14 @@ typedef struct ZZ9KAudioRingProducerLine {
   uint8_t write_cursor_lo[4];
   uint8_t heartbeat[4];
   uint8_t flags[4];
-  uint8_t reserved[40];
+  uint8_t stream_seq[4];
+  uint8_t stream_codec[4];
+  uint8_t stream_start_hi[4];
+  uint8_t stream_start_lo[4];
+  uint8_t stream_flags[4];
+  uint8_t stream_param[4];
+  uint8_t stream_gain[4];
+  uint8_t reserved[12];
 } ZZ9KAudioRingProducerLine;
 
 /* Firmware-owned control line. sequence is the even/odd seqlock.
@@ -1417,14 +1466,25 @@ typedef struct ZZ9KAudioRingProducerLine {
  * generation means the lease was revoked and the credits are void.
  * consumed_cursor is the monotonic 64-bit count of PCM bytes
  * firmware has consumed -- ring credit the producer may overwrite
- * (R7). status is a ZZ9K_AUDIO_RING_STATUS_* value. */
+ * (R7). status is a ZZ9K_AUDIO_RING_STATUS_* value.
+ *
+ * In a codec lease consumed_cursor is the credit for input taken from the
+ * ring, independent of PCM retirement. stream_seq identifies the active
+ * stream (or last accepted plain-PCM flush). decoders report DRAINED or
+ * ERROR once their queued output finishes playing. decoded_rate and
+ * decoded_channels describe the input's native PCM format once known. */
 typedef struct ZZ9KAudioRingFirmwareLine {
   uint8_t sequence[4];
   uint8_t generation[4];
   uint8_t consumed_cursor_hi[4];
   uint8_t consumed_cursor_lo[4];
   uint8_t status[4];
-  uint8_t reserved[44];
+  uint8_t stream_seq[4];
+  uint8_t decode_state[4];
+  uint8_t decode_error[4];
+  uint8_t decoded_rate[4];
+  uint8_t decoded_channels[4];
+  uint8_t reserved[24];
 } ZZ9KAudioRingFirmwareLine;
 
 /* Producer intent for one direct-ring slot
@@ -1478,12 +1538,8 @@ typedef struct ZZ9KAudioRingAcquireResultPayload {
   uint8_t gain_applied[4];
   uint8_t slot_count[4];
   uint8_t flags[4];
-  /* Carved from reserved (AHI migration): the granted source rate.
-   * Populated for both contracts -- 48000 for the bypass contract,
-   * the requested (validated) rate for the source-rate contract.
-   * period_bytes/period_us keep describing the ring geometry (one
-   * 48-kHz-equivalent period); a source-rate producer stages its own
-   * 20-ms period of rate/50 * 4 bytes per publication. */
+  /* 48000 for bypass, the requested rate for SOURCE_RATE, and zero
+   * for CODEC. period_bytes/period_us describe the mixer geometry. */
   uint8_t source_rate[4];
 } ZZ9KAudioRingAcquireResultPayload;
 
@@ -2060,6 +2116,20 @@ typedef char ZZ9KAudioRingFirmwareLine_field_offsets[
      offsetof(ZZ9KAudioRingFirmwareLine, consumed_cursor_hi) == 8U &&
      offsetof(ZZ9KAudioRingFirmwareLine, consumed_cursor_lo) == 12U &&
      offsetof(ZZ9KAudioRingFirmwareLine, status) == 16U) ? 1 : -1];
+typedef char ZZ9KAudioRingProducerLine_stream_offsets[
+    (offsetof(ZZ9KAudioRingProducerLine, stream_seq) == 24U &&
+     offsetof(ZZ9KAudioRingProducerLine, stream_codec) == 28U &&
+     offsetof(ZZ9KAudioRingProducerLine, stream_start_hi) == 32U &&
+     offsetof(ZZ9KAudioRingProducerLine, stream_start_lo) == 36U &&
+     offsetof(ZZ9KAudioRingProducerLine, stream_flags) == 40U &&
+     offsetof(ZZ9KAudioRingProducerLine, stream_param) == 44U &&
+     offsetof(ZZ9KAudioRingProducerLine, stream_gain) == 48U) ? 1 : -1];
+typedef char ZZ9KAudioRingFirmwareLine_stream_offsets[
+    (offsetof(ZZ9KAudioRingFirmwareLine, stream_seq) == 20U &&
+     offsetof(ZZ9KAudioRingFirmwareLine, decode_state) == 24U &&
+     offsetof(ZZ9KAudioRingFirmwareLine, decode_error) == 28U &&
+     offsetof(ZZ9KAudioRingFirmwareLine, decoded_rate) == 32U &&
+     offsetof(ZZ9KAudioRingFirmwareLine, decoded_channels) == 36U) ? 1 : -1];
 typedef char ZZ9KAudioRingControlBlock_is_two_lines[
     (ZZ9K_AUDIO_RING_CONTROL_SIZE ==
      2U * ZZ9K_AUDIO_RING_CONTROL_LINE_SIZE) ? 1 : -1];

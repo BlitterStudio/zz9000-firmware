@@ -313,12 +313,8 @@ int audio_fabric_conversion_admissible(uint32_t source_rate);
  * LEASED until the producer's first valid line publication.
  */
 int audio_fabric_ring_acquire(uint32_t slot, uint32_t identity,
-	uint32_t gain, uint32_t source_rate,
+	uint32_t gain, uint32_t source_rate, uint32_t flags,
 	struct audio_fabric_ring_grant *grant);
-void audio_fabric_lease_source_be(uint32_t slot, int be);
-/* IDLE_PAUSED lease (SDK_AUDIO_RING_ACQUIRE_FLAG_IDLE_PAUSED): the
- * heartbeat timeout is suspended while the producer line is PAUSED. */
-void audio_fabric_lease_idle_paused(uint32_t slot, int on);
 
 /*
  * Main-loop fill for converting leases (the #100 discipline applied to
@@ -327,6 +323,8 @@ void audio_fabric_lease_idle_paused(uint32_t slot, int on);
  * once per core-0 main-loop pass; bounded per call.
  */
 void audio_fabric_lease_poll(void);
+/* Rate-limited codec-ring refill during sustained Zorro traffic. */
+void audio_fabric_lease_poll_busy(void);
 
 /*
  * Surrender a direct-ring lease, quiesce-then-rebuild (KTD3): the

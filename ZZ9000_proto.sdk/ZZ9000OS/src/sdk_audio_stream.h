@@ -78,6 +78,8 @@ struct SDKAudioStream {
 	/* Native decoders can reach a terminal output boundary before they
 	 * publish a deferred terminal status; the pump must drain that PCM. */
 	uint8_t output_terminal;
+	/* Private to the decode core: PCM is never read by DMA or a peer. */
+	uint8_t pcm_local;
 	struct audio_stream_refill_checkpoint refill_checkpoint;
 	/* Ring addresses resolved from the shared-buffer registry at BEGIN:
 	 * the registry is core-0-only, so core-1 feeds/reads must never
@@ -166,5 +168,7 @@ uint32_t audio_stream_reduce_ring(struct SDKAudioStream *stream,
  * allow (see sdk_audio_codec_io.h for the 333 MHz global-timer basis).
  * Returns 1 when the pass made progress. */
 uint32_t audio_stream_decode_mp3(struct SDKAudioStream *stream);
+/* One bounded codec dispatch pass, shared by mailbox and direct leases. */
+uint32_t audio_stream_decode(struct SDKAudioStream *stream);
 
 #endif /* SDK_AUDIO_STREAM_H */

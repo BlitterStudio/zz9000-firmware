@@ -1541,7 +1541,7 @@ are documented in the firmware repo's
 
 ## Audio Fabric Direct-Ring Plane
 
-The audio fabric grants generation-bound host-visible PCM rings to independent producers. Firmware reserves slot 0 for the playback pump. Zorro III exposes two direct-ring slots; Zorro II exposes one compact slot and refuses a second acquisition.
+The audio fabric grants generation-bound host-visible rings to independent producers. Firmware reserves slot 0 for the playback pump. Zorro III exposes two direct-ring slots; Zorro II exposes one compact slot and refuses a second acquisition.
 
 The plane is advertised: the hardware qualification session passed on 2026-08-28 (firmware `docs/audio-fabric.md`), so firmware now sets `ZZ9K_CAP_AUDIO_FABRIC` and reports `ZZ9K_SERVICE_FLAG_AUDIO_FABRIC` in the audio service. Clients must still treat a missing capability as a clean decline; firmware older than the qualified release advertises nothing here.
 
@@ -1555,8 +1555,8 @@ Values `0x050f` through `0x0511` belonged to the withdrawn copy-submit experimen
 
 Each grant reports board-visible ring and control offsets, capacity, 3,840-byte/20-ms period geometry, sample contract, applied gain, and bus slot count. The control block has two ownership-separated 64-byte lines. The producer line publishes generation, write cursor, heartbeat, and flags. The firmware line publishes generation, consumed cursor, and status. Both lines use big-endian 32-bit fields and even/odd seqlocks.
 
-`ZZ9K_AUDIO_RING_ACQUIRE_FLAG_IDLE_PAUSED` (bit 2, alone or with the source-rate
-flag) asks the firmware not to run its 2,000 ms heartbeat timeout while the
+`ZZ9K_AUDIO_RING_ACQUIRE_FLAG_IDLE_PAUSED` (bit 2, valid with PCM and codec
+leases) asks the firmware not to run its 2,000 ms heartbeat timeout while the
 producer line carries `PAUSED`. It is for a client that cannot publish while the
 host operating system is active, such as a WHDLoad audio plugin that pauses its
 lease before the host leaves it. The timeout applies again from the next tick
@@ -1582,7 +1582,20 @@ older firmware rejects any nonzero acquire-flags word with
 first shipping consumer is the matched AHI driver, which mixes at its
 selected AHI rate and leases the card-side conversion.
 
-The steady data path performs no mailbox copy. A producer writes PCM, makes the range visible, and commits its write cursor. Firmware validates the producer line, consumes complete periods, and returns ring credits through the consumed cursor. Producers use those credits for backpressure; `FABRIC_STATE_GET` is telemetry, not pacing.
+The steady data path performs no mailbox copy. A producer writes the data,
+makes the range visible, and commits its write cursor. Firmware validates the
+producer line and returns ring credits through the consumed cursor. Producers
+use those credits for backpressure; `FABRIC_STATE_GET` is telemetry.
+
+`ZZ9K_AUDIO_RING_ACQUIRE_FLAG_CODEC` (bit 3) requests card-side MP3, FLAC,
+Ogg Vorbis, or raw PCM playback. Use a zero `source_rate_hz`, with no
+`SOURCE_RATE` flag. A successful grant returns
+`ZZ9K_AUDIO_RING_CONTRACT_CODEC_STREAM` and source rate zero. An older
+firmware answers `BAD_REQUEST`; clients can fall back to a PCM lease.
+After acquire, the host starts, flushes, or loops tracks by writing stream
+markers under the producer seqlock. There are no mailbox calls between
+tracks. The control fields, cursor and status rules are in
+[Stream markers and codec leases](../../docs/audio-fabric.md#stream-markers-and-codec-leases).
 
 The typed client surface in `include/zz9k/audio.h` validates grants, wraps ring writes, publishes producer state, reads firmware credits, refreshes heartbeats, and performs generation-bound release. The resident mailbox path accepts a legacy bypass grant only when source-rate conversion was not requested. It validates that a returned grant matches the requested contract and source rate, then releases malformed or mismatched grants before reporting failure. `tools/zz9k-fabriclease.c` exercises acquire, direct writes, credit pacing, heartbeat recovery, low-rate telemetry, drain, Ctrl-C cleanup, and Zorro II single-slot refusal.
 

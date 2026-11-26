@@ -19,6 +19,7 @@
 #include <string.h>
 
 #include "audio_fabric.h"
+#include "audio_fabric_codec.h"
 #include "audio_fabric_internal.h"
 #include "audio_scene.h"
 #include "memorymap.h"
@@ -26,6 +27,9 @@
 #include "sdk_mailbox.h"
 #include "sdk_smp_lock.h"
 #include "xil_cache.h"
+#ifndef AUDIO_FABRIC_HOST_TEST
+#include "xtime_l.h"
+#endif
 
 #if ZZAPP_PERF_COUNTERS
 __attribute__((weak)) void audio_fabric_starvation_event(uint32_t slot)
@@ -54,6 +58,30 @@ __attribute__((weak)) void audio_fabric_starvation_event(uint32_t slot)
  * isolates the slot for one pass; four is far beyond anything a
  * well-formed 20-ms producer can produce. */
 #define FABRIC_RING_SEQLOCK_ATTEMPTS 4U
+
+static const struct fabric_codec_ops *g_codec_ops;
+
+/* Only the main loop accesses decoder state, including teardown. A lease
+ * can disappear from the slot table while its decoder pass is preempted. */
+static struct {
+	uint32_t generation;
+	uint32_t seq;
+	struct zz_audio_convert convert;
+	uint32_t rate;
+} g_codec_owner[AUDIO_FABRIC_LEASE_SLOT_END];
+
+static void fabric_codec_end(uint32_t slot)
+{
+	if (g_codec_owner[slot].seq != 0U) {
+		g_codec_ops->end(slot);
+		g_codec_owner[slot].seq = 0U;
+	}
+}
+
+void audio_fabric_codec_register(const struct fabric_codec_ops *ops)
+{
+	g_codec_ops = ops;
+}
 
 /* Non-volatile big-endian word accessors for the shared control block:
  * sdk_mailbox.h's helpers take plain byte pointers, the control lines
@@ -222,10 +250,10 @@ void fabric_lease_reset_rings(void)
 	uint32_t slot;
 
 	memset(g_ring_record, 0, sizeof(g_ring_record));
-	if (!fabric_ring_map(&map))
-		return;
+	fabric_ring_map(&map);
 	for (slot = AUDIO_FABRIC_SLOT_MAILBOX; slot <
 	     AUDIO_FABRIC_LEASE_SLOT_END; slot++) {
+		fabric_codec_end(slot);
 		if (map.ring[slot] != NULL)
 			fabric_ring_zero(map.ring[slot], map.control[slot],
 				map.capacity);
@@ -286,6 +314,9 @@ struct fabric_ring_producer_view {
 	uint32_t generation;
 	uint32_t heartbeat;
 	uint32_t flags;
+	struct fabric_stream_marker stream;
+	uint32_t stream_flags;
+	uint32_t stream_gain;
 };
 
 static int fabric_ring_read_producer_at(uint8_t *control,
@@ -312,6 +343,14 @@ static int fabric_ring_read_producer_at(uint8_t *control,
 			(uint64_t)fabric_ring_get_be32(p->write_cursor_lo);
 		view->heartbeat = fabric_ring_get_be32(p->heartbeat);
 		view->flags = fabric_ring_get_be32(p->flags);
+		view->stream.seq = fabric_ring_get_be32(p->stream_seq);
+		view->stream.codec = fabric_ring_get_be32(p->stream_codec);
+		view->stream.param = fabric_ring_get_be32(p->stream_param);
+		view->stream.start =
+			((uint64_t)fabric_ring_get_be32(p->stream_start_hi) << 32) |
+			fabric_ring_get_be32(p->stream_start_lo);
+		view->stream_flags = fabric_ring_get_be32(p->stream_flags);
+		view->stream_gain = fabric_ring_get_be32(p->stream_gain);
 		Xil_DCacheInvalidateRange((INTPTR)p,
 			SDK_AUDIO_RING_CONTROL_LINE_SIZE);
 		after = fabric_ring_get_be32(p->sequence);
@@ -351,9 +390,15 @@ static void fabric_ring_publish(struct audio_fabric_lease *l,
 	volatile struct SDKAudioRingFirmwareLine *fw =
 		(volatile struct SDKAudioRingFirmwareLine *)
 			(l->control + SDK_AUDIO_RING_CONTROL_LINE_SIZE);
+	uint32_t error = l->codec.state == SDK_AUDIO_RING_DECODE_ERROR ? l->codec.error : 0U;
 	uint32_t next;
 	if (l->published_credits == l->credited &&
-	    l->published_status == status)
+	    l->published_status == status &&
+	    fabric_ring_get_be32(fw->stream_seq) == l->stream_seq &&
+	    fabric_ring_get_be32(fw->decode_state) == l->codec.state &&
+	    fabric_ring_get_be32(fw->decode_error) == error &&
+	    fabric_ring_get_be32(fw->decoded_rate) == l->codec.rate &&
+	    fabric_ring_get_be32(fw->decoded_channels) == l->codec.channels)
 		return;
 	next = (fabric_ring_get_be32(fw->sequence) + 2U) & ~1U;
 	fabric_ring_put_be32(fw->sequence, next | 1U);
@@ -365,6 +410,11 @@ static void fabric_ring_publish(struct audio_fabric_lease *l,
 	fabric_ring_put_be32(fw->consumed_cursor_lo,
 		(uint32_t)l->credited);
 	fabric_ring_put_be32(fw->status, status);
+	fabric_ring_put_be32(fw->stream_seq, l->stream_seq);
+	fabric_ring_put_be32(fw->decode_state, l->codec.state);
+	fabric_ring_put_be32(fw->decode_error, error);
+	fabric_ring_put_be32(fw->decoded_rate, l->codec.rate);
+	fabric_ring_put_be32(fw->decoded_channels, l->codec.channels);
 	Xil_DCacheFlushRange((INTPTR)fw,
 		SDK_AUDIO_RING_CONTROL_LINE_SIZE);
 	fabric_ring_put_be32(fw->sequence, next);
@@ -437,6 +487,145 @@ static void fabric_ring_age_or_revoke(uint32_t slot,
 			SDK_AUDIO_RING_STATUS_REVOKED_HEARTBEAT);
 }
 
+static void fabric_ring_flush(uint32_t slot, uint64_t start)
+{
+	struct audio_fabric_slot *s = fabric_slot(slot);
+	struct audio_fabric_lease *l = &s->lease;
+	struct fabric_lease_preconvert *p = &s->preconvert;
+
+	/* Arm the rebuild before clearing tags so the mixer replays only
+	 * the unaffected producers. Never rewind their shared frontier. */
+	audio_fabric_request_rebuild(slot);
+	audio_fabric_producer_clear(slot);
+	l->credited = start;
+	l->consumed = l->codec.enabled ? 0U : start;
+	p->staged = 0U;
+	p->consumed = 0U;
+	p->src_consumed = start;
+	p->primed = 0U;
+	s->convert_rate = 0U;
+	s->tail_pending = 0U;
+	s->silence_run = 0U;
+	l->clip_open = 0U;
+}
+
+static int fabric_codec_is_new(const struct fabric_lease_codec *c,
+	const struct fabric_ring_producer_view *view)
+{
+	return view->stream.seq != 0U && view->stream.seq != c->current.seq &&
+		view->stream.seq != c->next.seq;
+}
+
+static void fabric_codec_start(struct audio_fabric_lease *l,
+	const struct fabric_stream_marker *marker, int eof, uint64_t end)
+{
+	struct fabric_lease_codec *c = &l->codec;
+
+	c->current = *marker;
+	c->next.seq = 0U;
+	c->next_eof = 0U;
+	c->eof = eof;
+	c->end = end;
+	c->done = 0U;
+	c->rate = 0U;
+	c->channels = 0U;
+	c->error = 0U;
+	c->state = marker->codec == SDK_AUDIO_RING_CODEC_NONE
+		? SDK_AUDIO_RING_DECODE_IDLE : SDK_AUDIO_RING_DECODE_RUNNING;
+	l->stream_seq = marker->seq;
+}
+
+static void fabric_codec_tick(uint32_t slot,
+	const struct fabric_ring_producer_view *view)
+{
+	struct audio_fabric_slot *s = fabric_slot(slot);
+	struct audio_fabric_lease *l = &s->lease;
+	struct fabric_lease_codec *c = &l->codec;
+	int eos = (view->stream_flags & SDK_AUDIO_RING_STREAM_FLAG_END) != 0U;
+
+	c->gain = view->stream_gain;
+	if (fabric_codec_is_new(c, view)) {
+		int append = (view->stream_flags & SDK_AUDIO_RING_STREAM_FLAG_APPEND) != 0U;
+		uint32_t error = SDK_AUDIO_RING_DECODE_ERR_NONE;
+		const struct fabric_stream_marker *m = &view->stream;
+
+		if (m->codec > SDK_AUDIO_RING_CODEC_VORBIS &&
+		    m->codec != SDK_AUDIO_RING_CODEC_NONE)
+			error = SDK_AUDIO_RING_DECODE_ERR_BAD_CODEC;
+		else if (m->start < l->credited || m->start > view->write ||
+		    (view->stream_flags & ~SDK_AUDIO_RING_STREAM_FLAG_KNOWN) != 0U ||
+		    (m->codec != SDK_AUDIO_RING_CODEC_PCM && m->param != 0U) ||
+		    (append && (c->next.seq != 0U ||
+		     (c->eof && c->state != SDK_AUDIO_RING_DECODE_IDLE &&
+		      m->start != c->end))))
+			error = SDK_AUDIO_RING_DECODE_ERR_BAD_MARKER;
+		if (error == 0U && append && m->codec != SDK_AUDIO_RING_CODEC_NONE &&
+		    c->state == SDK_AUDIO_RING_DECODE_RUNNING && !c->done) {
+			c->next = *m;
+			c->next_eof = eos;
+			c->next_end = view->write;
+			c->eof = 1U;
+			c->end = m->start;
+		} else if (error == 0U && append && m->codec != SDK_AUDIO_RING_CODEC_NONE &&
+		           c->error != 0U) {
+			/* The decoder can fail after the producer publishes the
+			 * append but before this tick first sees it. Keep the old
+			 * tail and report the failure under the requested serial. */
+			c->current = *m;
+			l->stream_seq = m->seq;
+		} else if (error == 0U && append && m->codec != SDK_AUDIO_RING_CODEC_NONE &&
+		           (c->state == SDK_AUDIO_RING_DECODE_DRAINED || c->done) &&
+		           c->error == 0U) {
+			fabric_codec_start(l, m, eos, view->write);
+		} else {
+			fabric_ring_flush(slot, error == 0U ? m->start : view->write);
+			fabric_codec_start(l, m, eos, view->write);
+			if (error != 0U) {
+				c->error = error;
+				c->state = SDK_AUDIO_RING_DECODE_ERROR;
+			}
+		}
+	} else if (view->stream.seq != 0U && eos) {
+		if (view->stream.seq == c->next.seq && !c->next_eof) {
+			c->next_eof = 1U;
+			c->next_end = view->write;
+		} else if (view->stream.seq == c->current.seq && !c->eof) {
+			c->eof = 1U;
+			c->end = view->write;
+		}
+	}
+	l->state = AUDIO_FABRIC_SLOT_STATE_ACTIVE;
+	if (c->state == SDK_AUDIO_RING_DECODE_RUNNING && c->done &&
+	    s->preconvert.staged == s->preconvert.consumed) {
+		uint32_t i;
+
+		for (i = 0U; i < AUDIO_NUM_PERIODS; i++)
+			if (s->period_staged[i] != 0U)
+				break;
+		if (i == AUDIO_NUM_PERIODS)
+			c->state = c->error != 0U ? SDK_AUDIO_RING_DECODE_ERROR
+			                          : SDK_AUDIO_RING_DECODE_DRAINED;
+	}
+	fabric_ring_publish(l, SDK_AUDIO_RING_STATUS_OK);
+}
+
+static uint64_t fabric_write_base(const struct audio_fabric_lease *l,
+	const struct fabric_ring_producer_view *view)
+{
+	int flush = view->stream.seq != 0U && view->stream.seq != l->stream_seq;
+
+	if (l->codec.enabled)
+		flush = fabric_codec_is_new(&l->codec, view) &&
+			(view->stream_flags & SDK_AUDIO_RING_STREAM_FLAG_APPEND) == 0U;
+	if (flush && view->stream.start >= l->consumed && !l->codec.enabled &&
+	    view->stream.start <= view->write)
+		return view->stream.start;
+	if (flush && l->codec.enabled && view->stream.start >= l->credited &&
+	    view->stream.start <= view->write)
+		return view->stream.start;
+	return l->credited;
+}
+
 /*
  * One direct-ring scan per compositor ISR (before the retire loop):
  * validate every wired lease's producer line, age its heartbeat,
@@ -454,6 +643,7 @@ void fabric_lease_isr_tick(void)
 		struct audio_fabric_slot *s = fabric_slot(slot);
 		struct audio_fabric_lease *l = &s->lease;
 		struct fabric_ring_producer_view view;
+		uint64_t base;
 
 		if (l->ring == NULL || l->tearing)
 			continue;
@@ -496,9 +686,9 @@ void fabric_lease_isr_tick(void)
 		 * backward is a fault. Staged-but-uncredited bytes stay
 		 * readable for the queued-period rebuild, so the credit
 		 * cursor (not staging) bounds the producer. */
+		base = fabric_write_base(l, &view);
 		if (view.write < l->write_cursor ||
-		    view.write < l->credited ||
-		    view.write - l->credited > l->capacity) {
+		    view.write < base || view.write - base > l->capacity) {
 			fabric_ring_revoke(slot,
 				SDK_AUDIO_RING_STATUS_FAULT_CURSOR);
 			continue;
@@ -520,6 +710,16 @@ void fabric_lease_isr_tick(void)
 			     SDK_AUDIO_RING_PRODUCER_FLAG_PAUSED) != 0U;
 		l->write_cursor = view.write;
 		l->line_valid = 1U;
+		if (l->codec.enabled) {
+			fabric_codec_tick(slot, &view);
+			continue;
+		}
+		if (view.stream.seq != 0U && view.stream.seq != l->stream_seq &&
+		    view.stream.start >= l->consumed && view.stream.start <= view.write) {
+			fabric_ring_flush(slot, view.stream.start);
+			l->stream_seq = view.stream.seq;
+			fabric_ring_publish(l, SDK_AUDIO_RING_STATUS_OK);
+		}
 		{
 			int converting = s->preconvert.active != 0U;
 			int source_ready = view.write - l->credited >=
@@ -588,6 +788,20 @@ static int fabric_ring_source_snapshot(uint32_t slot_index,
 		source->faulted = 1U;
 		return 1;
 	}
+	if (l->codec.enabled) {
+		source->ring = fabric_lease_staging_ring(slot_index);
+		source->capacity = AUDIO_FABRIC_LEASE_STAGING_PERIODS * AUDIO_BYTES_PER_PERIOD;
+		source->staged_bytes = l->consumed;
+		source->produced_bytes = l->consumed + s->preconvert.staged -
+			s->preconvert.consumed;
+		source->sample_rate = 48000U;
+		source->channels = 2U;
+		source->sample_format = SDK_AUDIO_SAMPLE_FORMAT_S16LE;
+		source->done = l->codec.done;
+		source->faulted = l->paused || !s->preconvert.primed ||
+			l->codec.state != SDK_AUDIO_RING_DECODE_RUNNING;
+		return 1;
+	}
 	source->ring = l->ring;
 	source->capacity = l->capacity;
 	source->produced_bytes = l->write_cursor;
@@ -618,7 +832,7 @@ static int fabric_ring_source_stage(uint32_t slot_index, uint32_t bytes)
 	l = &s->lease;
 	if (l->ring == NULL || l->tearing || !l->line_valid)
 		return 0;
-	if (bytes > l->write_cursor - l->consumed)
+	if (!l->codec.enabled && bytes > l->write_cursor - l->consumed)
 		return 0;
 	l->consumed += bytes;
 	return 1;
@@ -632,7 +846,7 @@ static void fabric_ring_source_retire(uint32_t slot_index, uint32_t bytes)
 	if (s == NULL || bytes == 0U)
 		return;
 	l = &s->lease;
-	if (l->ring == NULL || l->tearing)
+	if (l->ring == NULL || l->tearing || l->codec.enabled)
 		return;
 	l->credited += bytes;
 	if (l->credited > l->consumed)
@@ -703,9 +917,205 @@ static void fabric_swap_s16be(int16_t *samples, uint32_t bytes)
 static uint8_t g_lease_poll_busy;
 static struct zz_audio_convert g_poll_snap[AUDIO_FABRIC_LEASE_SLOT_END];
 static uint64_t g_poll_inflight_src[AUDIO_FABRIC_LEASE_SLOT_END];
+static uint32_t g_poll_inflight_seq[AUDIO_FABRIC_LEASE_SLOT_END];
 static uint8_t g_poll_inflight[AUDIO_FABRIC_LEASE_SLOT_END];
 static uint8_t g_poll_stolen[AUDIO_FABRIC_LEASE_SLOT_END];
 static uint8_t g_poll_metered[AUDIO_FABRIC_LEASE_SLOT_END];
+
+static void fabric_lease_rebase_cursors(struct fabric_lease_preconvert *p);
+
+#define CODEC_MIX_FRAMES (AUDIO_BYTES_PER_PERIOD / 4U)
+#define CODEC_STAGING_BYTES \
+	(AUDIO_FABRIC_LEASE_STAGING_PERIODS * AUDIO_BYTES_PER_PERIOD)
+#define CODEC_STAGING_LEAD \
+	(CODEC_STAGING_BYTES - AUDIO_FABRIC_LEASE_REPLAY_PERIODS * AUDIO_BYTES_PER_PERIOD)
+
+/* 11025 Hz needs a 40 ms conversion quantum (441 input frames).
+ * Only that quantum can wrap. All other rates fill one period directly. */
+static uint32_t fabric_codec_stage(uint32_t slot, uint32_t generation,
+	uint32_t stream_seq, const struct fabric_codec_view *v)
+{
+	static int16_t input[2U * 1920U];
+	static int16_t wrapped[4U * CODEC_MIX_FRAMES];
+	struct audio_fabric_slot *s = fabric_slot(slot);
+	struct fabric_lease_preconvert *p = &s->preconvert;
+	struct zz_audio_convert *convert = &g_codec_owner[slot].convert;
+	uint8_t *ring = fabric_lease_staging_ring(slot);
+	uint32_t frames = v->rate == 11025U ? 441U : v->rate / 50U;
+	uint32_t periods = v->rate == 11025U ? 2U : 1U;
+	uint32_t bytes = periods * AUDIO_BYTES_PER_PERIOD;
+	uint32_t available = v->frames;
+	uint32_t budget = AUDIO_FABRIC_LEASE_PRECONVERT_BUDGET / periods;
+
+	while (budget-- != 0U && available != 0U) {
+		uint32_t irq = smp_local_irq_save();
+		uint32_t staged = p->staged;
+		uint32_t offset = staged % CODEC_STAGING_BYTES;
+		uint32_t pull = available < frames ? available : frames;
+		uint32_t first = CODEC_STAGING_BYTES - offset;
+		int16_t *out = first < bytes ? wrapped : (int16_t *)(ring + offset);
+		int16_t *src = v->rate == 48000U ? out : input;
+
+		if (s->lease.generation != generation || s->lease.stream_seq != stream_seq ||
+		    staged - p->consumed + bytes > CODEC_STAGING_LEAD ||
+		    (pull < frames && !v->tail)) {
+			smp_local_irq_restore(irq);
+			break;
+		}
+		smp_local_irq_restore(irq);
+
+		g_codec_ops->read_stereo(slot, src, pull);
+		if (pull < frames)
+			memset(src + 2U * pull, 0, (frames - pull) * 4U);
+		if (v->rate != 48000U)
+			zz_audio_convert_stream(convert, input, out, (uint16_t)frames,
+				(uint16_t)(periods * CODEC_MIX_FRAMES));
+		if (first < bytes) {
+			memcpy(ring + offset, out, first);
+			memcpy(ring, (uint8_t *)out + first, bytes - first);
+		}
+		/* The staging reader is on this core. Publish after conversion
+		 * and discard the work if a flush/revoke preempted it. */
+		irq = smp_local_irq_save();
+		if (s->lease.generation != generation || s->lease.stream_seq != stream_seq) {
+			smp_local_irq_restore(irq);
+			break;
+		}
+		fabric_lease_meter(s, src, pull * 4U);
+		p->staged = staged + bytes;
+		fabric_lease_rebase_cursors(p);
+		smp_local_irq_restore(irq);
+		available -= pull;
+	}
+	return available;
+}
+
+static void fabric_codec_poll(uint32_t slot)
+{
+	struct audio_fabric_slot *s = fabric_slot(slot);
+	struct audio_fabric_lease *l = &s->lease;
+	struct fabric_lease_codec *c = &l->codec;
+	struct fabric_lease_preconvert *p = &s->preconvert;
+	uint32_t irq = smp_local_irq_save();
+	uint32_t generation = l->generation;
+	struct fabric_stream_marker marker = c->current;
+	struct fabric_codec_input input;
+	struct fabric_codec_view v;
+	uint64_t write;
+	uint32_t remaining;
+
+	if (l->ring == NULL || !c->enabled || c->state != SDK_AUDIO_RING_DECODE_RUNNING ||
+	    c->done || l->tearing) {
+		smp_local_irq_restore(irq);
+		fabric_codec_end(slot);
+		return;
+	}
+	if (l->paused || !l->line_valid ||
+	    p->staged - p->consumed >= CODEC_STAGING_LEAD) {
+		smp_local_irq_restore(irq);
+		return;
+	}
+	input.ring = l->ring;
+	input.capacity = l->capacity;
+	input.cursor = l->credited;
+	input.end = c->eof;
+	write = input.end ? c->end : l->write_cursor;
+	input.available = (uint32_t)(write - input.cursor);
+	smp_local_irq_restore(irq);
+
+	if (g_codec_owner[slot].generation != generation ||
+	    g_codec_owner[slot].seq != marker.seq) {
+		g_codec_ops->begin(slot, marker.codec, marker.param);
+		g_codec_owner[slot].generation = generation;
+		g_codec_owner[slot].seq = marker.seq;
+		g_codec_owner[slot].rate = 0U;
+	}
+	v = g_codec_ops->step(slot, &input);
+	remaining = v.frames;
+	if (v.rate != 0U) {
+		struct zz_audio_convert *convert = &g_codec_owner[slot].convert;
+
+		if (g_codec_owner[slot].rate != v.rate) {
+			zz_audio_convert_init(convert, v.rate, 48000U);
+			g_codec_owner[slot].rate = v.rate;
+		}
+		if (v.rate != 48000U && convert->ratio == NULL) {
+			v.error = SDK_AUDIO_RING_DECODE_ERR_UNSUPPORTED;
+			v.complete = 1;
+			remaining = 0U;
+		} else {
+			remaining = fabric_codec_stage(slot, generation, marker.seq, &v);
+		}
+	}
+
+	irq = smp_local_irq_save();
+	if (l->generation == generation && l->stream_seq == marker.seq) {
+		uint32_t decoded = p->staged - p->consumed;
+
+		l->credited += v.copied;
+		c->rate = v.native_rate;
+		c->channels = v.channels;
+		if (v.complete && remaining == 0U) {
+			c->done = 1U;
+			c->error = v.error;
+			if (c->next.seq != 0U) {
+				if (v.error == 0U) {
+					struct fabric_stream_marker next = c->next;
+
+					fabric_codec_start(l, &next, c->next_eof, c->next_end);
+				} else {
+					c->current = c->next;
+					l->stream_seq = c->current.seq;
+					c->next.seq = 0U;
+				}
+			}
+		}
+		if (!p->primed && (decoded >= FABRIC_RING_PREROLL_BYTES ||
+		    (v.complete && remaining == 0U && decoded != 0U))) {
+			p->primed = 1U;
+			if (!audio_fabric_others_live(slot))
+				audio_fabric_producer_restart(slot);
+			audio_fabric_producer_go_live(slot);
+		}
+	}
+	smp_local_irq_restore(irq);
+}
+
+static void fabric_codec_poll_all(void)
+{
+	if (g_codec_ops == NULL)
+		return;
+	for (uint32_t slot = AUDIO_FABRIC_SLOT_MAILBOX;
+	     slot < AUDIO_FABRIC_LEASE_SLOT_END; slot++) {
+		if (fabric_slot(slot)->lease.codec.state == SDK_AUDIO_RING_DECODE_RUNNING ||
+		    g_codec_owner[slot].seq != 0U)
+			fabric_codec_poll(slot);
+	}
+}
+
+#ifndef AUDIO_FABRIC_HOST_TEST
+/* Keep refilling even with no idle Zorro iterations. */
+void audio_fabric_lease_poll_busy(void)
+{
+	static XTime last;
+	XTime now;
+	uint32_t slot;
+
+	for (slot = AUDIO_FABRIC_SLOT_MAILBOX;
+	     slot < AUDIO_FABRIC_LEASE_SLOT_END; slot++) {
+		if (fabric_slot(slot)->lease.codec.state == SDK_AUDIO_RING_DECODE_RUNNING ||
+		    g_codec_owner[slot].seq != 0U)
+			break;
+	}
+	if (slot == AUDIO_FABRIC_LEASE_SLOT_END)
+		return;
+	XTime_GetTime(&now);
+	if (now - last >= COUNTS_PER_SECOND / 250U) {
+		last = now;
+		fabric_codec_poll_all();
+	}
+}
+#endif
 
 void audio_fabric_lease_poll(void)
 {
@@ -715,6 +1125,7 @@ void audio_fabric_lease_poll(void)
 
 	if (g_lease_poll_busy)
 		return;
+	fabric_codec_poll_all();
 	g_lease_poll_busy = 1U;
 
 	for (slot = AUDIO_FABRIC_SLOT_MAILBOX;
@@ -732,7 +1143,7 @@ void audio_fabric_lease_poll(void)
 			continue;
 		l = &s->lease;
 		p = &s->preconvert;
-		if (l->ring == NULL || l->tearing)
+		if (l->ring == NULL || l->tearing || l->codec.enabled)
 			continue;
 		if (l->source_rate == 48000U)
 			continue;
@@ -818,6 +1229,7 @@ void audio_fabric_lease_poll(void)
 				uint32_t irq_state = smp_local_irq_save();
 
 				if (p->src_consumed != consumed64 ||
+				    (view.stream.seq != 0U && view.stream.seq != l->stream_seq) ||
 				    p->staged != staged) {
 					smp_local_irq_restore(irq_state);
 					break;
@@ -825,6 +1237,7 @@ void audio_fabric_lease_poll(void)
 				g_poll_snap[slot] = s->convert;
 				g_poll_inflight_src[slot] = consumed64;
 				g_poll_stolen[slot] = 0U;
+				g_poll_inflight_seq[slot] = l->stream_seq;
 				g_poll_metered[slot] = 0U;
 				g_poll_inflight[slot] = 1U;
 				smp_local_irq_restore(irq_state);
@@ -854,7 +1267,8 @@ void audio_fabric_lease_poll(void)
 			{
 				uint32_t irq_state = smp_local_irq_save();
 
-				if (!g_poll_metered[slot]) {
+				if (!g_poll_metered[slot] &&
+				    g_poll_inflight_seq[slot] == l->stream_seq) {
 					fabric_lease_meter(s, src_scratch,
 							   src_bytes);
 					g_poll_metered[slot] = 1U;
@@ -883,7 +1297,8 @@ void audio_fabric_lease_poll(void)
 			{
 				uint32_t irq_state = smp_local_irq_save();
 
-				if (g_poll_stolen[slot]) {
+				if (g_poll_stolen[slot] &&
+				    g_poll_inflight_seq[slot] == l->stream_seq && l->ring == src_ring) {
 					s->convert = g_poll_snap[slot];
 					g_poll_inflight[slot] = 0U;
 					g_poll_stolen[slot] = 0U;
@@ -891,7 +1306,9 @@ void audio_fabric_lease_poll(void)
 					break;
 				}
 				if (p->staged != staged || l->ring != src_ring ||
-				    l->tearing) {
+				    l->tearing ||
+				    g_poll_inflight_seq[slot] != l->stream_seq) {
+					s->convert_rate = 0U;
 					g_poll_inflight[slot] = 0U;
 					g_poll_stolen[slot] = 0U;
 					smp_local_irq_restore(irq_state);
@@ -995,7 +1412,8 @@ static void fabric_lease_finish_inflight(uint32_t periods)
 			continue;
 		l = &s->lease;
 		p = &s->preconvert;
-		if (l->ring == NULL || l->tearing || l->capacity == 0U)
+		if (l->ring == NULL || l->tearing || l->capacity == 0U ||
+		    g_poll_inflight_seq[slot] != l->stream_seq)
 			continue;
 		if ((p->staged - p->consumed) / AUDIO_BYTES_PER_PERIOD >=
 		    periods)
@@ -1051,24 +1469,6 @@ static void fabric_lease_finish_inflight(uint32_t periods)
 	}
 }
 
-void audio_fabric_lease_idle_paused(uint32_t slot, int on)
-{
-	struct audio_fabric_slot *s = fabric_slot(slot);
-
-	if (s == NULL)
-		return;
-	s->lease.idle_paused = on ? 1U : 0U;
-}
-
-void audio_fabric_lease_source_be(uint32_t slot, int be)
-{
-	struct audio_fabric_slot *s = fabric_slot(slot);
-
-	if (s == NULL)
-		return;
-	s->lease.source_be = be ? 1U : 0U;
-}
-
 /* The poll holds the busy flag but has not claimed a period, or it
  * claimed one and the ISR already finished that period. Stage up to
  * periods more from the tick cursor. A stolen claim continues from
@@ -1102,9 +1502,10 @@ static void fabric_lease_catchup_unclaimed(uint32_t periods)
 		l = &s->lease;
 		p = &s->preconvert;
 		if (l->paused != 0U || l->ring == NULL || l->tearing ||
-		    l->capacity == 0U)
+		    l->capacity == 0U || l->codec.enabled)
 			continue;
-		if (g_poll_inflight[slot] && !g_poll_stolen[slot])
+		if (g_poll_inflight[slot] &&
+		    (!g_poll_stolen[slot] || g_poll_inflight_seq[slot] != l->stream_seq))
 			continue;
 		have = (p->staged - p->consumed) / AUDIO_BYTES_PER_PERIOD;
 		if (have >= periods)
@@ -1112,6 +1513,10 @@ static void fabric_lease_catchup_unclaimed(uint32_t periods)
 		periods_left = periods - have;
 		convert = g_poll_stolen[slot] ? &g_poll_snap[slot]
 					      : &s->convert;
+		if (s->convert_rate != l->source_rate) {
+			zz_audio_convert_init(convert, l->source_rate, 48000U);
+			s->convert_rate = l->source_rate;
+		}
 		for (; periods_left != 0U; periods_left--) {
 			if (p->staged - p->consumed >=
 			    (AUDIO_FABRIC_LEASE_STAGING_PERIODS -
@@ -1209,8 +1614,9 @@ static uint32_t fabric_converting_count(void)
 			    s->admission_rate != 48000U)
 				count++;
 		} else if (s->lease.ring != NULL &&
-			   s->lease.source_rate != 0U &&
-			   s->lease.source_rate != 48000U) {
+			   (s->lease.codec.enabled ||
+			    (s->lease.source_rate != 0U &&
+			     s->lease.source_rate != 48000U))) {
 			count++;
 		}
 	}
@@ -1235,7 +1641,7 @@ static int fabric_rate_known(uint32_t rate)
 }
 
 int audio_fabric_ring_acquire(uint32_t slot, uint32_t identity,
-	uint32_t gain, uint32_t source_rate,
+	uint32_t gain, uint32_t source_rate, uint32_t flags,
 	struct audio_fabric_ring_grant *grant)
 {
 	struct fabric_ring_map map;
@@ -1244,6 +1650,13 @@ int audio_fabric_ring_acquire(uint32_t slot, uint32_t identity,
 	struct audio_scene_lease_gain_result composed;
 	uint8_t *ring;
 	uint8_t *control;
+	int codec = (flags & SDK_AUDIO_RING_ACQUIRE_FLAG_CODEC) != 0U;
+
+	if ((flags & ~SDK_AUDIO_RING_ACQUIRE_FLAG_KNOWN) != 0U ||
+	    (codec && (g_codec_ops == NULL || source_rate != 0U ||
+	               (flags & (SDK_AUDIO_RING_ACQUIRE_FLAG_SOURCE_RATE |
+	                         SDK_AUDIO_RING_ACQUIRE_FLAG_SOURCE_S16BE)) != 0U)))
+		return AUDIO_FABRIC_LEASE_EBAD_SLOT;
 	if (grant != NULL) {
 		memset(grant, 0, sizeof(*grant));
 	}
@@ -1272,7 +1685,7 @@ int audio_fabric_ring_acquire(uint32_t slot, uint32_t identity,
 	 * budget allows at most two converting producers; a rate-bearing
 	 * acquire past it is refused like an occupied slot, never granted
 	 * with unqualified cycle cost. */
-	if (!audio_fabric_conversion_admissible(source_rate))
+	if (!audio_fabric_conversion_admissible(codec ? 44100U : source_rate))
 		return AUDIO_FABRIC_LEASE_EBUSY;
 	ring = map.ring[slot];
 	control = map.control[slot];
@@ -1288,6 +1701,9 @@ int audio_fabric_ring_acquire(uint32_t slot, uint32_t identity,
 	l->control = control;
 	l->capacity = map.capacity;
 	l->identity = identity;
+	l->source_be = (flags & SDK_AUDIO_RING_ACQUIRE_FLAG_SOURCE_S16BE) != 0U;
+	l->idle_paused = (flags & SDK_AUDIO_RING_ACQUIRE_FLAG_IDLE_PAUSED) != 0U;
+	l->codec.enabled = codec;
 	l->source_rate = (source_rate != 0U) ? source_rate : 48000U;
 	l->generation = s->epoch;   /* attach bumped it onto this lease */
 	l->state = (uint8_t)AUDIO_FABRIC_SLOT_STATE_LEASED;
@@ -1296,16 +1712,16 @@ int audio_fabric_ring_acquire(uint32_t slot, uint32_t identity,
 	 * not be skipped as redundant. */
 	l->published_status = 0xffffffffU;
 	fabric_ring_publish(l, SDK_AUDIO_RING_STATUS_OK);
-	__asm__ __volatile__("" ::: "memory");
-	l->ring = ring;
 	s->gain = (uint16_t)composed.applied;
-	if (l->source_rate != 48000U) {
+	if (l->source_rate != 48000U || codec) {
 		/* Converting lease: the main-loop preconvert staging owns
 		 * the FIR from here on (audio_fabric_lease_poll); the
 		 * compositor ISR fill only copies. attach already zeroed
 		 * the slot, so only the activation flag is needed. */
 		s->preconvert.active = 1U;
 	}
+	__asm__ __volatile__("" ::: "memory");
+	l->ring = ring;
 	fabric_ring_record(slot, l->generation, identity, 0U, 0U,
 		SDK_AUDIO_RING_STATUS_OK);
 	if (grant != NULL) {
@@ -1357,6 +1773,7 @@ int audio_fabric_ring_release(uint32_t slot, uint32_t generation)
 	audio_fabric_request_rebuild(slot);
 	s->epoch++;
 	audio_fabric_producer_detach(slot);
+	fabric_codec_end(slot);
 	return AUDIO_FABRIC_LEASE_OK;
 }
 

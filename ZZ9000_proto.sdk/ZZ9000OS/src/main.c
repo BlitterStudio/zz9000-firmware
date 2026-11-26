@@ -2983,10 +2983,8 @@ int main() {
 			// finish client-closed FLAC/Vorbis streams whose decoder
 			// heap is released on core 1; no-op when none is closing
 			sdk_mailbox_audio_stream_reap();
-			// convert whole source periods for rate-converted
-			// AHI/MHI leases on the main loop so the fabric ISR
-			// only copies (drivers#83 follow-up); no-op without
-			// converting leases
+			// Decode codec leases and convert source periods on the
+			// main loop so the fabric ISR only copies staged periods.
 			audio_fabric_lease_poll();
 			// render the wavetable voice engine into its fabric slot
 			// and drain its command ring; no-op without a session
@@ -3145,8 +3143,10 @@ int main() {
 		/* The voice poll only runs when no request was pending (see
 		 * above): under steady Zorro traffic it polls here, rate
 		 * limited to once per 2 ms. */
-		if (writereq || readreq)
+		if (writereq || readreq) {
+			audio_fabric_lease_poll_busy();
 			audio_voice_session_poll_busy();
+		}
 
 		/* P96 video overlay: enqueue the ISR-requested compose frame
 		 * (the ISR itself must not touch the single-producer queue)

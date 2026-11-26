@@ -56,6 +56,31 @@ struct fabric_lease_preconvert {
 
 uint8_t *fabric_lease_staging_ring(uint32_t slot);
 
+struct fabric_stream_marker {
+	uint64_t start;
+	uint32_t seq;
+	uint32_t codec;
+	uint32_t param;
+};
+
+/* Marker acceptance and TX retirement belong to the ISR. The poll commits
+ * decoded periods and input credits under the local IRQ guard. */
+struct fabric_lease_codec {
+	struct fabric_stream_marker current;
+	struct fabric_stream_marker next;
+	uint64_t end;
+	uint64_t next_end;
+	uint32_t state;
+	uint32_t error;
+	uint32_t rate;
+	uint32_t channels;
+	uint32_t gain;
+	uint8_t enabled;
+	uint8_t eof;
+	uint8_t next_eof;
+	uint8_t done;
+};
+
 /* Lease-plane per-slot state (plan U3, direct rings). ring == NULL means
  * no lease holds the slot. The granted PCM ring and the 128-byte seqlock
  * control block live in board-visible memory (memorymap.h direct-ring
@@ -96,6 +121,10 @@ struct audio_fabric_lease {
 	uint8_t clip_open;        /* at-rail region continuity latch */
 	uint32_t peak;            /* 16.16 peak-hold of source samples */
 	uint32_t clips;           /* at-rail source regions, saturating */
+	/* The serial is separate from the grant's generation. Plain leases
+	 * also echo the last accepted flush marker. */
+	uint32_t stream_seq;
+	struct fabric_lease_codec codec;
 };
 
 struct audio_fabric_slot {
