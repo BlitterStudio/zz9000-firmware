@@ -10,7 +10,7 @@
  */
 module rxpf_tb;
   localparam BOARD   = 32'h48000000;
-  localparam BACKLOG = 32'h3fe00000;
+  localparam BACKLOG = 32'h3ff30000;    // RX_BACKLOG_ADDRESS
 
   reg clk = 0;
   always #5 clk = ~clk;               // 100 MHz S_AXI_ACLK / m00_axi_aclk
@@ -34,6 +34,20 @@ module rxpf_tb;
   function [31:0] model(input [31:0] a, input [31:0] g);
     model = (a * 32'h9e3779b1) ^ (g * 32'h85ebca6b) ^ 32'h5a5a0000;
   endfunction
+
+  // m00 write channel: every accepted AW is answered by a B response a few
+  // clocks later; mntzorro.v holds reads back until all of them have come
+  wire awvalid; wire bready;
+  reg  bvalid = 0;
+  integer b_owed = 0, b_wait = 0;
+  always @(posedge clk) begin
+    bvalid <= 0;
+    if (awvalid && !bvalid) b_owed <= b_owed + 1;
+    if (b_owed > 0) begin
+      if (b_wait < 4) b_wait <= b_wait + 1;
+      else begin bvalid <= 1; b_owed <= b_owed - 1; b_wait <= 0; end
+    end
+  end
 
   // a queue of outstanding bursts, served in order after a fixed latency
   reg [31:0] q_addr [0:15]; reg [4:0] q_len [0:15]; reg [31:0] q_gen [0:15];
@@ -123,7 +137,7 @@ module rxpf_tb;
     .VCAP_R0(1'b0), .VCAP_R1(1'b0), .VCAP_R2(1'b0), .VCAP_R3(1'b0), .VCAP_R4(1'b0), .VCAP_R5(1'b0), .VCAP_R6(1'b0), .VCAP_R7(1'b0),
     .ZORRO_NDTACK(ZORRO_NDTACK),
     .m00_axi_aclk(clk), .m00_axi_aresetn(aresetn),
-    .m00_axi_awready(1'b1), .m00_axi_wready(1'b1), .m00_axi_bresp(2'b00), .m00_axi_bvalid(1'b0),
+    .m00_axi_awready(1'b1), .m00_axi_awvalid(awvalid), .m00_axi_wready(1'b1), .m00_axi_bresp(2'b00), .m00_axi_bvalid(bvalid), .m00_axi_bready(bready),
     .m00_axi_arready(arready), .m00_axi_araddr(araddr), .m00_axi_arlen(arlen), .m00_axi_arburst(arburst),
     .m00_axi_arvalid(arvalid), .m00_axi_rdata(rdata), .m00_axi_rresp(rresp_err ? 2'b10 : 2'b00), .m00_axi_rlast(rlast), .m00_axi_rvalid(rvalid),
     .m01_axi_aclk(clk), .m01_axi_aresetn(1'b1), .m01_axi_awready(1'b1), .m01_axi_wready(1'b1),
@@ -134,6 +148,21 @@ module rxpf_tb;
     .S_AXI_WVALID(1'b0), .S_AXI_BREADY(1'b1), .S_AXI_ARADDR(0), .S_AXI_ARPROT(3'b0),
     .S_AXI_ARVALID(1'b0), .S_AXI_RREADY(1'b1)
   );
+
+  // DTACK must not lead the read data: sample the pins on every clock edge,
+  // before the edge's own updates.  When ZORRO_NDTACK is first seen high, it
+  // was set at the previous edge, and pins_prev is what the pins carried at that
+  // edge: the data must already be there.
+  reg [31:0] pins_prev = 0, assert_pins = 0;
+  reg        nd_prev = 0, assert_seen = 0;
+  integer    order_checks = 0, order_fails = 0;
+  always @(posedge clk) begin
+    if (ZORRO_NDTACK === 1'b1 && !nd_prev) begin
+      assert_seen <= 1; assert_pins <= pins_prev;
+    end
+    nd_prev   <= (ZORRO_NDTACK === 1'b1);
+    pins_prev <= {ZORRO_DATA, ZORRO_ADDR[22:7]};
+  end
 
   // one Zorro III longword (or word) cycle at absolute address a
   integer lat_fcs, lat_ds, t_fcs, t_ds;
@@ -148,13 +177,20 @@ module rxpf_tb;
       #30 ZORRO_NFCS = 0; t_fcs = $time;
       #40 za_oe = 0; zd_oe = !rd;
       if (!rd) begin zd_drv = 16'hdead; za_drv = {16'hbeef, 7'h0}; za_oe = 1; end
-      ZORRO_DOE = 1;
+      ZORRO_DOE = 1; assert_seen = 0;
       #10 ZORRO_NUDS = !lanes[1]; ZORRO_NLDS = !lanes[1]; ZORRO_NDS1 = !lanes[0]; ZORRO_NDS0 = !lanes[0]; t_ds = $time;
       for (hang = 0; hang < 30000 && ZORRO_NDTACK !== 1'b1; hang = hang + 1) #1;
       lat_fcs = $time - t_fcs; lat_ds = $time - t_ds;
       if (ZORRO_NDTACK !== 1'b1) begin hung = hung + 1; $display("INFO z3 cycle at %h got no DTACK in 30 us (state %0d busy %0d in_ram %0d fcs %0d)", a, dut.zorro_state, dut.rd_out, dut.z3addr_in_ram, dut.z3_fcs_state); end
       #20;
       got = {dut.data_z3_hi16, dut.data_z3_low16};
+      if (rd && ZORRO_NDTACK === 1'b1) begin
+        order_checks = order_checks + 1;
+        if (!assert_seen || assert_pins !== got) begin
+          $display("FAIL DTACK before data: read %h, pins %h at the DTACK edge, data %h", a, assert_pins, got);
+          errors = errors + 1; order_fails = order_fails + 1;
+        end
+      end
       ZORRO_NUDS = 1; ZORRO_NLDS = 1; ZORRO_NDS1 = 1; ZORRO_NDS0 = 1;
       ZORRO_DOE = 0; za_oe = 0; zd_oe = 0;
       #10 ZORRO_NFCS = 1;
@@ -352,6 +388,8 @@ module rxpf_tb;
       if (early_valid != 0) errors = errors + 1;
       $display("%s ARVALID while aresetn low: %0d cycle(s) (want 0)", valid_in_reset == 0 ? "PASS" : "FAIL", valid_in_reset);
       if (valid_in_reset != 0) errors = errors + 1;
+      $display("%s DTACK after data on the pins: %0d reads checked, %0d failed", (order_checks > 0 && order_fails == 0) ? "PASS" : "FAIL", order_checks, order_fails);
+      if (order_checks == 0) errors = errors + 1;
       $display("%s rxpf_tb: %0d error(s)", errors == 0 ? "PASS" : "FAIL", errors);
       if (errors == 0) $display("RXPF_VERDICT_OK");
       $finish;
@@ -440,6 +478,8 @@ module rxpf_tb;
     z3cycle(BOARD + 32'h2000, 1, 2'b11, got, ns); $display("INFO miss cycle %0d ns", ns);
     z3cycle(BOARD + 32'h2004, 1, 2'b11, got, ns); $display("INFO hit  cycle %0d ns", ns);
 
+    $display("%s DTACK after data on the pins: %0d reads checked, %0d failed", (order_checks > 0 && order_fails == 0) ? "PASS" : "FAIL", order_checks, order_fails);
+    if (order_checks == 0) errors = errors + 1;
     $display("%s rxpf_tb: %0d error(s)", errors == 0 ? "PASS" : "FAIL", errors);
     if (errors == 0) $display("RXPF_VERDICT_OK");
     $finish;

@@ -1,11 +1,12 @@
 #!/bin/bash
-# run.sh: xsim the receive-window read-ahead (Vivado 2018.3 env sourced)
+# run.sh: xsim the receive-window read-ahead (Vivado 2018.3 env sourced).
+# ZORRO_RTL names another copy of mntzorro.v to run the bench against.
 set -e
 cd "$(dirname "$0")"
 R=../..
 # xsim rejects mntzorro.v's use of vc_row_bank before its declaration (synthesis
 # accepts it); the simulated copy declares it ahead of the first use, nothing else.
-python3 - "$R/mntzorro.v" > mntzorro_sim.v <<'PY'
+python3 - "${ZORRO_RTL:-$R/mntzorro.v}" > mntzorro_sim.v <<'PY'
 import sys
 s = open(sys.argv[1]).read()
 s = s.replace("  reg vc_row_bank = 0;\n", "", 1)

@@ -729,9 +729,6 @@ module MNTZorro_v0_1_S00_AXI
   // up and the Z3 fast-RAM DDR window is ready, gating the fast-RAM autoconfig PIC.
   reg fastram_ready = 0;
 
-  reg [15:0] data_z3_hi16_latched;
-  reg [15:0] data_z3_low16_latched;
-
   reg [15:0] z3_din_high_s2;
   reg [15:0] z3_din_low_s2;
   reg [31:0] z3addr;
@@ -796,7 +793,7 @@ module MNTZorro_v0_1_S00_AXI
   // level shifter direction pins
   assign ZORRO_DATADIR     = ZORRO_DOE & (dataout_enable | dataout_z3); // d2-d9  d10-15, d0-d1
   assign ZORRO_ADDRDIR     = ZORRO_DOE & (dataout_z3); // a16-a23 <- input  a8-a15 <- input
-  assign ZORRO_ADDRDIR2    = 0; //ZORRO_DOE & (dataout_z3_latched);
+  assign ZORRO_ADDRDIR2    = 0;
   assign ZORRO_NBRN = 1; // TODO busmastering
 
   // data/addr out signals are gated by master's DOE signal
@@ -868,8 +865,8 @@ module MNTZorro_v0_1_S00_AXI
   assign ZORRO_NSLAVE = (ZORRO_DOE & slaven)?1'b0:1'b1; // cannot gate by FCS for Z2
 `endif
   assign ZORRO_NDTACK = (ZORRO_DOE & dtack) ?1'b1:1'b0; // inverse, pull-down transistor on output
-  wire [22:0] z3_addr_out = {data_z3_low16_latched, 7'bZZZ_ZZZZ}; // FIXME this creates tri-cell warning?
-  //wire [22:0] z3_addr_out = {data_z3_low16_latched, 7'b111_1111}; // FIXME this creates tri-cell warning?
+  wire [22:0] z3_addr_out = {data_z3_low16, 7'bZZZ_ZZZZ}; // FIXME this creates tri-cell warning?
+  //wire [22:0] z3_addr_out = {data_z3_low16, 7'b111_1111}; // FIXME this creates tri-cell warning?
 
   genvar i;
 
@@ -877,7 +874,7 @@ module MNTZorro_v0_1_S00_AXI
     for (i=0; i < 16; i=i+1) begin : ZORRO_DATABUS
       IOBUF u_iobuf_dq
            (
-            .I  (ZORRO3 ? data_z3_hi16_latched[i] : data_out[i]),
+            .I  (ZORRO3 ? data_z3_hi16[i] : data_out[i]),
             .T  (ZORRO_DATA_T),
             .IO (ZORRO_DATA[i]),
             .O  (ZORRO_DATA_IN[i])
@@ -995,10 +992,6 @@ module MNTZorro_v0_1_S00_AXI
 
     z3_din_high_s2 <= ZORRO_DATA_IN;       //zD[15:0];
     z3_din_low_s2  <= ZORRO_ADDR_IN[22:7]; //zA[22:7];
-
-    // pipelined for better timing
-    data_z3_hi16_latched  <= data_z3_hi16;
-    data_z3_low16_latched <= data_z3_low16;
 
     zorro_read  <= zREAD_sync[0];
     zorro_write <= ~zREAD_sync[0];
@@ -1257,6 +1250,7 @@ module MNTZorro_v0_1_S00_AXI
   localparam Z3_WRITE_FINALIZE2 = 60;
   localparam Z2_REGREAD_DTACK = 62;
   localparam Z3_RXPF_SERVE = 64;  // receive-window read-ahead: answer from the line
+  localparam Z3_RD_DTACK = 66;    // Z3 read data is on the pins: assert DTACK
   localparam Z2_WRITE_FINALIZE2 = 61;
 
   reg [7:0] zorro_state = COLD;
@@ -2367,12 +2361,11 @@ module MNTZorro_v0_1_S00_AXI
 
 `ifdef ZORRO3
         Z3_AUTOCONF_READ_DLY: begin
-          // wait for data to be latched out
+          // the data is on the pins; DTACK follows two states later
           zorro_state <= Z3_AUTOCONF_READ_DLY2;
         end
 
         Z3_AUTOCONF_READ_DLY2: begin
-          // wait for data to be latched out
           dtack <= 1;
           zorro_state <= Z3_DTACK;
         end
@@ -2990,11 +2983,12 @@ module MNTZorro_v0_1_S00_AXI
         end
 
         // 32bit reg read
+        // Z3 reads load data_z3_* here and let Z3_RD_DTACK assert DTACK on
+        // the next edge, once the data is on the pins (see Z3_RD_DTACK).
         Z3_REGREAD_POST: begin
           data_z3_hi16  <= rr_data[31:16];
           data_z3_low16 <= rr_data[15:0];
-          zorro_state <= Z3_ENDCYCLE;
-          dtack <= 1;
+          zorro_state <= Z3_RD_DTACK;
         end
 
         Z3_READ_UPPER: begin
@@ -3021,6 +3015,8 @@ module MNTZorro_v0_1_S00_AXI
         end
 
         Z3_READ_DELAY2: begin
+          // data_z3_* was loaded in Z3_READ_DELAY1, at least one edge ago:
+          // it is on the pins when DTACK is set
           if (!zorro_ram_read_flag) begin
             zorro_state <= Z3_ENDCYCLE;
             dtack <= 1;
@@ -3123,9 +3119,8 @@ module MNTZorro_v0_1_S00_AXI
             data_z3_hi16  <= {rxpf_buf[rxpf_idx][7:0],   rxpf_buf[rxpf_idx][15:8]};
             data_z3_low16 <= {rxpf_buf[rxpf_idx][23:16], rxpf_buf[rxpf_idx][31:24]};
             dataout_z3 <= 1; // enable data output
-            dtack <= 1;
             rxpf_last <= z3_mapped_addr;
-            zorro_state <= Z3_ENDCYCLE;
+            zorro_state <= Z3_RD_DTACK;
           end else if (!rxpf_valid || (!rd_out && !m00_axi_arvalid)) begin
             // the fill ended (or a reset took it) without this beat: retire
             // the line so the retry misses instead of hitting it again
@@ -3138,11 +3133,10 @@ module MNTZorro_v0_1_S00_AXI
           if (!rd_out && !m00_axi_arvalid) begin
             zorro_state <= WAIT_READ_DMA_Z3;   // the fabric reset took the read: ask again
           end else if (rd_out && !rd_fill && !rd_discard && m00_axi_rvalid) begin
-            zorro_state <= Z3_ENDCYCLE;
+            zorro_state <= Z3_RD_DTACK;
             data_z3_hi16 <= {m00_axi_rdata[7:0], m00_axi_rdata[15:8]};
             data_z3_low16 <= {m00_axi_rdata[23:16], m00_axi_rdata[31:24]};
             dataout_z3 <= 1; // enable data output
-            dtack <= 1;
           end
         end
 
@@ -3181,6 +3175,19 @@ module MNTZorro_v0_1_S00_AXI
           zorro_state <= Z3_ENDCYCLE;
         end
 
+        // Zorro III read answer, shared by the AXI, receive-window and
+        // register reads. data_z3_* drives the data pins directly, so the
+        // data is on the pins from the edge that loads it. DTACK must not
+        // lead the data: the state that loads data_z3_* goes to this state,
+        // which sets DTACK on the next edge, one clock after the data, and
+        // Z3_ENDCYCLE holds it for dtack_timeout as before. ARM-answered
+        // reads set DTACK in Z3_READ_DELAY2, at least one edge after the load.
+        // Autoconfig reads wait two states (Z3_AUTOCONF_READ_DLY, _DLY2).
+        Z3_RD_DTACK: begin
+          dtack <= 1;
+          zorro_state <= Z3_ENDCYCLE;
+        end
+
         Z3_ENDCYCLE: begin
           dtack <= 1;
 
@@ -3203,8 +3210,10 @@ module MNTZorro_v0_1_S00_AXI
         end
 `endif
 
-        // Register reads now drive data_out one state before DTACK on both
-        // Z2 (Z2_REGREAD_POST -> Z2_REGREAD_DTACK) and Z3 paths.
+        // Register reads drive the data one state before DTACK on Z2
+        // (Z2_REGREAD_POST -> Z2_REGREAD_DTACK). On Z3 Z3_REGREAD_POST loads
+        // data_z3_* and Z3_RD_DTACK sets DTACK on the next edge, the same
+        // order as the other Z3 reads.
         REGREAD: begin
           // TODO split up into z3/z2
 `ifdef ZORRO3
