@@ -1361,8 +1361,19 @@ typedef struct ZZ9KAudioControlStateResultPayload {
  * ZZ9K_SERVICE_FLAG_AUDIO_FABRIC_RATE rejects any nonzero flags word
  * with BAD_REQUEST -- that refusal is the client's fallback signal. */
 #define ZZ9K_AUDIO_RING_ACQUIRE_FLAG_SOURCE_RATE (1U << 0)
+/* IDLE_PAUSED (bit 2, with or without SOURCE_RATE): the firmware's
+ * 2,000 ms heartbeat timeout does not run while the producer line
+ * carries PAUSED. For a client that cannot publish while the host
+ * operating system is active, such as a WHDLoad audio plugin. The lease
+ * still ends on release, a cursor fault, an Amiga reset, and the timeout
+ * after an unpaused stretch. Not advertised in a service flag: firmware
+ * without it answers BAD_REQUEST, the client's fallback signal. Bit 1
+ * is reserved for a firmware-side source byte order flag the SDK does
+ * not define. */
+#define ZZ9K_AUDIO_RING_ACQUIRE_FLAG_IDLE_PAUSED (1U << 2)
 #define ZZ9K_AUDIO_RING_ACQUIRE_FLAG_KNOWN \
-  ZZ9K_AUDIO_RING_ACQUIRE_FLAG_SOURCE_RATE
+  (ZZ9K_AUDIO_RING_ACQUIRE_FLAG_SOURCE_RATE | \
+   ZZ9K_AUDIO_RING_ACQUIRE_FLAG_IDLE_PAUSED)
 
 /* Firmware-line status. REVOKED_HEARTBEAT and FAULT_CURSOR both
  * invalidate the generation: consumption stops and the slot may be

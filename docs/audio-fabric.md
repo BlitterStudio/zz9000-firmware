@@ -265,7 +265,7 @@ an Amiga reset and on the timeout after an unpaused stretch. It does not end
 because a paused client died, so a paused lease of a dead client holds its slot
 until the next Amiga reset. Firmware without the flag answers `BAD_REQUEST`,
 which is the client's signal to do without it. The flag is not advertised in a
-service flag.
+service flag. SDK clients name it `ZZ9K_AUDIO_RING_ACQUIRE_FLAG_IDLE_PAUSED`.
 
 A direct-ring lease at 48 kHz feeds the compositor directly. A lease at any
 other accepted rate is converted into 48 kHz periods by
