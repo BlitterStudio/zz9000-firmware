@@ -212,7 +212,8 @@ the request builder, the reply decoders and the tool logic.
 `zz9k-mediaout FILE.mpg [options]` plays a video-only MPEG-1 or MPEG-2 program
 stream into a shared buffer and prints, for every picture, the slot, the card's
 conversion time, the time until the picture was complete and an FNV-1a checksum
-of the slot. Options: `-f rgb565|rgb555|index8|planar`, `-s WxH`, `-d DEPTH`,
+of the slot's active bytes (the padding between a row and its pitch is left out).
+The input buffer is the largest of 16, 8, 4 and 2 KiB the host window still has room for. Options: `-f rgb565|rgb555|index8|planar`, `-s WxH`, `-d DEPTH`,
 `-i` (interleaved), `-o` (ordered dither), `-n` (nearest), `-H` (gray ramp as
 host palette), `-1` (one slot), `-c N`, `-x` (no checksum), `-w` (window,
 needs cybergraphics).

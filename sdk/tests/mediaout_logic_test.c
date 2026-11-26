@@ -269,8 +269,72 @@ static void test_row_to_rgb(void)
   }
 }
 
+static void test_checksum_picture_and_rate(void)
+{
+  ZZ9KMediaOutOptions o;
+  ZZ9KMediaOutPlan plan;
+  uint8_t a[4096];
+  uint8_t b[4096];
+  uint32_t x;
+  uint32_t y;
+  uint32_t p;
+
+  /* 100x50 planar: 13 active bytes a plane row in a 14-byte pitch */
+  CHECK(parse(&o, "-f", "planar", "-d", "3", "-s", "100x50", "a.mpg", 0));
+  CHECK(zz9k_mediaout_plan(&o, 320U, 240U, &plan) == ZZ9K_STATUS_OK);
+  CHECK(plan.pitch == 14U && plan.picture_bytes == 14U * 50U * 3U);
+  memset(a, 0xa5, sizeof(a));
+  memset(b, 0x00, sizeof(b));
+  for (p = 0U; p < 3U; p++) {
+    for (y = 0U; y < 50U; y++) {
+      for (x = 0U; x < 13U; x++) {
+        uint32_t off = zz9k_media_output_plane_row_offset(
+            plan.flags, plan.height, plan.pitch, p, y) + x;
+
+        a[off] = b[off] = (uint8_t)(x * 7U + y * 3U + p);
+      }
+    }
+  }
+  /* identical pictures with different padding hash alike... */
+  CHECK(zz9k_mediaout_checksum_picture(&plan, a, ZZ9K_MEDIAOUT_CHECKSUM_SEED) ==
+        zz9k_mediaout_checksum_picture(&plan, b, ZZ9K_MEDIAOUT_CHECKSUM_SEED));
+  /* ...while hashing every byte of the picture would tell them apart */
+  CHECK(zz9k_mediaout_checksum(ZZ9K_MEDIAOUT_CHECKSUM_SEED, a,
+                               plan.picture_bytes) !=
+        zz9k_mediaout_checksum(ZZ9K_MEDIAOUT_CHECKSUM_SEED, b,
+                               plan.picture_bytes));
+  /* a changed pixel does change it */
+  b[5] ^= 1U;
+  CHECK(zz9k_mediaout_checksum_picture(&plan, a, ZZ9K_MEDIAOUT_CHECKSUM_SEED) !=
+        zz9k_mediaout_checksum_picture(&plan, b, ZZ9K_MEDIAOUT_CHECKSUM_SEED));
+  /* INDEX8 5x2: 5 active bytes in a 6-byte pitch */
+  CHECK(parse(&o, "-f", "index8", "-s", "5x2", "a.mpg", 0));
+  CHECK(zz9k_mediaout_plan(&o, 320U, 240U, &plan) == ZZ9K_STATUS_OK);
+  CHECK(plan.pitch == 6U);
+  memset(a, 0x11, sizeof(a));
+  memset(b, 0x11, sizeof(b));
+  a[5] = 0xee; /* padding of row 0 */
+  CHECK(zz9k_mediaout_checksum_picture(&plan, a, 1U) ==
+        zz9k_mediaout_checksum_picture(&plan, b, 1U));
+  a[4] = 0xee; /* an active byte */
+  CHECK(zz9k_mediaout_checksum_picture(&plan, a, 1U) !=
+        zz9k_mediaout_checksum_picture(&plan, b, 1U));
+
+  /* 50 pictures in 2 s is 25.00 a second; the 32-bit product of the old
+   * print (50 * 100000000) is above 2^32 */
+  CHECK(zz9k_mediaout_rate_x100(50U, 2000000U) == 2500ULL);
+  CHECK(zz9k_mediaout_rate_x100(100000U, 4000000U) == 2500000ULL);
+  CHECK(zz9k_mediaout_rate_x100(5000U, 1000000U) == 500000ULL);
+  CHECK(zz9k_mediaout_rate_x100(1U, 0U) == 0ULL);
+
+  CHECK(zz9k_mediaout_smaller_chunk(16384U) == 8192U);
+  CHECK(zz9k_mediaout_smaller_chunk(4096U) == 2048U);
+  CHECK(zz9k_mediaout_smaller_chunk(2048U) == 0U);
+}
+
 int main(void)
 {
+  test_checksum_picture_and_rate();
   test_parse();
   test_mpeg_info();
   test_checksum();

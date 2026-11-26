@@ -302,6 +302,52 @@ static inline uint32_t zz9k_mediaout_checksum(uint32_t seed,
 
 #define ZZ9K_MEDIAOUT_CHECKSUM_SEED 2166136261UL
 
+/* Checksum of the bytes a picture really holds: the active bytes of every
+ * row (every plane row for PLANAR). The bytes between the end of a row and
+ * the pitch are never written by the card, so they are left out; they hold
+ * whatever the allocation held. `slot` may be card memory. */
+static inline uint32_t zz9k_mediaout_checksum_picture(
+    const ZZ9KMediaOutPlan *plan, const volatile uint8_t *slot, uint32_t hash)
+{
+  uint8_t row[ZZ9K_MEDIA_OUTPUT_MAX_WIDTH * 2];
+  uint32_t row_bytes = zz9k_media_output_row_bytes(plan->format, plan->width);
+  uint32_t planes = plan->format == ZZ9K_SURFACE_FORMAT_PLANAR
+                        ? plan->depth : 1U;
+  uint32_t plane;
+  uint32_t y;
+
+  for (plane = 0U; plane < planes; plane++) {
+    for (y = 0U; y < plan->height; y++) {
+      uint32_t offset = plan->format == ZZ9K_SURFACE_FORMAT_PLANAR
+          ? zz9k_media_output_plane_row_offset(plan->flags, plan->height,
+                                               plan->pitch, plane, y)
+          : y * plan->pitch;
+
+      memcpy(row, (const void *)(slot + offset), row_bytes);
+      hash = zz9k_mediaout_checksum(hash, row, row_bytes);
+    }
+  }
+  return hash;
+}
+
+/* Pictures per second times 100, from a count and the time it took. The
+ * products are 64-bit: unsigned long is 32 bits on the 68k. */
+static inline uint64_t zz9k_mediaout_rate_x100(uint32_t count,
+                                               uint32_t elapsed_us)
+{
+  if (elapsed_us == 0U) {
+    return 0U;
+  }
+  return ((uint64_t)count * 100000000ULL) / elapsed_us;
+}
+
+/* The next smaller input chunk to try when the host window cannot take the
+ * one asked for, or 0 below the smallest useful size. */
+static inline uint32_t zz9k_mediaout_smaller_chunk(uint32_t chunk)
+{
+  return chunk > 2048U ? chunk / 2U : 0U;
+}
+
 /* Geometry of the output for a stream of src_w x src_h: size, pitch, slot
  * stride and buffer size. Returns a ZZ9K_STATUS_* code from the same check
  * the card applies. Pitches are rounded up to an even number of bytes so a

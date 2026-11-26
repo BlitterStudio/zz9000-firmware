@@ -226,6 +226,7 @@ static void print_error(const char *what, int status)
 typedef struct MediaOutFeed {
   FILE *file;
   ZZ9KSharedBuffer buffer;
+  uint32_t chunk;    /* size of the input buffer */
   uint32_t offset;   /* bytes of the chunk the card has taken */
   uint32_t length;   /* bytes in the chunk */
   int eof_sent;
@@ -241,7 +242,7 @@ static int feed_once(ZZ9KContext *ctx, uint32_t session, MediaOutFeed *feed,
   int status;
 
   if (feed->offset >= feed->length && !feed->at_eof) {
-    size_t got = fread((void *)feed->buffer.data, 1U, MEDIAOUT_CHUNK_BYTES,
+    size_t got = fread((void *)feed->buffer.data, 1U, feed->chunk,
                        feed->file);
 
     feed->length = (uint32_t)got;
@@ -297,27 +298,6 @@ static int wait_for_picture(ZZ9KContext *ctx, uint32_t session,
     }
     pause_a_little();
   }
-}
-
-static uint32_t checksum_slot(const volatile uint8_t *slot, uint32_t bytes,
-                              uint32_t hash)
-{
-  uint8_t copy[2048];
-  uint32_t done = 0U;
-
-  /* Copy out of the card memory in blocks: one bus read per longword is much
-   * faster than the byte reads a loop over the volatile pointer would do. */
-  while (done < bytes) {
-    uint32_t n = bytes - done;
-
-    if (n > sizeof(copy)) {
-      n = sizeof(copy);
-    }
-    memcpy(copy, (const void *)(slot + done), n);
-    hash = zz9k_mediaout_checksum(hash, copy, n);
-    done += n;
-  }
-  return hash;
 }
 
 int main(int argc, char **argv)
@@ -419,12 +399,6 @@ int main(int argc, char **argv)
                                     : "not host-visible");
     goto done;
   }
-  status = zz9k_alloc_shared(ctx, MEDIAOUT_CHUNK_BYTES, 16U,
-                             ZZ9K_ALLOC_HOST_WINDOW, &feed.buffer);
-  if (status != ZZ9K_STATUS_OK || !feed.buffer.data) {
-    print_error("input buffer", status);
-    goto done;
-  }
   memset(palette, 0, sizeof(palette));
   if ((plan.flags & ZZ9K_MEDIA_OUTPUT_PALETTE_HOST) != 0U) {
     uint8_t bytes[1024];
@@ -442,6 +416,26 @@ int main(int argc, char **argv)
     }
   } else if (plan.depth != 0U) {
     (void)zz9k_media_output_fixed_palette(plan.depth, palette);
+  }
+
+  /* The input buffer takes what the host window has left after the pictures
+   * and the palette: try smaller chunks until one fits. */
+  feed.chunk = MEDIAOUT_CHUNK_BYTES;
+  for (;;) {
+    status = zz9k_alloc_shared(ctx, feed.chunk, 16U, ZZ9K_ALLOC_HOST_WINDOW,
+                               &feed.buffer);
+    if (status == ZZ9K_STATUS_OK && feed.buffer.data) {
+      break;
+    }
+    if (status == ZZ9K_STATUS_OK) {
+      zz9k_free_shared(ctx, feed.buffer.handle);
+      feed.buffer.handle = 0U;
+    }
+    feed.chunk = zz9k_mediaout_smaller_chunk(feed.chunk);
+    if (feed.chunk == 0U) {
+      print_error("input buffer", status);
+      goto done;
+    }
   }
 
   memset(&begin, 0, sizeof(begin));
@@ -565,10 +559,11 @@ int main(int argc, char **argv)
       total_convert_us += (uint32_t)page.value[2];
       total_wait_us += waited;
       if (opts.checksum) {
-        hash = checksum_slot(
+        hash = zz9k_mediaout_checksum_picture(
+            &plan,
             (const volatile uint8_t *)pictures.data +
                 (slot != 0U ? plan.slot_stride : 0U),
-            plan.picture_bytes, hash);
+            hash);
         checksum_sum ^= hash;
       }
       printf("picture %4lu pts %9lu slot %lu convert %6lu us wait %6lu us "
@@ -597,9 +592,10 @@ int main(int argc, char **argv)
     printf("%lu pictures in %lu ms", (unsigned long)presented,
            (unsigned long)(elapsed_us / 1000UL));
     if (presented != 0U && elapsed_us != 0U) {
-      printf(" (%lu.%02lu pictures/s)",
-             (unsigned long)((presented * 1000000UL) / elapsed_us),
-             (unsigned long)(((presented * 100000000UL) / elapsed_us) % 100UL));
+      uint64_t rate = zz9k_mediaout_rate_x100(presented, elapsed_us);
+
+      printf(" (%lu.%02lu pictures/s)", (unsigned long)(rate / 100ULL),
+             (unsigned long)(rate % 100ULL));
     }
     printf("\n");
   }
