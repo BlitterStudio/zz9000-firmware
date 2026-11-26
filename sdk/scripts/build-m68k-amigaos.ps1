@@ -3,7 +3,7 @@
 
 param(
   # Same pinned GCC 16 image as build-m68k-amigaos.sh.
-  [string]$Image = "amigadev/crosstools:m68k-amigaos@sha256:f378d9c563501fc1a3b03ce01cca64d35dce58842d421182dd916c82be771e4e",
+  [string]$Image = "amigadev/crosstools:m68k-amigaos@sha256:c745917130aa76b62b069d9d42a2fce8bd91d1a7d580dde778fa77c6c5f38f95",
   # The aar checkout aar.library is built from (client/src); default sdk/aar.
   [string]$AarDir = ""
 )
