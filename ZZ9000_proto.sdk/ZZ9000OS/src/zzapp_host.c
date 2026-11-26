@@ -261,12 +261,49 @@ zzapp_kernel_t *zzapp_runtime_kernel(void)
     return &g_kernel;
 }
 
+/* A scheduler tick that interrupted the app on the core: its frame is where
+ * the app was, in the registers of the app's own mode. Two things read it,
+ * both before the scheduler saves the frame and switches away.
+ *  - The stall watchdog decides in the timer handler and stops the app there;
+ *    the stop's record is filled here, since the handler has no frame. Only a
+ *    frame of user mode holds the app's sp and lr: in an API body the user
+ *    bank is the runtime's own, so the registers are left unknown (zero).
+ *  - The profiler takes the pc of a user-mode frame; a tick that found the app
+ *    inside the runtime has no app pc and counts as dropped. */
+static void app_tick_frame(const zzapp_arm_frame_t *frame,
+                           uint32_t return_adjust)
+{
+    int pid = zzapp_kernel_current_thread();
+    zzapp_rec_t *rec = pid >= 0 ? zzapp_rec_by_pid((uint32_t)pid) : NULL;
+    zzapp_rec_host_t *host;
+    int user;
+    uint32_t pc;
+
+    if (!rec)
+        return;
+    host = &rec->host;
+    user = (frame->spsr & 0x1fU) == ZZAPP_KERNEL_APP_CPSR;
+    pc = frame->exception_lr - return_adjust;
+    if (user && __atomic_load_n(&host->stop_pending, __ATOMIC_ACQUIRE) == 1u &&
+        host->pending_fault == ZZAPP_FAULT_WATCHDOG &&
+        host->pending_pc == 0u && host->pending_sp == 0u &&
+        host->pending_lr == 0u) {
+        host->pending_pc = pc;
+        host->pending_sp = frame->user_sp;
+        host->pending_lr = frame->user_lr;
+    }
+    if (rec->coh.running)
+        zzapp_xport_profile_sample(rec, user, pc);
+}
+
 /* The selected context is restored onto the current exception stack, keeping
  * each exception mode's banked SP on the stack it owns. */
 zzapp_arm_frame_t *zzapp_kernel_arch_dispatch(zzapp_arm_frame_t *frame,
                                                uint32_t source,
                                                uint32_t return_adjust)
 {
+    if (frame && source == (uint32_t)ZZAPP_KERNEL_DISPATCH_TICK)
+        app_tick_frame(frame, return_adjust);
     return zzapp_kernel_switch_frame(&g_kernel, frame,
         (zzapp_kernel_dispatch_t)source, return_adjust);
 }
@@ -710,6 +747,43 @@ void zzapp_host_reset_low_memory(uint32_t pid)
     __atomic_store_n(&rec->host.low_memory_pending, 0u, __ATOMIC_RELAXED);
 }
 
+/* The scheduler tick is the sampling clock: ZZAPP_TICK_HZ ticks a second go to
+ * the app on the core. A sample every n-th tick of the app runs at
+ * ZZAPP_TICK_HZ / n, so the grant is the first divisor n of the tick rate
+ * whose rate does not exceed the request: exact, never above it, and 1 Hz at
+ * the least. (An app that shares the core sees only its own ticks, so its
+ * wall-clock rate is lower still.) */
+#define ZZAPP_TICK_HZ (1000000u / ZZAPP_TICK_US)
+_Static_assert(1000000u % ZZAPP_TICK_US == 0u, "the tick divides a second");
+
+static uint32_t profile_interval(uint32_t hz, uint32_t *granted)
+{
+    uint32_t n;
+
+    for (n = 1u; n < ZZAPP_TICK_HZ; n++)
+        if (ZZAPP_TICK_HZ % n == 0u && ZZAPP_TICK_HZ / n <= hz)
+            break;
+    *granted = ZZAPP_TICK_HZ / n;
+    return n;
+}
+
+/* Load begin: the rate the client asked for (AAR_CB_PROFILE_HZ, 0 is off)
+ * becomes a ring and a grant, or nothing. A rate above the contract's maximum
+ * is refused like a refused allocation: no ring, no grant. */
+static void profile_begin(zzapp_rec_t *rec)
+{
+    uint32_t hz = zzapp_xport_cb_read_client(rec, AAR_CB_PROFILE_HZ);
+    uint32_t granted;
+    uint32_t interval;
+
+    /* An earlier load of this claim leaves no ring behind. */
+    (void)zzapp_xport_profile_close(rec);
+    if (hz == 0u || hz > ZZAPP_PROFILE_HZ_MAX)
+        return;
+    interval = profile_interval(hz, &granted);
+    (void)zzapp_xport_profile_open(rec, granted, interval);
+}
+
 /* Services admitted the record and published the claim (under its lock). */
 void zzapp_host_claimed(uint32_t pid)
 {
@@ -749,6 +823,8 @@ void zzapp_loader_bound(uint32_t card, uint8_t *mem, uint32_t owner,
     zzapp_xport_cb_set_fault(life_rec(), AAR_FAULT_NONE, 0u, 0u, 0u, 0u, 0u,
                              0u);
     cb_put(AAR_CB_EXIT_CODE, 0u);
+    zzapp_xport_cb_set_stack(life_rec(), 0u, NULL, 0u);
+    profile_begin(life_rec());
 }
 
 /* Memory fell below the low-water mark: tell every running app. */
@@ -1060,6 +1136,59 @@ static void snapshot_stop_diagnostics(uint32_t slot)
     host->stop_diagnostics_valid = 1u;
 }
 
+/* The bytes of the app's stack that a fault or a stall snapshot may copy: up
+ * to AAR_CB_STACK_MAX from `sp` upward, only inside the stack the loader
+ * mapped for the app, [stack_base, stack_top) of its window. Nothing outside it
+ * is read, whatever sp holds, and a span that crosses a frame is copied frame
+ * by frame. Returns the bytes copied, 0 for an sp outside the stack. */
+static uint32_t stack_collect(uint32_t slot, uint32_t sp, uint8_t *buf)
+{
+    zzapp_rec_host_t *host = host_slot(slot);
+    zzapp_proc_t *proc = proc_of(slot);
+    uint32_t lo = proc->stack_base;
+    uint32_t hi = proc->stack_top;
+    uint32_t base;
+    uint32_t off;
+    uint32_t want;
+    uint32_t got = 0u;
+
+    if (hi <= lo)
+        return 0u;
+#ifdef ZZAPP_HOST_TEST
+    base = host->card;
+    if (!host->mem || hi > ZZAPP_HOST_WINDOW_BYTES)
+        return 0u;
+#else
+    (void)host;
+    base = ZZAPP_AS_WINDOW_BASE;
+    if (proc->stack_frame_count == 0u ||
+        hi - lo > proc->stack_frame_count * ZZAPP_MEM_FRAME_BYTES)
+        return 0u;
+#endif
+    if (sp < base || sp - base < lo || sp - base >= hi)
+        return 0u;
+    off = sp - base;
+    want = hi - off;
+    if (want > AAR_CB_STACK_MAX)
+        want = AAR_CB_STACK_MAX;
+    while (got < want) {
+        uint32_t room = ZZAPP_MEM_FRAME_BYTES -
+                        ((off + got) & (ZZAPP_MEM_FRAME_BYTES - 1u));
+        uint32_t n = want - got < room ? want - got : room;
+#ifdef ZZAPP_HOST_TEST
+        memcpy(buf + got, host->mem + off + got, n);
+#else
+        const uint8_t *src = proc_alias(off + got, n);
+
+        if (!src)
+            break;
+        memcpy(buf + got, src, n);
+#endif
+        got += n;
+    }
+    return got;
+}
+
 static void request_stop(uint32_t slot, uint32_t fault, uint32_t pc,
                          uint32_t sp, uint32_t lr, uint32_t far,
                          uint32_t fsr, uint32_t cpsr)
@@ -1096,15 +1225,24 @@ static void force_stop_slot(uint32_t slot, uint32_t fault, uint32_t pc,
     zzapp_rec_host_t *host = host_slot(slot);
     zzapp_rec_coherent_t *coh = coherent(slot);
     uint32_t selected;
+    uint32_t terminal;
+    uint8_t stack[AAR_CB_STACK_MAX] = { 0 };
+    uint32_t stack_bytes = 0u;
 
-    (void)cpsr;
     if (!claim_fault(slot))
         return;
     selected = select_teardown_slot(slot);
     coh->running = 0;
     coh->fault = fault;
-    zzapp_xport_cb_set_fault(life_rec(), zzapp_fault_to_aar(fault, fsr), fsr,
-                             cpsr, pc, sp, lr, far);
+    terminal = terminal_reason(host, fault);
+    if (terminal == ZZAPP_END_STALL)
+        /* A stall records where the watchdog found the app, and nothing a
+         * CPU fault would add (spec 5.3). */
+        zzapp_xport_cb_set_fault(life_rec(), AAR_FAULT_NONE, 0u, 0u, pc, sp,
+                                 lr, 0u);
+    else
+        zzapp_xport_cb_set_fault(life_rec(), zzapp_fault_to_aar(fault, fsr),
+                                 fsr, cpsr, pc, sp, lr, far);
     snapshot_stop_diagnostics(slot);
 #if ZZAPP_PERF_COUNTERS && !defined(ZZAPP_HOST_TEST)
     zzapp_svc_counters_report(slot);
@@ -1114,25 +1252,22 @@ static void force_stop_slot(uint32_t slot, uint32_t fault, uint32_t pc,
     zzapp_kernel_perf_request_report(&g_kernel, slot, 1);
 #endif
     zzapp_kernel_stop_app(&g_kernel, slot);
+    /* The snapshot is part of the fault record: it is complete, its size the
+     * last store, before the state and the end reason below are published. */
+    if (terminal == ZZAPP_END_USER_FAULT || terminal == ZZAPP_END_STALL) {
+        stack_bytes = stack_collect(slot, sp, stack);
+        zzapp_xport_cb_set_stack(life_rec(), sp, stack, stack_bytes);
+    }
 #ifndef ZZAPP_HOST_TEST
     {
-        const uint32_t *stk = (const uint32_t *)(uintptr_t)sp;
         uint32_t w[6];
-        uint32_t i;
-        int readable = 1;
 
-        for (i = 0U; i < 6U; ++i) {
-            w[i] = 0U;
-            if (readable && (uintptr_t)(stk + i) >= 0x0b000000U &&
-                (uintptr_t)(stk + i) < 0x11000000U)
-                w[i] = stk[i];
-            else
-                readable = 0;
-        }
-        printf("[app] fault stack: %08lx %08lx %08lx %08lx %08lx %08lx (sp=%08lx)\r\n",
+        memset(w, 0, sizeof(w));
+        memcpy(w, stack, stack_bytes < sizeof(w) ? stack_bytes : sizeof(w));
+        printf("[app] fault stack: %08lx %08lx %08lx %08lx %08lx %08lx (sp=%08lx, %lu bytes)\r\n",
                (unsigned long)w[0], (unsigned long)w[1], (unsigned long)w[2],
                (unsigned long)w[3], (unsigned long)w[4], (unsigned long)w[5],
-               (unsigned long)sp);
+               (unsigned long)sp, (unsigned long)stack_bytes);
         printf("[app] stop slot=%lu fault=%lu reason=%lu pc=%08lx lr=%08lx "
                "far=%08lx fsr=%08lx thread=%lu wake=%lu in_api=%lu "
                "svc=%lu parked=%lu wait=%d\r\n",
@@ -1537,6 +1672,28 @@ static void zzapp_private_timer_disable(void) {}
 
 
 
+/* A damaged canary is found by the system thread, with the app off the core:
+ * the frame the scheduler saved when it left is where the app was, in the
+ * registers of its own mode. A frame of another mode (an API body) or no saved
+ * frame leaves the registers zero. */
+static void canary_fault(uint32_t slot)
+{
+    const zzapp_arm_frame_t *saved =
+        &zzapp_kernel_thread(&g_kernel, slot)->context.frame;
+    uint32_t pc = 0u;
+    uint32_t sp = 0u;
+    uint32_t lr = 0u;
+    uint32_t cpsr = 0u;
+
+    if ((saved->spsr & 0x1fU) == ZZAPP_KERNEL_APP_CPSR) {
+        pc = saved->exception_lr;
+        sp = saved->user_sp;
+        lr = saved->user_lr;
+        cpsr = saved->spsr;
+    }
+    request_stop(slot, ZZAPP_FAULT_DATA, pc, sp, lr, 0, 0, cpsr);
+}
+
 /* The 64-byte canary below the app stack is set in run_app. Docs promise a
  * force-stop with ZZAPP_FAULT_DATA when it is damaged; check it on every
  * service pass. */
@@ -1551,7 +1708,7 @@ static void check_stack_canary(void)
 #ifdef ZZAPP_HOST_TEST
     for (i = 0; i < ZZAPP_CANARY_BYTES; i++) {
         if (host->mem[host->stack_canary + i] != 0xA5u) {
-            request_stop(current_slot(), ZZAPP_FAULT_DATA, 0, 0, 0, 0, 0, 0);
+            canary_fault(current_slot());
             return;
         }
     }
@@ -1563,7 +1720,7 @@ static void check_stack_canary(void)
             return;
         for (i = 0; i < ZZAPP_CANARY_BYTES; i++)
             if (canary[i] != 0xA5u) {
-                request_stop(current_slot(), ZZAPP_FAULT_DATA, 0, 0, 0, 0, 0, 0);
+                canary_fault(current_slot());
                 return;
             }
     }

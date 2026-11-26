@@ -26,7 +26,7 @@
 /* The QUERY reply's ABI words report the AAR API this firmware implements
  * (AAR_API_MAJOR, AAR_API_MINOR in aar/app.h). */
 #define ZZAPP_ABI_MAJOR            0u
-#define ZZAPP_ABI_MINOR            5u
+#define ZZAPP_ABI_MINOR            6u
 
 /* ---- Operations --------------------------------------------------------- */
 

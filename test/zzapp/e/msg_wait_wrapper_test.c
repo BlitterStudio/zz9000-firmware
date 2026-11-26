@@ -1,6 +1,6 @@
 /*
- * aar_msg_wait is the last core slot of the AAR table. libaar reads a slot
- * only when the table's size covers it, so a table cut short before it gives
+ * libaar reads the aar_msg_wait slot only when the table's size covers
+ * it, so a table cut short before it gives
  * the app AAR_E_NOSYS, and so does a covered slot that is NULL.
  *
  * SPDX-License-Identifier: GPL-3.0-or-later
@@ -31,9 +31,6 @@ static int mock_wait(uint32_t timeout_us)
 int main(void)
 {
     static aar_api table;
-
-    CHECK(AAR_API_MINOR == 5u);
-    CHECK(AAR_API_VERSION == 5u);
 
     aar_api_ptr = NULL;
     CHECK(aar_msg_wait(10u) == AAR_E_NOSYS);

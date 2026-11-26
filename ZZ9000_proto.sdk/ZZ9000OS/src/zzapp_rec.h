@@ -253,7 +253,7 @@ typedef struct {
  */
 #define ZZAPP_REC_SERVICES_BYTES 1024U
 #define ZZAPP_REC_LOADER_BYTES   384U
-#define ZZAPP_REC_SVC_BYTES      1152U
+#define ZZAPP_REC_SVC_BYTES      1440U /* includes counters for the GL 1.1 tail */
 #define ZZAPP_REC_DECODE_BYTES   64U
 
 typedef struct {

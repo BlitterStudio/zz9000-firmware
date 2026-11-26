@@ -34,3 +34,11 @@ $(BUILD)/i/life_test: i/life_test.c $(LIFE_TEST_OBJS) $(LIFE_TEST_SOURCES) $(FW)
 	$(CC) $(ZZAPP_HARNESS_CFLAGS) -DSMP_LOCK_HOST_TEST -DMMU_PAGE_HOST_TEST \
 		-I../card_pool -I../mmu/mock -o $@ i/life_test.c $(LIFE_TEST_OBJS) \
 		$(LIFE_TEST_SOURCES)
+
+# The fault stack snapshot, the stall record and the profiler, over the same
+# runtime objects as life_test.
+$(BUILD)/i/fault_profile_test: i/fault_profile_test.c $(LIFE_TEST_OBJS) $(LIFE_TEST_SOURCES) $(FW)/zzapp_xport.h $(FW)/zzapp_state.h $(FW)/zzapp_kernel.h | $(BUILD)
+	@mkdir -p $(dir $@)
+	$(CC) $(ZZAPP_HARNESS_CFLAGS) -DSMP_LOCK_HOST_TEST -DMMU_PAGE_HOST_TEST \
+		-I../card_pool -I../mmu/mock -o $@ i/fault_profile_test.c $(LIFE_TEST_OBJS) \
+		$(LIFE_TEST_SOURCES)
