@@ -27,8 +27,17 @@ struct blk {
 	uint32_t prev;      /* size of the preceding block, 0 for the first */
 };
 
-static struct sdk_vorbis_heap *active;
-static jmp_buf *active_fail;
+/* The core-1 SDK and the core-0 audio-ring decoder can run Tremor at the
+ * same time. Each core selects its own arena and out-of-memory jump target,
+ * so one core's selection, failure or teardown cannot redirect or longjmp
+ * the other's allocations. */
+static struct sdk_vorbis_heap *active[2];
+static jmp_buf *active_fail[2];
+
+static unsigned core_slot(void)
+{
+	return (unsigned)smp_cpu_id() & 1U;
+}
 
 static struct blk *blk_at(uint8_t *base, uint32_t off)
 {
@@ -42,8 +51,8 @@ static uint32_t blk_size(const struct blk *b)
 
 static void *alloc_fail(void)
 {
-	if (active_fail)
-		longjmp(*active_fail, 1);
+	if (active_fail[core_slot()])
+		longjmp(*active_fail[core_slot()], 1);
 	return 0;
 }
 
@@ -159,7 +168,7 @@ static uint32_t block_need(size_t size)
 
 void *sdk_vorbis_malloc(size_t size)
 {
-	struct sdk_vorbis_heap *h = active;
+	struct sdk_vorbis_heap *h = active[core_slot()];
 	uint32_t need;
 	unsigned r;
 	int slot;
@@ -220,7 +229,7 @@ void *sdk_vorbis_calloc(size_t count, size_t size)
 
 void sdk_vorbis_free(void *ptr)
 {
-	struct sdk_vorbis_heap *h = active;
+	struct sdk_vorbis_heap *h = active[core_slot()];
 	struct blk *b, *next;
 	uint8_t *base;
 	uint32_t off, size;
@@ -257,7 +266,7 @@ void sdk_vorbis_free(void *ptr)
 
 void *sdk_vorbis_realloc(void *ptr, size_t size)
 {
-	struct sdk_vorbis_heap *h = active;
+	struct sdk_vorbis_heap *h = active[core_slot()];
 	struct blk *b, *next;
 	uint8_t *base;
 	uint32_t off, cur, need;
@@ -335,10 +344,24 @@ void sdk_vorbis_heap_set_region_ops(
 	heap->region_context = context;
 }
 
+/* A heap is selected by one core at a time. Dropping it clears that core's
+ * selection and leaves the other core's untouched. */
+static void forget_selection(const struct sdk_vorbis_heap *heap)
+{
+	unsigned c;
+
+	for (c = 0U; c < 2U; c++) {
+		if (active[c] == heap) {
+			active[c] = 0;
+			active_fail[c] = 0;
+		}
+	}
+}
+
 void sdk_vorbis_heap_select(struct sdk_vorbis_heap *heap, jmp_buf *fail)
 {
-	active = heap;
-	active_fail = fail;
+	active[core_slot()] = heap;
+	active_fail[core_slot()] = fail;
 }
 
 void sdk_vorbis_heap_release(struct sdk_vorbis_heap *heap)
@@ -350,10 +373,7 @@ void sdk_vorbis_heap_release(struct sdk_vorbis_heap *heap)
 	for (r = 0U; r < SDK_VORBIS_HEAP_MAX_REGIONS; r++)
 		if (heap->region[r])
 			region_drop(heap, r);
-	if (active == heap) {
-		active = 0;
-		active_fail = 0;
-	}
+	forget_selection(heap);
 }
 
 void sdk_vorbis_heap_forget(struct sdk_vorbis_heap *heap)
@@ -364,10 +384,7 @@ void sdk_vorbis_heap_forget(struct sdk_vorbis_heap *heap)
 	memset(heap->region_bytes, 0, sizeof(heap->region_bytes));
 	memset(heap->region_hint, 0, sizeof(heap->region_hint));
 	heap->used = 0U;
-	if (active == heap) {
-		active = 0;
-		active_fail = 0;
-	}
+	forget_selection(heap);
 }
 
 unsigned sdk_vorbis_heap_regions(const struct sdk_vorbis_heap *heap)

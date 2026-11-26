@@ -374,6 +374,17 @@ remaining budget and the decoder may need to parse headers first.
 Requests to core 0 wait for the pass; its elapsed time on the card has
 not been measured.
 
+The SDK audio stream service decodes FLAC and Vorbis on core 1 while a codec
+lease decodes on core 0. The libFLAC wrappers (`sdk_flac_alloc.c`) and the
+Tremor arena allocator (`sdk_vorbis_alloc.c`) therefore keep one allocation
+context per core: the stream quota, card-pool owner and failure flag for
+libFLAC, and the selected arena and out-of-memory jump target for Tremor.
+A decoder call on one core never changes what the other core allocates
+from, and an out-of-memory jump never lands in the other core's call. A
+decode pass runs to completion on its core, so one context per core is
+enough, and neither the formatter interrupt nor the other core waits on a
+lock. MP3 keeps all its state in the stream session and shares nothing.
+
 The resampler accepts 8000, 11025, 12000, 16000, 22050, 24000, 32000,
 44100, 48000, 88200 and 96000 Hz. Compressed streams at 176400 and
 192000 Hz are reduced by two before resampling. PCM FIFO allocations
