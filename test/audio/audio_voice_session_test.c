@@ -339,7 +339,7 @@ static void lease_start(void)
 
 	memset(&g_lease, 0, sizeof(g_lease));
 	check(audio_fabric_ring_acquire(AUDIO_FABRIC_SLOT_MAILBOX,
-		SDK_AUDIO_METER_IDENTITY_MEDIA, 128U, 0U, &grant) ==
+		SDK_AUDIO_METER_IDENTITY_MEDIA, 128U, 0U, 0U, &grant) ==
 		AUDIO_FABRIC_LEASE_OK, "peer: acquire", "");
 	g_lease.generation = grant.generation;
 	for (i = 0U; i + 1U < RING_TEST_CAPACITY; i += 2U) {

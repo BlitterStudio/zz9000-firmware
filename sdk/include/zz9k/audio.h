@@ -216,6 +216,12 @@ static inline int zz9k_audio_build_ring_acquire_desc(
       (flags & ~ZZ9K_AUDIO_RING_ACQUIRE_FLAG_KNOWN) != 0U) {
     return 0;
   }
+  if ((flags & (ZZ9K_AUDIO_RING_ACQUIRE_FLAG_CODEC |
+                ZZ9K_AUDIO_RING_ACQUIRE_FLAG_SOURCE_RATE)) ==
+      (ZZ9K_AUDIO_RING_ACQUIRE_FLAG_CODEC |
+       ZZ9K_AUDIO_RING_ACQUIRE_FLAG_SOURCE_RATE)) {
+    return 0;
+  }
   if ((flags & ZZ9K_AUDIO_RING_ACQUIRE_FLAG_SOURCE_RATE) != 0U
           ? !zz9k_audio_ring_rate_known(source_rate_hz)
           : source_rate_hz != 0U) {
@@ -288,6 +294,11 @@ typedef struct ZZ9KAudioRingFirmwareSnapshot {
   uint32_t generation;
   uint64_t consumed_cursor;
   uint32_t status;
+  uint32_t stream_seq;
+  uint32_t decode_state;
+  uint32_t decode_error;
+  uint32_t decoded_rate;
+  uint32_t decoded_channels;
 } ZZ9KAudioRingFirmwareSnapshot;
 
 /* A seqlock read is stable only when the sequence word did not move
@@ -369,6 +380,11 @@ static inline int zz9k_audio_ring_firmware_snapshot(
   out->consumed_cursor = zz9k_media_u64_from_be(line->consumed_cursor_hi,
                                                 line->consumed_cursor_lo);
   out->status = zz9k_get_be32(line->status);
+  out->stream_seq = zz9k_get_be32(line->stream_seq);
+  out->decode_state = zz9k_get_be32(line->decode_state);
+  out->decode_error = zz9k_get_be32(line->decode_error);
+  out->decoded_rate = zz9k_get_be32(line->decoded_rate);
+  out->decoded_channels = zz9k_get_be32(line->decoded_channels);
   sequence_after = zz9k_get_be32(line->sequence);
   return zz9k_audio_ring_seqlock_stable(sequence_before, sequence_after);
 }
@@ -435,6 +451,10 @@ static inline int zz9k_audio_ring_grant_valid(
     if (!zz9k_audio_ring_rate_known(grant->source_rate)) {
       return 0;
     }
+  } else if (grant->sample_contract == ZZ9K_AUDIO_RING_CONTRACT_CODEC_STREAM) {
+    if (grant->source_rate != 0U) {
+      return 0;
+    }
   } else {
     return 0;
   }
@@ -469,6 +489,10 @@ static inline int zz9k_audio_ring_grant_matches_desc(
 {
   if (!desc || !grant) {
     return 0;
+  }
+  if ((desc->flags & ZZ9K_AUDIO_RING_ACQUIRE_FLAG_CODEC) != 0U) {
+    return grant->sample_contract == ZZ9K_AUDIO_RING_CONTRACT_CODEC_STREAM &&
+           grant->source_rate == 0U;
   }
   if ((desc->flags & ZZ9K_AUDIO_RING_ACQUIRE_FLAG_SOURCE_RATE) != 0U) {
     return grant->sample_contract ==

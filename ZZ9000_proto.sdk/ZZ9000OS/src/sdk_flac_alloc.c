@@ -25,59 +25,76 @@ union sdk_flac_alloc_header {
 	double align_d;
 };
 
-static size_t *active_used;
-static size_t *active_peak;
-static size_t active_limit;
-static uint32_t active_owner;
-static int active_failed;
+/* The per-stream accounting and owner are selected by the caller before each
+ * libFLAC call. The core-1 SDK and the core-0 audio-ring decoder run libFLAC
+ * at the same time, so each core keeps its own context: one core's quota,
+ * owner or failure flag never leaks into the other's allocations. A decode
+ * call is never preempted by another decoder on the same core. */
+struct flac_alloc_ctx {
+	size_t *used;
+	size_t *peak;
+	size_t limit;
+	uint32_t owner;
+	int failed;
+};
+
+static struct flac_alloc_ctx g_ctx[2];
+
+static struct flac_alloc_ctx *ctx(void)
+{
+	return &g_ctx[(unsigned)smp_cpu_id() & 1U];
+}
 
 void sdk_flac_alloc_set_quota(size_t *used, size_t *peak, size_t limit)
 {
-	active_used = used;
-	active_peak = peak;
-	active_limit = limit;
-	active_failed = 0;
+	struct flac_alloc_ctx *c = ctx();
+
+	c->used = used;
+	c->peak = peak;
+	c->limit = limit;
+	c->failed = 0;
 }
 
 void sdk_flac_alloc_set_owner(uint32_t owner)
 {
-	active_owner = owner;
+	ctx()->owner = owner;
 }
 
 int sdk_flac_alloc_failed(void)
 {
-	return active_failed;
+	return ctx()->failed;
 }
 
 void *sdk_flac_malloc(size_t size)
 {
+	struct flac_alloc_ctx *c = ctx();
 	union sdk_flac_alloc_header *header;
 	size_t total;
 
 	if (size > SIZE_MAX - sizeof(*header))
 		goto fail;
 	total = sizeof(*header) + size;
-	if (active_used && (total > active_limit ||
-	                    *active_used > active_limit - total))
+	if (c->used && (total > c->limit ||
+	                *c->used > c->limit - total))
 		goto fail;
-	if (active_owner == 0U && smp_cpu_id() == 1 &&
+	if (c->owner == 0U && smp_cpu_id() == 1 &&
 	    sdk_decode_tracked_count() >= SDK_DECODE_MAX_TRACKED)
 		goto fail;
 	header = (union sdk_flac_alloc_header *)sdk_decode_heap_alloc_owned(
-		total, active_owner != 0U ? active_owner : SDK_DECODE_POOL_OWNER);
+		total, c->owner != 0U ? c->owner : SDK_DECODE_POOL_OWNER);
 	if (!header)
 		goto fail;
 	header->h.size = total;
-	header->h.used = active_used;
+	header->h.used = c->used;
 	if (header->h.used) {
 		*header->h.used += total;
-		if (active_peak && *header->h.used > *active_peak)
-			*active_peak = *header->h.used;
+		if (c->peak && *header->h.used > *c->peak)
+			*c->peak = *header->h.used;
 	}
 	return header + 1;
 
 fail:
-	active_failed = 1;
+	c->failed = 1;
 	return 0;
 }
 
@@ -86,7 +103,7 @@ void *sdk_flac_calloc(size_t count, size_t size)
 	void *ptr;
 
 	if (count != 0U && size > SIZE_MAX / count) {
-		active_failed = 1;
+		ctx()->failed = 1;
 		return 0;
 	}
 	ptr = sdk_flac_malloc(count * size);

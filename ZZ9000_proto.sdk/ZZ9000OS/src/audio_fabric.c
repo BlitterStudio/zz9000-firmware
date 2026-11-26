@@ -117,7 +117,8 @@ void audio_fabric_host_set_tx_base(uint8_t *base)
  * ahead, and the queued-period rebuild replays at most the TX ring. */
 static uint8_t g_lease_staging
 	[AUDIO_FABRIC_LEASE_SLOTS]
-	[AUDIO_FABRIC_LEASE_STAGING_PERIODS * AUDIO_FABRIC_PERIOD_BYTES];
+	[AUDIO_FABRIC_LEASE_STAGING_PERIODS * AUDIO_FABRIC_PERIOD_BYTES]
+	__attribute__((aligned(64)));
 
 uint8_t *fabric_lease_staging_ring(uint32_t slot)
 {
@@ -235,8 +236,9 @@ static uint32_t fabric_catchup_ready_count(void)
 		if (l->ring != NULL && l->line_valid && l->paused == 0U &&
 		    !l->tearing) {
 			if (s->preconvert.active) {
-				if (l->write_cursor > s->preconvert.src_consumed ||
-				    s->preconvert.staged > s->preconvert.consumed)
+				if (s->preconvert.staged > s->preconvert.consumed ||
+				    (!l->codec.enabled &&
+				     l->write_cursor > s->preconvert.src_consumed))
 					count++;
 			} else if (l->write_cursor > l->consumed) {
 				count++;
@@ -456,16 +458,32 @@ void audio_fabric_bench_poll(void)
 }
 #endif /* AUDIO_FABRIC_BENCH */
 
-/* Lease balance scale (post-fill pass, shared by every fill path). */
-static void fabric_apply_lease_gain(struct audio_fabric_slot *s)
+/* Lease balance scale (post-fill pass, shared by every fill path). A
+ * compressed codec lease period also takes the live stream_gain; the
+ * period's own mode decides, not the decoder's current stream, which can
+ * already be the next one when a staged tail fills the TX ring. */
+static int fabric_staged_compressed(const struct audio_fabric_slot *s,
+	uint32_t seq)
 {
-	if (s->gain != AUDIO_FABRIC_GAIN_UNITY) {
+	return s->lease.codec.enabled &&
+		s->preconvert.compressed[seq % AUDIO_FABRIC_LEASE_STAGING_PERIODS];
+}
+
+static void fabric_apply_lease_gain(struct audio_fabric_slot *s, int compressed)
+{
+	uint32_t gain = s->gain;
+	uint32_t shift = 7U;
+
+	if (compressed && s->lease.codec.gain < 32767U) {
+		gain = gain * s->lease.codec.gain >> 7;
+		shift = 15U;
+	}
+	if (gain != (1U << shift)) {
 		int16_t *out = (int16_t *)g_fabric_stereo;
-		uint32_t g = s->gain;
 		uint32_t i;
 
 		for (i = 0U; i < AUDIO_FABRIC_PERIOD_BYTES / 2U; i++) {
-			int32_t v = ((int32_t)out[i] * (int32_t)g) >> 7;
+			int32_t v = ((int32_t)out[i] * (int32_t)gain) >> shift;
 
 			if (v > 32767)
 				v = 32767;
@@ -513,7 +531,8 @@ static uint32_t fabric_slot_fill_lease_preconvert(
 	offset = (seq % AUDIO_FABRIC_LEASE_STAGING_PERIODS) *
 		AUDIO_FABRIC_PERIOD_BYTES;
 	memcpy(g_fabric_stereo, ring + offset, AUDIO_FABRIC_PERIOD_BYTES);
-	cost = p->cost[seq % AUDIO_FABRIC_LEASE_STAGING_PERIODS];
+	cost = s->lease.codec.enabled ? AUDIO_FABRIC_PERIOD_BYTES :
+		p->cost[seq % AUDIO_FABRIC_LEASE_STAGING_PERIODS];
 	if (!s->ops->stage(cost)) {
 		/* Tearing raced in: consumed stays, so the same staged
 		 * period is re-offered next pass. */
@@ -521,7 +540,7 @@ static uint32_t fabric_slot_fill_lease_preconvert(
 	}
 	p->consumed += AUDIO_FABRIC_PERIOD_BYTES;
 	s->staged_seq[index] = seq;
-	fabric_apply_lease_gain(s);
+	fabric_apply_lease_gain(s, fabric_staged_compressed(s, seq));
 	return cost;
 }
 
@@ -693,7 +712,7 @@ static uint32_t fabric_slot_fill(struct audio_fabric_slot *s,
 	/* Lease gain (0..255 mixer scale; unity skips the pass so the
 	 * pump's bit-identical parity is untouched): one saturating
 	 * clamp per frame, then the shared mix clamps again. */
-	fabric_apply_lease_gain(s);
+	fabric_apply_lease_gain(s, 0);
 	return pull;
 silence:
 	/* The caller commits either the mix (this slot adds nothing) or a
@@ -786,7 +805,7 @@ static uint32_t fabric_rebuild_pull(struct audio_fabric_slot *s,
 		offset = (seq % AUDIO_FABRIC_LEASE_STAGING_PERIODS) *
 			AUDIO_FABRIC_PERIOD_BYTES;
 		memcpy(slot, staging + offset, AUDIO_FABRIC_PERIOD_BYTES);
-		fabric_apply_lease_gain(s);
+		fabric_apply_lease_gain(s, fabric_staged_compressed(s, seq));
 		return want;
 	}
 	src_frames = rate / 50U;
@@ -857,7 +876,7 @@ static uint32_t fabric_rebuild_pull(struct audio_fabric_slot *s,
 		g_fabric_host_isr_conversions++;
 #endif
 	}
-	fabric_apply_lease_gain(s);
+	fabric_apply_lease_gain(s, 0);
 	return want;
 }
 

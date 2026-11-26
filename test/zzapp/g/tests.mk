@@ -16,6 +16,36 @@ $(BUILD)/g/decode_owner_test: $(DECODE_OWNER_TEST_SOURCES) $(FW)/sdk_compression
 	@mkdir -p $(dir $@)
 	$(CC) $(ZZAPP_HARNESS_CFLAGS) -DSMP_LOCK_HOST_TEST -I../card_pool -o $@ $(DECODE_OWNER_TEST_SOURCES)
 
+# The core-0 audio ring decoder against the production core-1 reset reclaim,
+# over the real card pool, libFLAC and Tremor (the host archives are built by
+# the FLAC and Vorbis suites' scripts).
+LEASE_FLAC_HOST := $(FW)/../build/deps/flac/1.5.0/host
+LEASE_VORBIS_HOST := $(FW)/../build/deps/vorbis/ogg-1.3.6-tremor-820fb3237ea8/host
+LEASE_RECLAIM_LIBS := $(LEASE_FLAC_HOST)/libflacdec.a $(LEASE_VORBIS_HOST)/libvorbisdec.a
+LEASE_RECLAIM_SOURCES := g/lease_reclaim_test.c $(FW)/sdk_decode_owners.c \
+	$(FW)/sdk_decode_heap.c \
+	$(FW)/audio_fabric_stream_codec.c $(FW)/sdk_audio_stream.c \
+	$(FW)/sdk_audio_stream_native.c $(FW)/sdk_audio_flac.c \
+	$(FW)/sdk_audio_vorbis.c $(FW)/sdk_flac_alloc.c $(FW)/sdk_vorbis_alloc.c \
+	$(FW)/sdk_decode_reclaim.c $(FW)/audio_reduce.c $(FW)/mp3/decode_mp3.c \
+	$(FW)/card_pool.c $(FW)/sdk_smp_lock.c ../card_pool/host_card_pool.c
+
+$(LEASE_FLAC_HOST)/libflacdec.a:
+	cd ../.. && bash ./build_flac.sh --host
+
+$(LEASE_VORBIS_HOST)/libvorbisdec.a:
+	cd ../.. && bash ./build_vorbis.sh --host
+
+$(BUILD)/g/lease_reclaim_test: $(LEASE_RECLAIM_SOURCES) $(LEASE_RECLAIM_LIBS) \
+	$(FW)/sdk_compression.h $(FW)/audio_fabric_codec.h $(FW)/zzapp_rec.h \
+	../flac/flac_fixtures.h | $(BUILD)
+	@mkdir -p $(dir $@)
+	$(CC) $(ZZAPP_HARNESS_CFLAGS) -DSMP_LOCK_HOST_TEST \
+		-DVORBIS_FIXTURE='"../vorbis/fixtures/stereo44k.ogg"' \
+		-I../card_pool -I../audio/mock -I../flac \
+		-I$(LEASE_FLAC_HOST)/include -I$(LEASE_VORBIS_HOST)/include \
+		-o $@ $(LEASE_RECLAIM_SOURCES) $(LEASE_RECLAIM_LIBS) -lm
+
 # Decode sessions (zzapp_api.c) on a real record arena and scheduler; the host
 # runtime, the decode heap and the image stream are doubles in the test.
 DECODE_SESSIONS_TEST_SOURCES := g/decode_sessions_test.c $(FW)/zzapp_api.c \
