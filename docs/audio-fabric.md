@@ -319,15 +319,21 @@ the compressed track gain by the lease gain as it fills new TX periods.
 
 To start a track, publish a new serial, codec, and start cursor. Write
 the file bytes at or above that cursor and publish the write cursor
-after the writes. The grant's byte cursors are monotonic across tracks;
-the start cursor must be between the consumed and published write
-cursors. A new serial without `APPEND` flushes the old input, staging,
-and queued TX periods. A stop marker does the same without starting
-another stream. It takes effect on the next formatter tick and leaves
-at most the period the DMA is playing. A plain PCM lease also flushes
-when it sees a changed nonzero serial and a valid start cursor. It
+after the writes. The grant's byte cursors are monotonic across tracks. The
+start cursor must be at or above the consumed (credit)
+cursor the lease publishes and at or below the published write cursor. The
+same bound holds for plain PCM and codec leases, and PCM that is staged
+but not yet credited does not tighten it: a start equal to the published
+credit is valid. A new serial without `APPEND` flushes the old input,
+staging, and queued TX periods; a stop marker does the same without
+starting another stream. It takes effect on the next formatter tick and
+leaves at most the period the DMA is playing. A plain PCM lease also
+flushes when it sees a changed nonzero serial and a valid start cursor. It
 echoes the serial, credits the discarded bytes, and ignores the other
-marker fields. Leave the marker words zero for legacy behavior.
+marker fields. A start below the credit is not a valid flush: a plain
+lease ignores the marker and does not echo the serial, a codec lease
+reports `BAD_MARKER` for it. The credit never moves back. Leave the marker
+words zero for legacy behavior.
 
 Set `END` with the last published byte cursor to drain. To loop, append
 the next serial with `APPEND` and the previous stream's end cursor as

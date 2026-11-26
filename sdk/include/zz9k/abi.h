@@ -1440,7 +1440,9 @@ typedef struct ZZ9KAudioControlStateResultPayload {
  *
  * A changed nonzero stream_seq marks stream_start (the write cursor before
  * the first byte of the new stream). Firmware drops queued periods and
- * discards bytes below that cursor, unless a codec lease uses APPEND.
+ * discards bytes below that cursor, unless a codec lease uses APPEND. The
+ * start must lie between the credit cursor the lease publishes and the
+ * write cursor, whatever PCM is staged but not yet credited.
  * Leave the marker words zero for the original PCM lease behavior.
  * stream_param is zero except for raw PCM. stream_gain is 0..32767
  * (mute to unity) for MP3, FLAC, and Vorbis. */

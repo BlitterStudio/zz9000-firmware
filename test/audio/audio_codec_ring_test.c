@@ -5,6 +5,7 @@
 #include <string.h>
 
 #include "audio_fabric_codec.h"
+#include "audio_fabric_internal.h"
 #include "fabric_test_common.h"
 #include "flac_fixtures.h"
 #include "host_card_pool.h"
@@ -294,6 +295,112 @@ static void test_flush(uint32_t flags, uint32_t rate)
 	      "idle paused lease does not expire", NULL);
 }
 
+/* The playing period's polarity: +7000 is the old track, -7000 the new one. */
+static void polarity(const uint8_t *period, unsigned *old_pcm, unsigned *new_pcm)
+{
+	*old_pcm = *new_pcm = 0U;
+	for (uint32_t i = 0; i + 1U < TICK_BYTES; i += 2U) {
+		int16_t s;
+
+		memcpy(&s, period + i, 2U);
+		if (s > 500)
+			(*old_pcm)++;
+		else if (s < -500)
+			(*new_pcm)++;
+	}
+}
+
+/* A new serial whose start is the credit cursor the lease publishes (the
+ * documented bound) must flush while PCM is staged but not yet retired,
+ * for plain and codec leases alike. The same call with a start below the
+ * credit is rejected without moving a cursor. Starts at `base`, so the
+ * advertised credit is nonzero. */
+static void test_flush_at_credit(uint32_t flags, uint32_t rate, uint64_t base)
+{
+	static int16_t old_pcm[12U * TICK_BYTES / 2U];
+	static int16_t new_pcm[16U * TICK_BYTES / 2U];
+	const int codec = (flags & SDK_AUDIO_RING_ACQUIRE_FLAG_CODEC) != 0U;
+	const char *mode = codec ? "codec" : "plain";
+	const uint64_t old_end = base + sizeof(old_pcm);
+	uint64_t credit, floor, new_end;
+	/* A codec stream shorter than the decoder's preroll plays only once
+	 * its end is known; a plain lease plays at once. */
+	const uint32_t end_flag = codec ? SDK_AUDIO_RING_STREAM_FLAG_END : 0U;
+	unsigned old_seen, new_seen, old_after = 0U, new_periods = 0U;
+	const struct audio_fabric_slot *s;
+
+	begin(rate, flags);
+	s = fabric_slot(SLOT);
+	for (uint32_t i = 0; i < sizeof(old_pcm) / sizeof(old_pcm[0]); i++)
+		old_pcm[i] = 7000;
+	for (uint32_t i = 0; i < sizeof(new_pcm) / sizeof(new_pcm[0]); i++)
+		new_pcm[i] = -7000;
+	write_bytes(base, (const uint8_t *)old_pcm, sizeof(old_pcm));
+	for (unsigned i = 0; i < 4U; i++) {
+		publish(1U, SDK_AUDIO_RING_CODEC_PCM, base, old_end, 0U, 0U, 32767U);
+		play_tick();
+	}
+	credit = consumed();
+	floor = credit;
+	check(credit >= base && get32(fw->stream_seq) == 1U,
+	      "first track acknowledged", fmt("%s credit %llu base %llu", mode,
+		(unsigned long long)credit, (unsigned long long)base));
+	if (!codec)
+		check(s->lease.consumed > credit, "PCM is staged beyond the public credit",
+		      fmt("staged %llu credit %llu", (unsigned long long)s->lease.consumed,
+			(unsigned long long)credit));
+	else
+		check(s->preconvert.staged != s->preconvert.consumed,
+		      "decoded PCM is staged", NULL);
+
+	/* Flush at exactly the advertised credit. The write cursor never moves
+	 * back, so the new track rewrites the ring from the credit past the old
+	 * write cursor. */
+	new_end = old_end + 3U * TICK_BYTES;
+	write_bytes(credit, (const uint8_t *)new_pcm, (uint32_t)(new_end - credit));
+	publish(2U, SDK_AUDIO_RING_CODEC_PCM, credit, new_end, 0U, end_flag, 32767U);
+	play_tick();
+	check(get32(fw->stream_seq) == 2U && get32(fw->status) == SDK_AUDIO_RING_STATUS_OK &&
+	      get32(fw->decode_error) == SDK_AUDIO_RING_DECODE_ERR_NONE,
+	      "flush at the credit is acknowledged", fmt("%s serial %u status %u err %u", mode,
+		get32(fw->stream_seq), get32(fw->status), get32(fw->decode_error)));
+	check(consumed() >= credit, "credit does not move back", NULL);
+	floor = consumed();
+	for (unsigned i = 0; i < 20U; i++) {
+		polarity(g_fabric_tx + g_dma_count % AUDIO_TX_BUFFER_SIZE, &old_seen, &new_seen);
+		/* The period already playing at the flush may still be old. A few
+		 * positive samples at the edges of the new track are the
+		 * resampler's ringing, not old audio. */
+		old_after += i != 0U && old_seen > 64U;
+		new_periods += new_seen > 64U;
+		publish(2U, SDK_AUDIO_RING_CODEC_PCM, credit, new_end, 0U, end_flag, 32767U);
+		play_tick();
+		check(consumed() >= floor, "credit never moves back", NULL);
+		floor = consumed();
+	}
+	check(old_after == 0U, "old contributions are dropped", fmt("%s: %u old periods", mode, old_after));
+	check(new_periods >= 2U, "audio after the start plays", fmt("%s: %u new periods", mode, new_periods));
+	check(new_end - consumed() < TICK_BYTES, "new track is credited", fmt("%s credit %llu end %llu", mode,
+		(unsigned long long)consumed(), (unsigned long long)new_end));
+
+	/* A start below the credit is not a valid flush. */
+	credit = consumed();
+	publish(3U, SDK_AUDIO_RING_CODEC_PCM, credit - 4U, new_end, 0U, 0U, 32767U);
+	for (unsigned i = 0; i < 3U; i++) {
+		play_tick();
+		check(consumed() >= credit, "invalid start does not move the credit back", NULL);
+	}
+	if (codec)
+		check(get32(fw->stream_seq) == 3U && get32(fw->decode_error) ==
+		      SDK_AUDIO_RING_DECODE_ERR_BAD_MARKER,
+		      "codec start below the credit is a bad marker", fmt("serial %u err %u",
+			get32(fw->stream_seq), get32(fw->decode_error)));
+	else
+		check(get32(fw->stream_seq) == 2U, "plain start below the credit is not acknowledged",
+		      fmt("serial %u", get32(fw->stream_seq)));
+	check(get32(fw->status) == SDK_AUDIO_RING_STATUS_OK, "invalid start does not revoke", NULL);
+}
+
 static void test_error(int eof_before_append)
 {
 	/* Correct magic, short STREAMINFO. Exercise both sides of the race
@@ -364,6 +471,12 @@ int main(void)
 	decode_file(SDK_AUDIO_RING_CODEC_VORBIS, data, len, 44100U, 2U, 0U);
 	test_loop();
 	test_loop_seam();
+	test_flush_at_credit(SDK_AUDIO_RING_ACQUIRE_FLAG_IDLE_PAUSED, 0U, 0U);
+	test_flush_at_credit(SDK_AUDIO_RING_ACQUIRE_FLAG_IDLE_PAUSED, 0U, 5000U);
+	test_flush_at_credit(SDK_AUDIO_RING_ACQUIRE_FLAG_IDLE_PAUSED |
+	                     SDK_AUDIO_RING_ACQUIRE_FLAG_SOURCE_RATE, 44100U, 5000U);
+	test_flush_at_credit(CODEC_FLAGS, 0U, 0U);
+	test_flush_at_credit(CODEC_FLAGS, 0U, 5000U);
 	test_flush(CODEC_FLAGS, 0U);
 	test_flush(SDK_AUDIO_RING_ACQUIRE_FLAG_IDLE_PAUSED, 0U);
 	test_flush(SDK_AUDIO_RING_ACQUIRE_FLAG_IDLE_PAUSED | SDK_AUDIO_RING_ACQUIRE_FLAG_SOURCE_RATE, 44100U);

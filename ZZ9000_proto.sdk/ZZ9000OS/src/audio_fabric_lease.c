@@ -508,6 +508,16 @@ static void fabric_ring_age_or_revoke(uint32_t slot,
 			SDK_AUDIO_RING_STATUS_REVOKED_HEARTBEAT);
 }
 
+/* A new serial's start cursor is valid from the credit cursor the lease
+ * publishes up to the producer's write cursor, for plain PCM and codec
+ * leases alike. The internal staged cursor does not bound it: PCM staged
+ * ahead of the DMA is not credited yet, and a flush discards it. */
+static int fabric_start_valid(const struct audio_fabric_lease *l,
+	uint64_t start, uint64_t write)
+{
+	return start >= l->credited && start <= write;
+}
+
 static void fabric_ring_flush(uint32_t slot, uint64_t start)
 {
 	struct audio_fabric_slot *s = fabric_slot(slot);
@@ -576,7 +586,7 @@ static void fabric_codec_tick(uint32_t slot,
 		if (m->codec > SDK_AUDIO_RING_CODEC_VORBIS &&
 		    m->codec != SDK_AUDIO_RING_CODEC_NONE)
 			error = SDK_AUDIO_RING_DECODE_ERR_BAD_CODEC;
-		else if (m->start < l->credited || m->start > view->write ||
+		else if (!fabric_start_valid(l, m->start, view->write) ||
 		    (view->stream_flags & ~SDK_AUDIO_RING_STREAM_FLAG_KNOWN) != 0U ||
 		    (m->codec != SDK_AUDIO_RING_CODEC_PCM && m->param != 0U) ||
 		    (append && (c->next.seq != 0U ||
@@ -641,11 +651,7 @@ static uint64_t fabric_write_base(const struct audio_fabric_lease *l,
 	if (l->codec.enabled)
 		flush = fabric_codec_is_new(&l->codec, view) &&
 			(view->stream_flags & SDK_AUDIO_RING_STREAM_FLAG_APPEND) == 0U;
-	if (flush && view->stream.start >= l->consumed && !l->codec.enabled &&
-	    view->stream.start <= view->write)
-		return view->stream.start;
-	if (flush && l->codec.enabled && view->stream.start >= l->credited &&
-	    view->stream.start <= view->write)
+	if (flush && fabric_start_valid(l, view->stream.start, view->write))
 		return view->stream.start;
 	return l->credited;
 }
@@ -739,7 +745,7 @@ void fabric_lease_isr_tick(void)
 			continue;
 		}
 		if (view.stream.seq != 0U && view.stream.seq != l->stream_seq &&
-		    view.stream.start >= l->consumed && view.stream.start <= view.write) {
+		    fabric_start_valid(l, view.stream.start, view.write)) {
 			fabric_ring_flush(slot, view.stream.start);
 			l->stream_seq = view.stream.seq;
 			fabric_ring_publish(l, SDK_AUDIO_RING_STATUS_OK);

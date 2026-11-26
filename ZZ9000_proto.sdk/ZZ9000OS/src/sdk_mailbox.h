@@ -1010,7 +1010,9 @@ typedef char SDKAudioControlStateSaveStatus_must_be_at_offset_44[
  * a changed stream_seq as a flush mark; a CODEC lease also starts the
  * announced stream. stream_seq 0 is no marker. stream_start is the byte
  * cursor of the stream's first byte (the producer's write cursor when it
- * began the stream); bytes below it are discarded unread. stream_param is
+ * began the stream); bytes below it are discarded unread. It must lie
+ * between the credit cursor the lease publishes and the write cursor,
+ * whatever PCM is staged but not yet credited. stream_param is
  * the PCM sample rate for SDK_AUDIO_RING_CODEC_PCM (0 means 44100) and
  * zero for the other codecs. */
 struct SDKAudioRingProducerLine {
