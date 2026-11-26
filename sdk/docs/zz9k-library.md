@@ -1107,8 +1107,8 @@ ZZPlay --audio=mhi Work:Audio/test.mp3
 ZZPlay --audio=none --benchmark Work:Audio/test.mp3
 ```
 
-It accepts MPEG-1 and MPEG-2 Program Streams, WebM and Matroska, MP3, FLAC and
-Ogg Vorbis (see `zzplay.md` for the full format list). MPEG video
+It accepts MPEG-1 and MPEG-2 Program Streams and Transport Streams, WebM and
+Matroska, MP3, FLAC and Ogg Vorbis (see `zzplay.md` for the full format list). MPEG video
 opens a P96 overlay window, publishes decoder-owned planar frames directly,
 and paces through `timer.device`. Standalone MP3 playback uses the accelerated
 audio-stream service and generic AHI output, or the optional runtime
@@ -1121,7 +1121,7 @@ in `C/Providers/`: internet radio and Plex Media Server. Network audio uses
 the same card decode and output paths as files; the network, Browse window,
 module and ARexx details are in `zzplay.md`.
 
-On a matched Zorro 2 stack, Program Stream video is enabled only after the
+On a matched Zorro 2 stack, Program Stream and Transport Stream video is enabled only after the
 driver has acknowledged a generation-1 layout with a PIP pool large enough for
 the aligned YUV422 frame. It uses a 24 KiB input window and 32 KiB PCM ring;
 oversized video remains unsupported and P96 rejects any pool overrun. The
@@ -1132,14 +1132,16 @@ For standalone MP3, `--audio=auto` tries to acquire MHI before playback and
 falls back to accelerated decode plus AHI only when that pre-play acquisition
 is unavailable. Explicit `--audio=mhi` never falls back. Direct
 `--audio=ax` is not a standalone-MP3 backend, and MHI is not a Program Stream
-MP2 backend. Only one AHI, MHI, or direct-AX owner is held at a time.
+or Transport Stream MP2 backend. Only one AHI, MHI, or direct-AX owner is held
+at a time.
 
 `--fps` prints rolling and final playback FPS plus `decode-call` FPS, which
 excludes deliberate pacing and includes time waiting for prior queued overlay
 composition. `--benchmark` also disables pacing, making playback FPS the
 uncapped end-to-end throughput for firmware comparisons. Console reporting is
 sampled every two seconds to keep its own overhead small. MPEG Program Stream
-audio is synchronized to video through AHI or compatible direct AX output.
+and Transport Stream audio is synchronized to video through AHI or compatible
+direct AX output.
 Additional codecs are registered as codec/container backend entries and
 advertised via service flags without changing the session lifecycle.
 
@@ -1155,6 +1157,25 @@ B-pictures (no other picture predicts from them). When lag is far behind,
 `ZZ9K_MEDIA_DECODE_SKIP_TO_I_PICTURE` discards dependent P/B pictures until
 the next I picture resets the reference chain. Skipped pictures still advance
 the video clock, so a client can catch up without holding audio behind video.
+
+**MPEG Transport Stream sessions** (`ZZ9K_VIDEO_CODEC_MPEG1` or
+`ZZ9K_VIDEO_CODEC_MPEG2` with `ZZ9K_VIDEO_CONTAINER_MPEG_TS`, container id 3)
+have the Program Stream limits above, the same frame layout, timeline and
+skip flags. The input is 188-byte packets, or 192-byte M2TS packets (a 4-byte
+timestamp before each 188-byte packet). The firmware finds the packet size from
+the sync bytes and finds them again after damaged bytes. It follows the first
+program of the PAT, and in its PMT the first video stream of stream type 0x01
+or 0x02 and the first audio stream of type 0x03 or 0x04. Audio is
+`ZZ9K_MEDIA_AUDIO_NONE` or `ZZ9K_MEDIA_AUDIO_MP2` for both codecs; Begin refuses
+AC-3 and LPCM with `ZZ9K_STATUS_UNSUPPORTED`. Other streams, packets with the
+transport error flag and packets without payload are skipped, and a gap in the
+continuity counter of a followed stream drops the picture or audio packet that
+was being assembled. A stream with no PMT, or a PMT that names no MPEG video or
+audio stream, produces no pictures. No service flag names Transport Stream
+support: firmware without it refuses container 3 at Begin with
+`ZZ9K_STATUS_UNSUPPORTED`, and the flags that apply are those of a Program
+Stream (`ZZ9K_SERVICE_FLAG_VIDEO_MPEG_PS`, with
+`ZZ9K_SERVICE_FLAG_VIDEO_MPEG2` for MPEG-2).
 
 **WebM sessions** (`ZZ9K_VIDEO_CONTAINER_WEBM` with `ZZ9K_VIDEO_CODEC_VP8` or
 `ZZ9K_VIDEO_CODEC_VP9`, and audio `ZZ9K_MEDIA_AUDIO_NONE`,

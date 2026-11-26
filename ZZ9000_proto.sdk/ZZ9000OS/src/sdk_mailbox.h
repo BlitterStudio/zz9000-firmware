@@ -216,7 +216,8 @@
 #define SDK_SERVICE_FLAG_VIDEO_WEBM_VP9         (1U << 28)
 #define SDK_SERVICE_FLAG_VIDEO_MEDIA_OPUS       (1U << 29)
 #define SDK_SERVICE_FLAG_VIDEO_MEDIA_VORBIS     (1U << 30)
-/* MPEG-2 Program Stream with AC-3, LPCM, MP2, or no audio. */
+/* MPEG-2 video in Program Stream, Transport Stream and Matroska files; AC-3,
+ * LPCM, MP2, or no audio (a Transport Stream carries MP2 or none). */
 #define SDK_SERVICE_FLAG_VIDEO_MPEG2            (1U << 31)
 
 #define SDK_OP_NOP                     0x0000U

@@ -1,6 +1,7 @@
 /*
- * libmpeg2 + bounded PS/VOB demux backend: MPEG-1 and MPEG-2 video in a
- * Program Stream, with MP2 / DVD-LPCM / AC-3 audio.
+ * libmpeg2 + bounded PS/VOB and TS demux backend: MPEG-1 and MPEG-2 video in
+ * a Program Stream or Transport Stream, with MP2 / DVD-LPCM / AC-3 audio
+ * (a Transport Stream carries MP2 only).
  *
  * The backend implements the codec-neutral sdk_video_backend contract with
  * the sdk_media_timeline integer clock and an S16BE PCM ring, so media
@@ -138,7 +139,7 @@ struct m2_audio_entry {
 
 struct sdk_video_mpeg2 {
  	struct SDKDVDPSDemux demux;
-	struct SDKDVDTSDemux ts;     /* Transport Stream state behind demux */
+	struct SDKDVDTSDemux *ts;    /* Transport Stream state behind demux */
  	mpeg2dec_t *decoder;
  	uint8_t *es;
  	uint8_t *video_fifo;         /* M2_VIDEO_FIFO_CAPACITY bytes */
@@ -1964,16 +1965,26 @@ static void *mpeg1_create(uint32_t pool_owner)
 	return d;
 }
 
+static void mpeg2_destroy(void *decoder);
+
+/* A Transport Stream session: the demux state (two PES reassembly buffers,
+ * over 128 KiB) is allocated only for these, not for every Program Stream
+ * session. */
 static void *mpeg_ts_create(uint32_t pool_owner, uint8_t mpeg1)
 {
 	struct sdk_video_mpeg2 *d =
 		(struct sdk_video_mpeg2 *)mpeg2_create(pool_owner);
 
-	if (d) {
-		d->mpeg1 = mpeg1;
-		d->ts_container = 1U;
-		sdk_dvd_ts_init(&d->ts, &d->demux);
+	if (!d)
+		return 0;
+	d->ts = (struct SDKDVDTSDemux *)M2_MALLOC(sizeof(*d->ts));
+	if (!d->ts) {
+		mpeg2_destroy(d);
+		return 0;
 	}
+	d->mpeg1 = mpeg1;
+	d->ts_container = 1U;
+	sdk_dvd_ts_init(d->ts, &d->demux);
 	return d;
 }
 
@@ -2000,6 +2011,7 @@ static void mpeg2_destroy(void *decoder)
 	M2_FREE(d->mkv_block);
 	M2_FREE(d->mkv_win.data);
 	sdk_dvd_ac3_destroy(&d->ac3);
+	M2_FREE(d->ts);
 	M2_FREE(d->audio_fifo);
 	M2_FREE(d->video_fifo);
 	M2_FREE(d->es);
