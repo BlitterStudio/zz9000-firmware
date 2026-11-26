@@ -344,17 +344,18 @@ void sdk_vorbis_heap_set_region_ops(
 	heap->region_context = context;
 }
 
-/* A heap is selected by one core at a time. Dropping it clears that core's
- * selection and leaves the other core's untouched. */
+/* Each core owns its own slot and only writes it. Dropping a heap clears the
+ * calling core's selection when it names that heap. A heap another core had
+ * selected (a core-1 decoder forgotten by core 0 after core 1 was halted) is
+ * not touched here: every use of the allocator on a core follows its own
+ * sdk_vorbis_heap_select(), which overwrites the stale slot first. */
 static void forget_selection(const struct sdk_vorbis_heap *heap)
 {
-	unsigned c;
+	unsigned c = core_slot();
 
-	for (c = 0U; c < 2U; c++) {
-		if (active[c] == heap) {
-			active[c] = 0;
-			active_fail[c] = 0;
-		}
+	if (active[c] == heap) {
+		active[c] = 0;
+		active_fail[c] = 0;
 	}
 }
 

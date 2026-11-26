@@ -159,10 +159,68 @@ static void test_vorbis(void)
 	g_cpu = 1;
 }
 
+/* Core 1 halts inside a decode. Core 0 forgets that heap while recovering
+ * and must neither write core 1's selection nor lose its own. Core 1's next
+ * decode selects its arena before it allocates, which replaces the stale
+ * slot. */
+static void test_vorbis_cold_recovery(void)
+{
+	struct sdk_vorbis_heap dead, h0, fresh;
+	jmp_buf stale_target, fail0;
+	void *p;
+
+	sdk_vorbis_heap_init(&dead, 65536U, 262144U, 0U);
+	sdk_vorbis_heap_init(&h0, 65536U, 262144U, 0U);
+	sdk_vorbis_heap_init(&fresh, 65536U, 262144U, 0U);
+
+	g_cpu = 1;
+	sdk_vorbis_heap_select(&dead, &stale_target);
+	p = sdk_vorbis_malloc(100U);
+	CHECK(p != NULL && sdk_vorbis_heap_regions(&dead) == 1U, "core 1 decoding");
+	g_cpu = 0;
+	sdk_vorbis_heap_select(&h0, &fail0);
+
+	sdk_vorbis_heap_forget(&dead);
+	CHECK(sdk_vorbis_heap_regions(&dead) == 0U, "dead heap forgotten");
+	p = sdk_vorbis_malloc(100U);
+	CHECK(p != NULL && sdk_vorbis_heap_regions(&h0) == 1U,
+	      "forgetting core 1's heap keeps core 0's selection");
+	sdk_vorbis_free(p);
+
+	/* Core 0 did not write core 1's slot: it still names the forgotten heap
+	 * until core 1 selects again. */
+	g_cpu = 1;
+	p = sdk_vorbis_malloc(10U);
+	CHECK(p != NULL && sdk_vorbis_heap_regions(&dead) == 1U,
+	      "core 0 forget does not write core 1's selection");
+	sdk_vorbis_free(p);
+	sdk_vorbis_heap_release(&dead);
+	g_cpu = 1;
+	sdk_vorbis_heap_select(&fresh, NULL);
+	p = sdk_vorbis_malloc(100U);
+	CHECK(p != NULL && sdk_vorbis_heap_regions(&fresh) == 1U &&
+	      sdk_vorbis_heap_regions(&dead) == 0U,
+	      "core 1 select replaces the stale selection");
+	sdk_vorbis_free(p);
+
+	/* The calling core's own selection is cleared by its own forget. */
+	g_cpu = 0;
+	sdk_vorbis_heap_forget(&h0);
+	CHECK(sdk_vorbis_malloc(10U) == NULL, "a core clears its own selection");
+	g_cpu = 1;
+	p = sdk_vorbis_malloc(100U);
+	CHECK(p != NULL && sdk_vorbis_heap_regions(&fresh) == 1U,
+	      "core 0 forget leaves core 1 routed to its arena");
+	sdk_vorbis_free(p);
+	sdk_vorbis_heap_select(NULL, NULL);
+	sdk_vorbis_heap_release(&fresh);
+}
+
 int main(void)
 {
 	test_flac();
 	test_vorbis();
+	test_vorbis_cold_recovery();
 	if (failures == 0)
 		puts("audio decode allocator context tests passed");
 	return failures != 0;
