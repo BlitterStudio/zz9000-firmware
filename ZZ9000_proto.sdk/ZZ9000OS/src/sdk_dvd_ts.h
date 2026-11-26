@@ -30,6 +30,10 @@ struct SDKDVDTSStream {
 	/* A PES is being collected in data[0..fill). total is its length
 	 * from the PES header (start code included), 0 when unbounded. */
 	uint8_t collecting;
+	/* total is valid: six header bytes have arrived (a PES header may be
+	 * split over packets by an adaptation field) and the start code and
+	 * stream id checked out. */
+	uint8_t known;
 	/* The buffer holds a finished PES (or a full chunk of an unbounded
 	 * one, chunk set) that the queue has not taken yet. */
 	uint8_t complete;
