@@ -305,11 +305,14 @@ static inline uint32_t zz9k_mediaout_checksum(uint32_t seed,
 /* Checksum of the bytes a picture really holds: the active bytes of every
  * row (every plane row for PLANAR). The bytes between the end of a row and
  * the pitch are never written by the card, so they are left out; they hold
- * whatever the allocation held. `slot` may be card memory. */
+ * whatever the allocation held. `slot` may be card memory; `row` is scratch
+ * for one row, ZZ9K_MEDIAOUT_ROW_SCRATCH bytes (kept off the small default
+ * Amiga stack by the caller). */
+#define ZZ9K_MEDIAOUT_ROW_SCRATCH (ZZ9K_MEDIA_OUTPUT_MAX_WIDTH * 2U)
 static inline uint32_t zz9k_mediaout_checksum_picture(
-    const ZZ9KMediaOutPlan *plan, const volatile uint8_t *slot, uint32_t hash)
+    const ZZ9KMediaOutPlan *plan, const volatile uint8_t *slot, uint32_t hash,
+    uint8_t *row)
 {
-  uint8_t row[ZZ9K_MEDIA_OUTPUT_MAX_WIDTH * 2];
   uint32_t row_bytes = zz9k_media_output_row_bytes(plan->format, plan->width);
   uint32_t planes = plan->format == ZZ9K_SURFACE_FORMAT_PLANAR
                         ? plan->depth : 1U;

@@ -43,6 +43,14 @@
 #define MEDIAOUT_WAIT_US 2000000UL
 #define MEDIAOUT_RETRIES 4000U
 
+/* Large buffers are static: a program started from a Shell gets a 4 KiB
+ * stack unless the user raises it, and no function here may need more than
+ * 1 KiB of it. */
+static uint8_t header_buffer[MEDIAOUT_CHUNK_BYTES];
+static uint8_t row_scratch[ZZ9K_MEDIAOUT_ROW_SCRATCH];
+static uint8_t palette_bytes[ZZ9K_MEDIA_OUTPUT_PALETTE_BYTES];
+static uint32_t palette_words[256];
+
 #if ZZ9K_MEDIAOUT_AMIGA
 struct Device *TimerBase;
 struct Library *CyberGfxBase;
@@ -316,8 +324,6 @@ int main(int argc, char **argv)
   ZZ9KMediaSessionStatusResult page;
   MediaOutFeed feed;
   MediaOutTimer timer;
-  uint8_t header[MEDIAOUT_CHUNK_BYTES];
-  uint32_t palette[256];
   uint32_t session = 0U;
   uint32_t presented = 0U;
   uint32_t checksum_sum = 0U;
@@ -349,12 +355,12 @@ int main(int argc, char **argv)
     printf("zz9k-mediaout: cannot open %s\n", opts.path);
     return 1;
   }
-  header_bytes = fread(header, 1U, sizeof(header), feed.file);
-  if (!zz9k_mediaout_is_program_stream(header, (uint32_t)header_bytes) ||
-      !zz9k_mediaout_mpeg_info(header, (uint32_t)header_bytes, &info)) {
+  header_bytes = fread(header_buffer, 1U, sizeof(header_buffer), feed.file);
+  if (!zz9k_mediaout_is_program_stream(header_buffer, (uint32_t)header_bytes) ||
+      !zz9k_mediaout_mpeg_info(header_buffer, (uint32_t)header_bytes, &info)) {
     printf("zz9k-mediaout: %s is not an MPEG-1/2 program stream with a "
            "sequence header in its first %u bytes\n", opts.path,
-           (unsigned)sizeof(header));
+           (unsigned)sizeof(header_buffer));
     goto done;
   }
   rewind(feed.file);
@@ -399,23 +405,21 @@ int main(int argc, char **argv)
                                     : "not host-visible");
     goto done;
   }
-  memset(palette, 0, sizeof(palette));
+  memset(palette_words, 0, sizeof(palette_words));
   if ((plan.flags & ZZ9K_MEDIA_OUTPUT_PALETTE_HOST) != 0U) {
-    uint8_t bytes[1024];
-
     status = zz9k_alloc_shared(ctx, ZZ9K_MEDIA_OUTPUT_PALETTE_BYTES, 16U,
                                ZZ9K_ALLOC_HOST_WINDOW, &palette_buffer);
     if (status != ZZ9K_STATUS_OK || !palette_buffer.data) {
       print_error("palette buffer", status);
       goto done;
     }
-    zz9k_mediaout_gray_palette(plan.depth, bytes);
-    memcpy((void *)palette_buffer.data, bytes, sizeof(bytes));
+    zz9k_mediaout_gray_palette(plan.depth, palette_bytes);
+    memcpy((void *)palette_buffer.data, palette_bytes, sizeof(palette_bytes));
     for (i = 0U; i < 256U; i++) {
-      palette[i] = zz9k_mediaout_palette_word(bytes, i);
+      palette_words[i] = zz9k_mediaout_palette_word(palette_bytes, i);
     }
   } else if (plan.depth != 0U) {
-    (void)zz9k_media_output_fixed_palette(plan.depth, palette);
+    (void)zz9k_media_output_fixed_palette(plan.depth, palette_words);
   }
 
   /* The input buffer takes what the host window has left after the pictures
@@ -563,7 +567,7 @@ int main(int argc, char **argv)
             &plan,
             (const volatile uint8_t *)pictures.data +
                 (slot != 0U ? plan.slot_stride : 0U),
-            hash);
+            hash, row_scratch);
         checksum_sum ^= hash;
       }
       printf("picture %4lu pts %9lu slot %lu convert %6lu us wait %6lu us "
@@ -579,7 +583,7 @@ int main(int argc, char **argv)
           memcpy(copy, (const void *)((const volatile uint8_t *)
                      pictures.data + (slot != 0U ? plan.slot_stride : 0U)),
                  plan.picture_bytes);
-          stop = !window_show(&window, &plan, copy, palette);
+          stop = !window_show(&window, &plan, copy, palette_words);
           FreeVec(copy);
         }
       }
