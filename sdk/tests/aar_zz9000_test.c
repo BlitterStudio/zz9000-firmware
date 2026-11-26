@@ -318,6 +318,7 @@ static struct {
     int corrupt_magic;              /* CLAIM yields a block that does not check */
     int bad_cb_token;               /* CLAIM names memory the board lacks */
     uint32_t abi_major;             /* what QUERY reports */
+    uint32_t abi_minor;
     uint32_t caps;                  /* what QUERY reports */
     int no_mmu;                     /* the board cannot map (mmu.library missing) */
     int events;                     /* QUERY names the firmware's event block */
@@ -398,7 +399,7 @@ static int fb_call(void *user, uint16_t op, const uint8_t *payload,
     switch (op) {
     case ZZAPP_OP_QUERY:
         zzapp_put_be32(reply->payload + ZZAPP_QUERY_ABI_MAJOR, card.abi_major);
-        zzapp_put_be32(reply->payload + ZZAPP_QUERY_ABI_MINOR, ZZAPP_ABI_MINOR);
+        zzapp_put_be32(reply->payload + ZZAPP_QUERY_ABI_MINOR, card.abi_minor);
         zzapp_put_be32(reply->payload + ZZAPP_QUERY_CAPS, card.caps);
         zzapp_put_be32(reply->payload + ZZAPP_QUERY_EVENTS,
                        card.events ? zzapp_xport_events_token() : 0U);
@@ -678,6 +679,7 @@ static void card_reset(void)
 {
     memset(&card, 0, sizeof(card));
     card.abi_major = ZZAPP_ABI_MAJOR;
+    card.abi_minor = ZZAPP_ABI_MINOR;
     card.caps = ZZAPP_CAP_Z3 | ZZAPP_CAP_DISPLAY;
 }
 
@@ -890,6 +892,11 @@ static void test_abi_and_capability_checks(void)
     CHECK(aar_core_open(&core, 0U, NULL, NULL, &h, &reason) == AAR_E_NOSYS);
     CHECK(card.claims == 0U && h == NULL);
     card.abi_major = ZZAPP_ABI_MAJOR;
+    card.abi_minor = ZZAPP_ABI_MINOR - 1U;
+    CHECK(aar_core_query(&core, &info) == AAR_E_NOSYS);
+    CHECK(aar_core_open(&core, 0U, NULL, NULL, &h, &reason) == AAR_E_NOSYS);
+    CHECK(card.claims == 0U && h == NULL);
+    card.abi_minor = ZZAPP_ABI_MINOR;
     card.caps = ZZAPP_CAP_DISPLAY;                 /* no Z3 */
     CHECK(aar_core_open(&core, 0U, NULL, NULL, &h, &reason) == AAR_E_NOSYS);
     CHECK(card.claims == 0U);

@@ -109,6 +109,36 @@ extern void GLDrawArrays(GLcontext, GLenum, GLint, GLsizei);
 extern void GLDrawElements(GLcontext, GLenum, GLsizei, GLenum, const GLvoid *);
 extern void GLLockArrays(GLcontext, GLuint, GLsizei);
 extern void GLUnlockArrays(GLcontext);
+extern void GLClearDepth(GLcontext, GLclampd);
+extern void GLColorMask(GLcontext, GLboolean, GLboolean, GLboolean, GLboolean);
+extern void GLPolygonOffset(GLcontext, GLfloat, GLfloat);
+extern void GLMultMatrixf(GLcontext, const GLfloat *);
+extern void GLLoadMatrixd(GLcontext, const GLdouble *);
+extern void GLMultMatrixd(GLcontext, const GLdouble *);
+extern void GLGetDoublev(GLcontext, GLenum, GLdouble *);
+extern void GLGetBooleanv(GLcontext, GLenum, GLboolean *);
+extern void GLActiveTextureARB(GLcontext, GLenum);
+extern void GLMultiTexCoord2fARB(GLcontext, GLenum, GLfloat, GLfloat);
+extern void GLMultiTexCoord2fvARB(GLcontext, GLenum, GLfloat *);
+extern void GLNormal3f(GLcontext, GLfloat, GLfloat, GLfloat);
+extern void GLNormalPointer(GLcontext, GLenum, GLsizei, const GLvoid *);
+extern void GLLightf(GLcontext, GLenum, GLenum, GLfloat);
+extern void GLLightfv(GLcontext, GLenum, GLenum, const GLfloat *);
+extern void GLLightModelf(GLcontext, GLenum, GLfloat);
+extern void GLLightModelfv(GLcontext, GLenum, const GLfloat *);
+extern void GLMaterialf(GLcontext, GLenum, GLenum, GLfloat);
+extern void GLMaterialfv(GLcontext, GLenum, GLenum, const GLfloat *);
+extern void GLColorMaterial(GLcontext, GLenum, GLenum);
+extern void GLFogf(GLcontext, GLenum, GLfloat);
+extern void GLFogfv(GLcontext, GLenum, GLfloat *);
+extern void GLLineWidth(GLcontext, GLfloat);
+extern void GLPointSize(GLcontext, GLfloat);
+extern GLboolean GLIsTexture(GLcontext, GLuint);
+extern void GLCopyTexImage2D(GLcontext, GLenum, GLint, GLenum, GLint, GLint,
+                             GLsizei, GLsizei, GLint);
+extern void GLCopyTexSubImage2D(GLcontext, GLenum, GLint, GLint, GLint, GLint,
+                                GLint, GLsizei, GLsizei);
+extern void GLTexEnvfv(GLcontext, GLenum, GLenum, const GLfloat *);
 #if defined(MINIGL_MODULE)
 #include "zzm_runtime.h"
 
@@ -387,6 +417,7 @@ static void w_Flush(void) { ENTER(); GLFlush(CTX); LEAVE(); }
 #define ZZAPP_GL_FRONT_LEFT 0x0400U
 #define ZZAPP_GL_FRONT 0x0404U
 #define ZZAPP_GL_BACK 0x0405U
+#define ZZAPP_GL_FOG_COLOR 0x0b66U
 static uint32_t swap_target_name(uint32_t mode)
 {
     return mode == ZZAPP_GL_FRONT || mode == ZZAPP_GL_FRONT_LEFT ?
@@ -443,13 +474,76 @@ static void w_DrawArrays(uint32_t mode, int32_t first, int32_t count) { ENTER();
 static void w_DrawElements(uint32_t mode, int32_t count, uint32_t type, const void *indices) { ENTER(); GLDrawElements(CTX, mode, count, type, indices); LEAVE(); }
 static void w_LockArrays(uint32_t first, int32_t count) { ENTER(); GLLockArrays(CTX, first, count); LEAVE(); }
 static void w_UnlockArrays(void) { ENTER(); GLUnlockArrays(CTX); LEAVE(); }
+static void w_ClearDepth(double d) { ENTER(); GLClearDepth(CTX, d); LEAVE(); }
+static void w_ColorMask(uint8_t r, uint8_t g, uint8_t b, uint8_t a) { ENTER(); GLColorMask(CTX, r, g, b, a); LEAVE(); }
+static void w_PolygonOffset(float factor, float units) { ENTER(); GLPolygonOffset(CTX, factor, units); LEAVE(); }
+static void w_MultMatrixf(const float *m) { ENTER(); GLMultMatrixf(CTX, m); LEAVE(); }
+static void w_LoadMatrixd(const double *m) { ENTER(); GLLoadMatrixd(CTX, m); LEAVE(); }
+static void w_MultMatrixd(const double *m) { ENTER(); GLMultMatrixd(CTX, m); LEAVE(); }
+static void w_GetDoublev(uint32_t pname, double *out) { ENTER(); GLGetDoublev(CTX, pname, out); LEAVE(); }
+static void w_GetBooleanv(uint32_t pname, uint8_t *out) { ENTER(); GLGetBooleanv(CTX, pname, out); LEAVE(); }
+static void w_ActiveTextureARB(uint32_t texture) { ENTER(); GLActiveTextureARB(CTX, texture); LEAVE(); }
+static void w_MultiTexCoord2fARB(uint32_t target, float s, float t) { ENTER(); GLMultiTexCoord2fARB(CTX, target, s, t); LEAVE(); }
+static void w_MultiTexCoord2fvARB(uint32_t target, const float *v) { ENTER(); GLMultiTexCoord2fvARB(CTX, target, (GLfloat *)v); LEAVE(); }
+static void w_Normal3f(float x, float y, float z) { ENTER(); GLNormal3f(CTX, x, y, z); LEAVE(); }
+static void w_Normal3fv(const float *v) { w_Normal3f(v[0], v[1], v[2]); }
+static void w_NormalPointer(uint32_t type, int32_t stride, const void *p) { ENTER(); GLNormalPointer(CTX, type, stride, p); LEAVE(); }
+static void w_Lightf(uint32_t light, uint32_t pname, float v) { ENTER(); GLLightf(CTX, light, pname, v); LEAVE(); }
+static void w_Lightfv(uint32_t light, uint32_t pname, const float *v) { ENTER(); GLLightfv(CTX, light, pname, v); LEAVE(); }
+static void w_LightModelf(uint32_t pname, float v) { ENTER(); GLLightModelf(CTX, pname, v); LEAVE(); }
+static void w_LightModelfv(uint32_t pname, const float *v) { ENTER(); GLLightModelfv(CTX, pname, v); LEAVE(); }
+static void w_LightModeli(uint32_t pname, int32_t v) { w_LightModelf(pname, (float)v); }
+static void w_Materialf(uint32_t face, uint32_t pname, float v) { ENTER(); GLMaterialf(CTX, face, pname, v); LEAVE(); }
+static void w_Materialfv(uint32_t face, uint32_t pname, const float *v) { ENTER(); GLMaterialfv(CTX, face, pname, v); LEAVE(); }
+static void w_ColorMaterial(uint32_t face, uint32_t mode) { ENTER(); GLColorMaterial(CTX, face, mode); LEAVE(); }
+static void w_Fogf(uint32_t pname, float v) { ENTER(); GLFogf(CTX, pname, v); LEAVE(); }
+static void w_Fogfv(uint32_t pname, const float *v)
+{
+    ENTER();
+    if (pname == ZZAPP_GL_FOG_COLOR)
+        GLFogfv(CTX, pname, (GLfloat *)v);
+    else
+        GLFogf(CTX, pname, v[0]);
+    LEAVE();
+}
+static void w_Fogi(uint32_t pname, int32_t v) { w_Fogf(pname, (float)v); }
+static void w_LineWidth(float width) { ENTER(); GLLineWidth(CTX, width); LEAVE(); }
+static void w_PointSize(float size) { ENTER(); GLPointSize(CTX, size); LEAVE(); }
+static void w_Color3ub(uint8_t r, uint8_t g, uint8_t b) { w_Color4ub(r, g, b, 255U); }
+static void w_Vertex2i(int32_t x, int32_t y) { w_Vertex2f((float)x, (float)y); }
+static void w_Vertex2fv(const float *v) { w_Vertex2f(v[0], v[1]); }
+static void w_TexCoord2i(int32_t s, int32_t t) { w_TexCoord2f((float)s, (float)t); }
+static uint8_t w_IsTexture(uint32_t texture)
+{
+    uint8_t result;
+    ENTER();
+    result = GLIsTexture(CTX, texture);
+    LEAVE();
+    return result;
+}
+static void w_CopyTexImage2D(uint32_t target, int32_t level, uint32_t internal,
+                             int32_t x, int32_t y, int32_t w, int32_t h, int32_t border)
+{
+    ENTER();
+    GLCopyTexImage2D(CTX, target, level, internal, x, y, w, h, border);
+    LEAVE();
+}
+static void w_CopyTexSubImage2D(uint32_t target, int32_t level, int32_t dx,
+                                int32_t dy, int32_t x, int32_t y, int32_t w,
+                                int32_t h)
+{
+    ENTER();
+    GLCopyTexSubImage2D(CTX, target, level, dx, dy, x, y, w, h);
+    LEAVE();
+}
+static void w_TexEnvfv(uint32_t target, uint32_t pname, const float *v) { ENTER(); GLTexEnvfv(CTX, target, pname, v); LEAVE(); }
 
 
 static void fill_table(void)
 {
     memset(&g_table, 0, sizeof(g_table));
     g_table.size = (uint32_t)sizeof(g_table);
-    g_table.version = AAR_GL_VERSION_ARRAYS;
+    g_table.version = AAR_GL_VERSION_11;
     g_table.Begin = w_Begin;
     g_table.End = w_End;
     g_table.Vertex2f = w_Vertex2f;
@@ -522,6 +616,44 @@ static void fill_table(void)
     g_table.DrawElements = w_DrawElements;
     g_table.LockArrays = w_LockArrays;
     g_table.UnlockArrays = w_UnlockArrays;
+
+    /* The GL 1.1 tail is optional. Leave stencil, user clip planes, display
+     * lists, attribute stacks and unavailable queries/commands NULL. */
+    g_table.ClearDepth = w_ClearDepth;
+    g_table.ColorMask = w_ColorMask;
+    g_table.PolygonOffset = w_PolygonOffset;
+    g_table.MultMatrixf = w_MultMatrixf;
+    g_table.LoadMatrixd = w_LoadMatrixd;
+    g_table.MultMatrixd = w_MultMatrixd;
+    g_table.GetDoublev = w_GetDoublev;
+    g_table.GetBooleanv = w_GetBooleanv;
+    g_table.ActiveTextureARB = w_ActiveTextureARB;
+    g_table.MultiTexCoord2fARB = w_MultiTexCoord2fARB;
+    g_table.MultiTexCoord2fvARB = w_MultiTexCoord2fvARB;
+    g_table.Normal3f = w_Normal3f;
+    g_table.Normal3fv = w_Normal3fv;
+    g_table.NormalPointer = w_NormalPointer;
+    g_table.Lightf = w_Lightf;
+    g_table.Lightfv = w_Lightfv;
+    g_table.LightModelf = w_LightModelf;
+    g_table.LightModelfv = w_LightModelfv;
+    g_table.LightModeli = w_LightModeli;
+    g_table.Materialf = w_Materialf;
+    g_table.Materialfv = w_Materialfv;
+    g_table.ColorMaterial = w_ColorMaterial;
+    g_table.Fogf = w_Fogf;
+    g_table.Fogfv = w_Fogfv;
+    g_table.Fogi = w_Fogi;
+    g_table.LineWidth = w_LineWidth;
+    g_table.PointSize = w_PointSize;
+    g_table.Color3ub = w_Color3ub;
+    g_table.Vertex2i = w_Vertex2i;
+    g_table.Vertex2fv = w_Vertex2fv;
+    g_table.TexCoord2i = w_TexCoord2i;
+    g_table.IsTexture = w_IsTexture;
+    g_table.CopyTexImage2D = w_CopyTexImage2D;
+    g_table.CopyTexSubImage2D = w_CopyTexSubImage2D;
+    g_table.TexEnvfv = w_TexEnvfv;
 }
 
 static int zzapp_gl_configure_targets(uint32_t width, uint32_t height,

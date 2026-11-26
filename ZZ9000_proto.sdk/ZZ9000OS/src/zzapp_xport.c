@@ -12,6 +12,32 @@
 
 static zzapp_xport_env_t env;
 
+/*
+ * Profile rings. A ring is a debugging aid and few claims have one, so its
+ * bookkeeping is a small static table, not a field of every record (which
+ * would grow all of them). A slot belongs to one record from open to close;
+ * core 1 owns the sampling fields.
+ */
+typedef struct {
+	zzapp_rec_t *rec;     /* the owner, NULL when the slot is free */
+	void *ptr;            /* ARM view of the ring */
+	uint32_t card;
+	uint32_t bytes;
+	uint32_t mask;        /* samples in the ring, less one */
+	uint32_t interval;    /* scheduler ticks per sample */
+	uint32_t tick;        /* ticks since the last sample */
+	uint32_t head;        /* samples written, free-running */
+	uint32_t dropped;     /* ticks that recorded no sample */
+} zzapp_profile_slot_t;
+
+static zzapp_profile_slot_t profile_slots[ZZAPP_PROFILE_SLOTS];
+
+_Static_assert(ZZAPP_PROFILE_RING_BYTES >= AAR_PROFILE_RING_MIN_BYTES &&
+	       (ZZAPP_PROFILE_RING_BYTES & (ZZAPP_PROFILE_RING_BYTES - 1U)) == 0U,
+	       "the ring is a power of two of at least the contract's minimum");
+_Static_assert(ZZAPP_PROFILE_RING_BYTES % ZZAPP_XPORT_BLOCK_STEP == 0U,
+	       "the ring is whole block steps");
+
 void zzapp_xport_init(const zzapp_xport_env_t *e)
 {
 	if (e)
@@ -63,6 +89,9 @@ int zzapp_xport_events_init(void)
 	unsigned i;
 
 	/* Whatever block there was belonged to a heap that is rebuilt. */
+	/* The rings of a rebuilt heap are gone with it, and so are their
+	 * records. */
+	memset(profile_slots, 0, sizeof(profile_slots));
 	events_ptr = NULL;
 	events_card = 0U;
 	if (!env.alloc ||
@@ -148,6 +177,24 @@ static void cb_put32(zzapp_rec_t *rec, uint32_t off, uint32_t value)
 
 	if (cb)
 		aar_put_be32(cb + off, value);
+}
+
+/* One aligned 32-bit store of a big-endian word, released: the words the
+ * client reads as published state (the stack size, the profile rate and head)
+ * are never written in pieces, and everything stored before them is visible
+ * first. The byte order is the core's (little-endian, asserted above). */
+static void be32_publish(volatile uint8_t *word, uint32_t value)
+{
+	__atomic_store_n((volatile uint32_t *)word, __builtin_bswap32(value),
+			 __ATOMIC_RELEASE);
+}
+
+static void cb_publish32(zzapp_rec_t *rec, uint32_t off, uint32_t value)
+{
+	volatile uint8_t *cb = cb_base(rec);
+
+	if (cb)
+		be32_publish(cb + off, value);
 }
 
 /* AAR_CB_SHARED_USED is the runtime's blocks plus the app's own shared
@@ -501,6 +548,9 @@ int zzapp_xport_release(zzapp_rec_t *rec)
 
 	if (!rec)
 		return AAR_E_INVAL;
+	/* The ring first: its grant is withdrawn while the pair still reads. */
+	if (zzapp_xport_profile_close(rec) != 0)
+		lost++;
 	for (i = 0U; i < sizeof(order) / sizeof(order[0]); i++) {
 		if (order[i] == ZZAPP_XPORT_BLOCK_PAIR) {
 			/* Nothing touches the control block or the rings from
@@ -584,6 +634,180 @@ void zzapp_xport_cb_set_state(zzapp_rec_t *rec, uint32_t state,
 	/* The state is the last store: a client that takes the news reads both. */
 	if (end_reason != 0U)
 		zzapp_xport_event_post(rec);
+}
+
+/* ---- Fault stack snapshot ---------------------------------------------------- */
+
+void zzapp_xport_cb_set_stack(zzapp_rec_t *rec, uint32_t sp, const void *data,
+			      uint32_t bytes)
+{
+	volatile uint8_t *cb = cb_base(rec);
+	const uint8_t *src = (const uint8_t *)data;
+	uint32_t i;
+
+	if (!cb)
+		return;
+	/* The size goes first, so a reader that raced an earlier snapshot sees
+	 * none rather than a size with the wrong bytes. */
+	be32_publish(cb + AAR_CB_STACK_BYTES, 0U);
+	if (!src || bytes == 0U) {
+		aar_put_be32(cb + AAR_CB_STACK_SP_HI, 0U);
+		aar_put_be32(cb + AAR_CB_STACK_SP_LO, 0U);
+		return;
+	}
+	if (bytes > AAR_CB_STACK_MAX)
+		bytes = AAR_CB_STACK_MAX;
+	run_release();
+	for (i = 0U; i < bytes; i++)
+		cb[AAR_CB_STACK_DATA + i] = src[i];
+	aar_put_be32(cb + AAR_CB_STACK_SP_HI, 0U);
+	aar_put_be32(cb + AAR_CB_STACK_SP_LO, sp);
+	/* The size is the last store: the bytes it names are in place. */
+	run_release();
+	be32_publish(cb + AAR_CB_STACK_BYTES, bytes);
+}
+
+/* ---- Profiler -------------------------------------------------------------------- */
+
+static zzapp_profile_slot_t *profile_find(const zzapp_rec_t *rec)
+{
+	unsigned i;
+
+	if (!rec)
+		return NULL;
+	for (i = 0U; i < ZZAPP_PROFILE_SLOTS; i++)
+		if (__atomic_load_n(&profile_slots[i].rec, __ATOMIC_ACQUIRE) == rec)
+			return &profile_slots[i];
+	return NULL;
+}
+
+int zzapp_xport_profile_open(zzapp_rec_t *rec, uint32_t granted_hz,
+			     uint32_t interval)
+{
+	zzapp_profile_slot_t *s = NULL;
+	zzapp_rec_xport_t *x;
+	void *ptr = NULL;
+	uint32_t card = 0U;
+	unsigned i;
+
+	if (!is_live(rec) || granted_hz == 0U || interval == 0U)
+		return AAR_E_INVAL;
+	zzapp_xport_profile_close(rec);
+	x = &rec->xport;
+	if (x->shared_limit != 0U &&
+	    (ZZAPP_PROFILE_RING_BYTES > x->shared_limit ||
+	     x->shared_used + rec->visible.used >
+		     x->shared_limit - ZZAPP_PROFILE_RING_BYTES))
+		return AAR_E_NOMEM;
+	for (i = 0U; i < ZZAPP_PROFILE_SLOTS && !s; i++) {
+		zzapp_rec_t *none = NULL;
+
+		if (__atomic_compare_exchange_n(&profile_slots[i].rec, &none, rec,
+						0, __ATOMIC_ACQ_REL,
+						__ATOMIC_ACQUIRE))
+			s = &profile_slots[i];
+	}
+	if (!s)
+		return AAR_E_NORESOURCE;
+	if (!env.alloc ||
+	    env.alloc(env.ctx, ZZAPP_PROFILE_RING_BYTES, ZZAPP_XPORT_BLOCK_STEP,
+		      env.lo, env.hi, &ptr, &card) != 0 || !ptr) {
+		__atomic_store_n(&s->rec, NULL, __ATOMIC_RELEASE);
+		return AAR_E_NOMEM;
+	}
+	memset(ptr, 0, ZZAPP_PROFILE_RING_BYTES);
+	/* The slot is ours until its rec word is released again. The block is
+	 * recorded as soon as it exists, and `bytes` is the accounting marker:
+	 * it is set only once shared_used counts the ring, so a close that finds
+	 * a slot an interrupted open left behind frees what was allocated and
+	 * returns only what was counted. */
+	s->ptr = ptr;
+	s->card = card;
+	s->bytes = 0U;
+	s->mask = ZZAPP_PROFILE_RING_BYTES / AAR_PROFILE_SAMPLE_BYTES - 1U;
+	s->interval = interval;
+	s->tick = 0U;
+	s->head = 0U;
+	s->dropped = 0U;
+	x->shared_used += ZZAPP_PROFILE_RING_BYTES;
+	s->bytes = ZZAPP_PROFILE_RING_BYTES;
+	zzapp_xport_publish_shared(rec);
+	cb_publish32(rec, AAR_CB_PROFILE_TOKEN, token_of(card));
+	cb_publish32(rec, AAR_CB_PROFILE_BYTES, s->bytes);
+	cb_publish32(rec, AAR_CB_PROFILE_DROPPED, 0U);
+	cb_publish32(rec, AAR_CB_PROFILE_HEAD, 0U);
+	/* The rate is the last word: a reader that sees it non-zero may use the
+	 * token and the size. */
+	run_release();
+	cb_publish32(rec, AAR_CB_PROFILE_GRANTED_HZ, granted_hz);
+	zzapp_xport_flag_set(rec, ZZAPP_XPORT_F_PROFILE);
+	return AAR_OK;
+}
+
+int zzapp_xport_profile_close(zzapp_rec_t *rec)
+{
+	zzapp_profile_slot_t *s = profile_find(rec);
+	zzapp_rec_xport_t *x;
+	void *ptr;
+	uint32_t card;
+	uint32_t bytes;
+	int rc = 0;
+
+	if (!s)
+		return 0;
+	x = &rec->xport;
+	/* No more samples, then no grant (the rate first: a reader that finds it
+	 * zero must not use the token), then the ring goes back. */
+	zzapp_xport_flag_clear(rec, ZZAPP_XPORT_F_PROFILE);
+	cb_publish32(rec, AAR_CB_PROFILE_GRANTED_HZ, 0U);
+	cb_publish32(rec, AAR_CB_PROFILE_TOKEN, 0U);
+	cb_publish32(rec, AAR_CB_PROFILE_BYTES, 0U);
+	/* Detach what the slot owns once, before anything is returned: a halt
+	 * after this point leaks the ring (as block_return does), it never frees
+	 * it twice. The ownership word is left alone until the end. */
+	ptr = s->ptr;
+	card = s->card;
+	bytes = s->bytes;
+	s->ptr = NULL;
+	s->card = 0U;
+	s->bytes = 0U;
+	s->mask = 0U;
+	s->interval = 0U;
+	s->tick = 0U;
+	s->head = 0U;
+	s->dropped = 0U;
+	if (bytes != 0U) {
+		x->shared_used = x->shared_used >= bytes ?
+				 x->shared_used - bytes : 0U;
+		zzapp_xport_publish_shared(rec);
+	}
+	if (ptr)
+		rc = env.release && env.release(env.ctx, ptr, card) == 0 ? 0 : -1;
+	__atomic_store_n(&s->rec, NULL, __ATOMIC_RELEASE);
+	return rc;
+}
+
+void zzapp_xport_profile_sample(zzapp_rec_t *rec, int have_pc, uint32_t pc)
+{
+	zzapp_profile_slot_t *s;
+
+	if (!zzapp_xport_flag_test(rec, ZZAPP_XPORT_F_PROFILE))
+		return;
+	s = profile_find(rec);
+	if (!s || ++s->tick < s->interval)
+		return;
+	s->tick = 0U;
+	if (!have_pc) {
+		s->dropped++;
+		cb_publish32(rec, AAR_CB_PROFILE_DROPPED, s->dropped);
+		return;
+	}
+	aar_put_be64((volatile uint8_t *)s->ptr +
+		     (size_t)(s->head & s->mask) * AAR_PROFILE_SAMPLE_BYTES, pc);
+	/* The sample is in place before the count that names it. */
+	run_release();
+	s->head++;
+	cb_publish32(rec, AAR_CB_PROFILE_HEAD, s->head);
 }
 
 /* ---- Requests -------------------------------------------------------------- */

@@ -241,8 +241,8 @@ static struct {
 	uint32_t clock_step;		/* microseconds per yield */
 	unsigned stop_at_yield;		/* set the host stop on this yield; 0: never */
 	unsigned yields;
-	unsigned nreq[0x50];
-	aar_request last[0x50];
+	unsigned nreq[0x60];
+	aar_request last[0x60];
 	char path[300];
 	uint8_t written[1u << 20];
 	uint32_t written_len;
@@ -259,6 +259,36 @@ static struct {
 	char names[4][24];
 	unsigned name_next;
 	unsigned wake_on_yield;
+	/* API 0.6 */
+	char path2[300];
+	uint32_t vol[4];		/* blocks total, used, block bytes, flags */
+	uint32_t protect;		/* the protection word FILE_STAT reports */
+	uint32_t open_caps;		/* reply flags of a display open and resize */
+	uint32_t resize_front, resize_back, resize_pitch, resize_w, resize_h;
+	int32_t resize_result;
+	uint32_t info[6];		/* the out words of DISPLAY_INFO */
+	uint32_t mode_total, mode_max_len;
+	char title[300];
+	uint32_t ptr_len, ptr_words[2], ptr_last;
+	int vblank_silent;
+	int32_t vblank_result;
+	int64_t time_us;
+	uint32_t time_flags;
+	uint8_t locale_rec[AAR_LOCALE_REC_BYTES];
+	const uint8_t *env_value;
+	uint32_t env_len, env_buf_len;
+	const uint8_t *clip_data;
+	uint32_t clip_len, clip_cap, clip_seq, clip_max_len;
+	int clip_drift, clip_stall;
+	uint32_t clip_wr_chunks, clip_wr_off[16], clip_wr_flags[16];
+	uint32_t clip_wr_len[16], clip_wr_total[16];
+	uint32_t clip_take, clip_fail_chunk, clip_committed;
+	/* The card's own blank, from the yield hook: the address handed to the
+	 * callbacks of video.c, and which one (0 plain, 1 mailbox with a
+	 * latch, 2 mailbox whose latch failed). */
+	unsigned blank_at_yield;
+	uint32_t blank_addr;
+	int blank_mailbox;
 } cl;
 
 static uint64_t fake_now;
@@ -279,13 +309,15 @@ static void client_post(client_t *c, aar_completion *d)
 	CHECK(aar_queue_post_completion(&c->cq, d, NULL, NULL) == AAR_OK);
 }
 
+static uint8_t clip_sink[1u << 20];
+
 static void client_handle(client_t *c, const aar_request *r)
 {
 	aar_completion d;
 	uint8_t *buf = r->buf ? (uint8_t *)map_token(r->buf) + r->buf_off : NULL;
 	uint32_t i;
 
-	if (r->op < 0x50U) {
+	if (r->op < 0x60U) {
 		cl.nreq[r->op]++;
 		cl.last[r->op] = *r;
 	}
@@ -319,6 +351,7 @@ static void client_handle(client_t *c, const aar_request *r)
 		d.out[AAR_R_STAT_SIZE_LO] = cl.file_size;
 		d.out[AAR_R_STAT_MTIME_LO] = 1234U;
 		d.out[AAR_R_STAT_MODE] = AAR_MODE_FILE;
+		d.out[AAR_R_STAT_PROTECT] = cl.protect;
 		break;
 	case AAR_OP_FILE_READ: {
 		uint32_t left = cl.file_size - cl.file_pos;
@@ -375,6 +408,7 @@ static void client_handle(client_t *c, const aar_request *r)
 		break;
 	}
 	case AAR_OP_DISPLAY_OPEN:
+		d.flags = (uint16_t)cl.open_caps;
 		d.out[AAR_R_DISPLAY_OPEN_ID] = 7U;
 		d.out[AAR_R_DISPLAY_OPEN_PITCH] = cl.open_pitch;
 		d.out[AAR_R_DISPLAY_OPEN_LAYOUT] = cl.open_layout;
@@ -393,6 +427,150 @@ static void client_handle(client_t *c, const aar_request *r)
 			cl.palette[r->arg[AAR_A_DISPLAY_PALETTE_FIRST] + i] =
 				zzapp_get_be32(buf + i * 4U);
 		break;
+	case AAR_OP_FILE_DELETE:
+	case AAR_OP_DIR_CREATE:
+	case AAR_OP_FILE_SET_DATE:
+	case AAR_OP_FILE_SET_PROTECT:
+		if (buf)
+			strncpy(cl.path, (const char *)buf, sizeof(cl.path) - 1U);
+		break;
+	case AAR_OP_FILE_RENAME:
+		if (buf) {
+			strncpy(cl.path, (const char *)buf, sizeof(cl.path) - 1U);
+			strncpy(cl.path2,
+				(const char *)buf + strlen((const char *)buf) + 1U,
+				sizeof(cl.path2) - 1U);
+		}
+		break;
+	case AAR_OP_VOLUME_INFO:
+		if (buf)
+			strncpy(cl.path, (const char *)buf, sizeof(cl.path) - 1U);
+		memcpy(d.out, cl.vol, sizeof(cl.vol));
+		break;
+	case AAR_OP_DISPLAY_INFO:
+		memcpy(d.out, cl.info, sizeof(cl.info));
+		break;
+	case AAR_OP_DISPLAY_MODES: {
+		uint32_t room = buf ? r->buf_len / AAR_DISPLAY_MODE_REC_BYTES : 0U;
+		uint32_t n = room < cl.mode_total ? room : cl.mode_total;
+
+		if (r->buf_len > cl.mode_max_len)
+			cl.mode_max_len = r->buf_len;
+		for (i = 0U; i < n; i++) {
+			uint8_t *p = buf + i * AAR_DISPLAY_MODE_REC_BYTES;
+
+			zzapp_put_be32(p, 100U + i);
+			zzapp_put_be32(p + 4U, 200U + i);
+			zzapp_put_be32(p + 8U, 50000U + i);
+			zzapp_put_be32(p + 12U, 0xffffffffU);
+			zzapp_put_be32(p + 16U, 0xffffffffU);
+			zzapp_put_be32(p + 20U, 7U);
+		}
+		d.out[AAR_R_DISPLAY_MODES_COUNT] = n;
+		d.out[AAR_R_DISPLAY_MODES_TOTAL] = cl.mode_total;
+		break;
+	}
+	case AAR_OP_DISPLAY_RESIZE:
+		cl.resize_w = r->arg[AAR_A_DISPLAY_RESIZE_W];
+		cl.resize_h = r->arg[AAR_A_DISPLAY_RESIZE_H];
+		if (cl.resize_result != 0) {
+			d.result = cl.resize_result;
+			break;
+		}
+		d.flags = (uint16_t)cl.open_caps;
+		d.out[AAR_R_DISPLAY_OPEN_ID] = 9U;
+		d.out[AAR_R_DISPLAY_OPEN_PITCH] = cl.resize_pitch;
+		d.out[AAR_R_DISPLAY_OPEN_LAYOUT] = cl.open_layout;
+		d.out[AAR_R_DISPLAY_OPEN_FRONT] = cl.resize_front;
+		d.out[AAR_R_DISPLAY_OPEN_BACK] = cl.resize_back;
+		break;
+	case AAR_OP_DISPLAY_TITLE:
+		if (buf)
+			strncpy(cl.title, (const char *)buf, sizeof(cl.title) - 1U);
+		break;
+	case AAR_OP_DISPLAY_POINTER:
+		cl.ptr_len = r->buf_len;
+		if (buf && r->buf_len >= 8U) {
+			cl.ptr_words[0] = zzapp_get_be32(buf);
+			cl.ptr_words[1] = zzapp_get_be32(buf + 4U);
+			cl.ptr_last = zzapp_get_be32(buf + r->buf_len - 4U);
+		}
+		break;
+	case AAR_OP_DISPLAY_VBLANK:
+		if (cl.vblank_silent)
+			return;
+		if (cl.vblank_result != 0)
+			d.result = cl.vblank_result;
+		break;
+	case AAR_OP_TIME_UNIX:
+		d.out[AAR_R_TIME_UNIX_US_HI] = (uint32_t)((uint64_t)cl.time_us >> 32);
+		d.out[AAR_R_TIME_UNIX_US_LO] = (uint32_t)cl.time_us;
+		d.out[AAR_R_TIME_UNIX_FLAGS] = cl.time_flags;
+		break;
+	case AAR_OP_LOCALE_INFO:
+		if (buf)
+			memcpy(buf, cl.locale_rec, sizeof(cl.locale_rec));
+		break;
+	case AAR_OP_ENV_GET: {
+		uint32_t n = r->buf_len < cl.env_len ? r->buf_len : cl.env_len;
+
+		/* The name is read first, the value is written over it. */
+		strncpy(cl.path, (const char *)buf, sizeof(cl.path) - 1U);
+		cl.env_buf_len = r->buf_len;
+		if (n)
+			memcpy(buf, cl.env_value, n);
+		if (cl.env_len < r->buf_len)
+			buf[cl.env_len] = 0;
+		d.out[AAR_R_ENV_LEN] = cl.env_len;
+		break;
+	}
+	case AAR_OP_CLIP_READ: {
+		uint32_t off = r->arg[AAR_A_CLIP_OFFSET];
+		uint32_t size;
+		uint32_t n = 0U;
+
+		if (off == 0U)
+			cl.clip_seq = 0U;
+		cl.clip_seq++;
+		if (r->buf_len > cl.clip_max_len)
+			cl.clip_max_len = r->buf_len;
+		size = cl.clip_len + (cl.clip_drift && cl.clip_seq > 1U ? 1U : 0U);
+		if (off <= cl.clip_len && !(cl.clip_stall && cl.clip_seq > 1U)) {
+			n = cl.clip_len - off;
+			if (n > r->buf_len)
+				n = r->buf_len;
+			if (cl.clip_cap != 0U && n > cl.clip_cap)
+				n = cl.clip_cap;
+			if (n)
+				memcpy(buf, cl.clip_data + off, n);
+		}
+		d.out[AAR_R_CLIP_READ_SIZE] = size;
+		d.out[AAR_R_CLIP_READ_COUNT] = n;
+		break;
+	}
+	case AAR_OP_CLIP_WRITE: {
+		uint32_t off = r->arg[AAR_A_CLIP_OFFSET];
+		unsigned k = cl.clip_wr_chunks;
+
+		if (k < 16U) {
+			cl.clip_wr_off[k] = off;
+			cl.clip_wr_flags[k] = r->flags;
+			cl.clip_wr_len[k] = r->buf_len;
+			cl.clip_wr_total[k] = r->arg[AAR_A_CLIP_TOTAL];
+		}
+		cl.clip_wr_chunks++;
+		if (cl.clip_fail_chunk != 0U && cl.clip_wr_chunks == cl.clip_fail_chunk) {
+			d.result = AAR_E_NOMEM;
+			break;
+		}
+		if (buf && off + r->buf_len <= sizeof(clip_sink))
+			memcpy(clip_sink + off, buf, r->buf_len);
+		d.out[AAR_R_CLIP_WRITE_COUNT] = cl.clip_take != 0U ?
+			cl.clip_take : r->buf_len;
+		if (r->flags & AAR_CLIPF_LAST)
+			cl.clip_committed++;
+		break;
+	}
 	case AAR_OP_AUDIO_OPEN:
 		d.out[AAR_R_AUDIO_OPEN_RATE] = r->arg[AAR_A_AUDIO_OPEN_RATE];
 		d.out[AAR_R_AUDIO_OPEN_CHANNELS] = r->arg[AAR_A_AUDIO_OPEN_CHANNELS];
@@ -435,6 +613,16 @@ static void client_yield(void)
 	fake_now += cl.clock_step;
 	if (cl.stop_at_yield != 0U && cl.yields == cl.stop_at_yield)
 		cur_rec->host.stop_requested = 1U;
+	if (cl.blank_at_yield != 0U && cl.yields == cl.blank_at_yield) {
+		uint32_t scan = 0U;
+
+		if (cl.blank_mailbox) {
+			if (zzapp_services_display_mailbox_begin(cl.blank_addr, &scan))
+				zzapp_services_display_mailbox_end(cl.blank_mailbox == 1);
+		} else {
+			zzapp_services_display_vblank(cl.blank_addr);
+		}
+	}
 	/* The vertical blank that follows a flip the client submitted: it shows
 	 * the address the services published. */
 	if (cl.pending_vblank == 2U) {
@@ -1596,7 +1784,7 @@ static void test_display_pan(void)
 	st = runtime_of(rec);
 
 	CHECK(zzapp_svc_display_open(0U, 480U, AAR_FMT_RGB565, 0U, &s) == AAR_E_INVAL);
-	CHECK(zzapp_svc_display_open(640U, 480U, AAR_FMT_RGB565, 0x80U, &s) == AAR_E_INVAL);
+	CHECK(zzapp_svc_display_open(640U, 480U, AAR_FMT_RGB565, 0x100U, &s) == AAR_E_INVAL);
 	CHECK(cl.nreq[AAR_OP_DISPLAY_OPEN] == 0U);
 	CHECK(zzapp_svc_display_open(640U, 480U, AAR_FMT_RGB565, 0U, &s) == AAR_OK);
 	CHECK(cl.last[AAR_OP_DISPLAY_OPEN].arg[AAR_A_DISPLAY_OPEN_W] == 640U);
@@ -1904,6 +2092,1313 @@ static void test_display_bad_tokens(void)
 	cl.open_layout = AAR_LAYOUT_BGRA8888;	/* not a layout of RGB565 */
 	CHECK(zzapp_svc_display_open(640U, 480U, AAR_FMT_RGB565, 0U, &s) == AAR_E_INVAL);
 	CHECK(set_display.count == 0U);
+	(void)mbox(ZZAPP_OP_RELEASE, handle, 0U, 0U, NULL, NULL);
+}
+
+/* ---- API 0.6: files, host environment, clipboard ---------------------------------- */
+
+static void fill_pattern(uint8_t *p, uint32_t n)
+{
+	uint32_t i;
+
+	for (i = 0U; i < n; i++)
+		p[i] = (uint8_t)(i * 13U + (i >> 8) + 1U);
+}
+
+static void test_files_v06(void)
+{
+	client_t c;
+	zzapp_rec_t *rec;
+	uint32_t handle;
+	char p255[256], q255[256], p256[257];
+	aar_volume_info vi[4];
+	aar_stat st;
+	int rfd, wfd;
+	uint32_t before;
+	unsigned late;
+	aar_completion d;
+	int32_t errs[4] = { AAR_E_NOENT, AAR_E_EXIST, AAR_E_ACCES, AAR_E_BUSY };
+	unsigned i;
+
+	reset_all();
+	rec = claim(&c, &handle);
+	memset(p255, 'a', 255);
+	p255[255] = '\0';
+	memset(q255, 'b', 255);
+	q255[255] = '\0';
+	memset(p256, 'a', 256);
+	p256[256] = '\0';
+
+	/* delete and dir_create: the path rules of file_open, the client's error
+	 * comes back as it is. */
+	CHECK(zzapp_svc_file_delete("Work:old") == AAR_OK);
+	CHECK(cl.nreq[AAR_OP_FILE_DELETE] == 1U && strcmp(cl.path, "Work:old") == 0);
+	CHECK(zzapp_svc_file_delete("") == AAR_E_INVAL);
+	CHECK(zzapp_svc_file_delete(NULL) == AAR_E_INVAL);
+	CHECK(zzapp_svc_file_delete(p256) == AAR_E_INVAL);
+	CHECK(cl.nreq[AAR_OP_FILE_DELETE] == 1U);
+	CHECK(zzapp_svc_file_delete(p255) == AAR_OK && strlen(cl.path) == 255U);
+	for (i = 0U; i < 4U; i++) {
+		cl.result = errs[i];
+		CHECK(zzapp_svc_file_delete("Work:x") == errs[i]);
+		CHECK(zzapp_svc_dir_create("Work:x") == errs[i]);
+	}
+	cl.result = AAR_OK;
+	CHECK(zzapp_svc_dir_create("Work:newdir") == AAR_OK);
+	CHECK(cl.nreq[AAR_OP_DIR_CREATE] == 5U && strcmp(cl.path, "Work:newdir") == 0);
+	CHECK(zzapp_svc_dir_create("") == AAR_E_INVAL && cl.nreq[AAR_OP_DIR_CREATE] == 5U);
+
+	/* rename: two paths in one buffer, the flags checked here. */
+	CHECK(zzapp_svc_file_rename("Work:a", "Work:b", 0U) == AAR_OK);
+	CHECK(strcmp(cl.path, "Work:a") == 0 && strcmp(cl.path2, "Work:b") == 0);
+	CHECK(cl.last[AAR_OP_FILE_RENAME].arg[AAR_A_FILE_RENAME_FLAGS] == 0U);
+	CHECK(cl.last[AAR_OP_FILE_RENAME].buf_len == 14U);
+	CHECK(zzapp_svc_file_rename("Work:a", "Work:b", AAR_RENAME_REPLACE) == AAR_OK);
+	CHECK(cl.last[AAR_OP_FILE_RENAME].arg[AAR_A_FILE_RENAME_FLAGS] == AAR_RENAME_REPLACE);
+	before = cl.nreq[AAR_OP_FILE_RENAME];
+	CHECK(zzapp_svc_file_rename("a", "b", 2U) == AAR_E_INVAL);
+	CHECK(zzapp_svc_file_rename("a", "b", 0x80000000U) == AAR_E_INVAL);
+	CHECK(zzapp_svc_file_rename("", "b", 0U) == AAR_E_INVAL);
+	CHECK(zzapp_svc_file_rename("a", "", 0U) == AAR_E_INVAL);
+	CHECK(zzapp_svc_file_rename(NULL, "b", 0U) == AAR_E_INVAL);
+	CHECK(zzapp_svc_file_rename("a", NULL, 0U) == AAR_E_INVAL);
+	CHECK(zzapp_svc_file_rename(p256, "b", 0U) == AAR_E_INVAL);
+	CHECK(zzapp_svc_file_rename("a", p256, 0U) == AAR_E_INVAL);
+	CHECK(cl.nreq[AAR_OP_FILE_RENAME] == before);
+	CHECK(zzapp_svc_file_rename(p255, q255, 0U) == AAR_OK);
+	CHECK(strcmp(cl.path, p255) == 0 && strcmp(cl.path2, q255) == 0);
+	CHECK(cl.last[AAR_OP_FILE_RENAME].buf_len == 512U);
+
+	/* set_date: an int64 of seconds in two words; set_protect: only the
+	 * eight AAR_PROT_* bits. */
+	CHECK(zzapp_svc_file_set_date("Work:f", -2) == AAR_OK);
+	CHECK(cl.last[AAR_OP_FILE_SET_DATE].arg[AAR_A_FILE_DATE_HI] == 0xffffffffU);
+	CHECK(cl.last[AAR_OP_FILE_SET_DATE].arg[AAR_A_FILE_DATE_LO] == 0xfffffffeU);
+	CHECK(zzapp_svc_file_set_date("Work:f", 0x100000005LL) == AAR_OK);
+	CHECK(cl.last[AAR_OP_FILE_SET_DATE].arg[AAR_A_FILE_DATE_HI] == 1U);
+	CHECK(zzapp_svc_file_set_date("", 5) == AAR_E_INVAL);
+	before = cl.nreq[AAR_OP_FILE_SET_PROTECT];
+	CHECK(zzapp_svc_file_set_protect("Work:f", 0x100U) == AAR_E_INVAL);
+	CHECK(zzapp_svc_file_set_protect("Work:f", 0x80000000U) == AAR_E_INVAL);
+	CHECK(zzapp_svc_file_set_protect("", 0U) == AAR_E_INVAL);
+	CHECK(cl.nreq[AAR_OP_FILE_SET_PROTECT] == before);
+	CHECK(zzapp_svc_file_set_protect("Work:f", 0xffU) == AAR_OK);
+	CHECK(cl.last[AAR_OP_FILE_SET_PROTECT].arg[AAR_A_FILE_PROTECT] == 0xffU);
+
+	/* truncate: an id opened for writing only. */
+	cl.file_size = 100U;
+	rfd = zzapp_svc_file_open("Work:r", AAR_FILE_READ);
+	wfd = zzapp_svc_file_open("Work:w", AAR_FILE_WRITE | AAR_FILE_CREATE);
+	CHECK(rfd == ZZAPP_FD_BASE && wfd == ZZAPP_FD_BASE + 1);
+	CHECK(zzapp_svc_file_truncate(rfd, 5U) == AAR_E_BADF);
+	CHECK(zzapp_svc_file_truncate(99, 5U) == AAR_E_BADF);
+	CHECK(zzapp_svc_file_truncate(0, 5U) == AAR_E_BADF);
+	CHECK(cl.nreq[AAR_OP_FILE_TRUNCATE] == 0U);
+	CHECK(zzapp_svc_file_truncate(wfd, 0x100000002ULL) == AAR_OK);
+	CHECK(cl.last[AAR_OP_FILE_TRUNCATE].arg[AAR_A_FILE_TRUNC_FD] == (uint32_t)wfd);
+	CHECK(cl.last[AAR_OP_FILE_TRUNCATE].arg[AAR_A_FILE_TRUNC_SIZE_HI] == 1U);
+	CHECK(cl.last[AAR_OP_FILE_TRUNCATE].arg[AAR_A_FILE_TRUNC_SIZE_LO] == 2U);
+	CHECK(zzapp_svc_file_close(wfd) == AAR_OK);
+	CHECK(zzapp_svc_file_truncate(wfd, 0U) == AAR_E_BADF);
+	CHECK(zzapp_svc_file_close(rfd) == AAR_OK);
+
+	/* stat reports the protection bits, and only those. */
+	cl.protect = 0x1ffU;
+	CHECK(zzapp_svc_file_stat("Work:b", &st) == AAR_OK && st.protect == 0xffU);
+
+	/* volume_info: bytes from the block counts, the structure capped at the
+	 * caller's size. */
+	cl.vol[0] = 1000U;
+	cl.vol[1] = 250U;
+	cl.vol[2] = 512U;
+	cl.vol[3] = AAR_VOLF_READONLY | 0x10U;
+	memset(vi, 0xee, sizeof(vi));
+	vi[0].size = sizeof(vi[0]);
+	CHECK(zzapp_svc_volume_info("Work:", &vi[0]) == AAR_OK);
+	CHECK(vi[0].size == sizeof(vi[0]) && vi[0].block_bytes == 512U);
+	CHECK(vi[0].total_bytes == 512000U && vi[0].free_bytes == 384000U);
+	CHECK(vi[0].flags == AAR_VOLF_READONLY);
+	CHECK(vi[0].reserved[0] == 0U && vi[0].reserved[2] == 0U);
+	CHECK(vi[1].size == 0xeeeeeeeeU);
+	memset(vi, 0xee, sizeof(vi));
+	vi[0].size = 8U;
+	CHECK(zzapp_svc_volume_info("Work:", &vi[0]) == AAR_OK);
+	CHECK(vi[0].size == 8U && vi[0].block_bytes == 512U);
+	CHECK(vi[0].total_bytes == 0xeeeeeeeeeeeeeeeeULL && vi[0].flags == 0xeeeeeeeeU);
+	memset(vi, 0xee, sizeof(vi));
+	vi[0].size = sizeof(vi[0]) + 16U;
+	CHECK(zzapp_svc_volume_info("Work:", &vi[0]) == AAR_OK);
+	CHECK(vi[0].size == sizeof(vi[0]) && vi[1].size == 0xeeeeeeeeU);
+	cl.vol[0] = 10U;
+	cl.vol[1] = 20U;	/* more used than there is: nothing free */
+	vi[0].size = sizeof(vi[0]);
+	CHECK(zzapp_svc_volume_info("Work:", &vi[0]) == AAR_OK && vi[0].free_bytes == 0U);
+	cl.vol[2] = 0U;
+	memset(vi, 0xee, sizeof(vi));
+	vi[0].size = sizeof(vi[0]);
+	CHECK(zzapp_svc_volume_info("Work:", &vi[0]) == AAR_E_IO);
+	CHECK(vi[0].block_bytes == 0xeeeeeeeeU);
+	cl.vol[2] = 512U;
+	cl.result = AAR_E_NOENT;
+	CHECK(zzapp_svc_volume_info("Work:", &vi[0]) == AAR_E_NOENT);
+	cl.result = AAR_OK;
+	CHECK(zzapp_svc_volume_info("", &vi[0]) == AAR_E_INVAL);
+	CHECK(zzapp_svc_volume_info("Work:", NULL) == AAR_E_INVAL);
+
+	/* A request the client never answers ends after 30 s like a file
+	 * request, and leaves the scratch area borrowed until its late
+	 * completion. */
+	cl.ignore = 1;
+	cl.clock_step = 10000000U;
+	CHECK(zzapp_svc_file_delete("Work:slow") == AAR_E_TIMEDOUT);
+	CHECK(zzapp_xport_req_state(rec, ZZAPP_XPORT_REQ_BLOCKING) == ZZAPP_XPORT_REQ_FREE);
+	cl.ignore = 0;
+	cl.clock_step = 1000U;
+	CHECK(zzapp_svc_dir_create("Work:next") == AAR_E_BUSY);
+	CHECK(zzapp_svc_file_rename("a", "b", 0U) == AAR_E_BUSY);
+	memset(&d, 0, sizeof(d));
+	d.op = AAR_OP_FILE_DELETE;
+	d.id = zzapp_xport_req_id(rec, ZZAPP_XPORT_REQ_BLOCKING);
+	late = zzapp_xport_stats(rec)->late_dropped;
+	client_post(&c, &d);
+	CHECK(zzapp_svc_dir_create("Work:next") == AAR_OK);
+	CHECK(zzapp_xport_stats(rec)->late_dropped == late + 1U);
+	/* A stop ends the wait. */
+	cl.ignore = 1;
+	cl.stop_at_yield = cl.yields + 2U;
+	CHECK(zzapp_svc_file_set_protect("Work:z", 1U) == AAR_E_IO);
+	CHECK(mbox(ZZAPP_OP_RELEASE, handle, 0U, 0U, NULL, NULL) == SDK_STATUS_OK);
+}
+
+/* The clipboard the scripted client received (clip_sink, above). */
+
+static void test_time_locale_env(void)
+{
+	client_t c;
+	zzapp_rec_t *rec;
+	uint32_t handle;
+	zzapp_xport_buf_t data;
+	static const uint8_t hello[] = "hello";
+	char buf[64];
+	char name255[256], name256[257];
+	uint8_t *v;
+	uint8_t *big;
+	uint32_t n, before;
+	int64_t us;
+	aar_locale_info li;
+
+	reset_all();
+	rec = claim(&c, &handle);
+
+	/* Time: an int64 in two words. */
+	cl.time_us = 0x0000000123456789LL;
+	CHECK(zzapp_svc_time_unix_us(&us) == AAR_OK && us == 0x0000000123456789LL);
+	cl.time_us = -5;
+	CHECK(zzapp_svc_time_unix_us(&us) == AAR_OK && us == -5);
+	CHECK(zzapp_svc_time_unix_us(NULL) == AAR_E_INVAL);
+	cl.result = AAR_E_NOSYS;
+	us = 77;
+	CHECK(zzapp_svc_time_unix_us(&us) == AAR_E_NOSYS && us == 77);
+	cl.result = AAR_OK;
+
+	/* Environment, a short value. The first request stages at most the
+	 * scratch area, whatever the caller offers, so no data block is made
+	 * for it. */
+	cl.env_value = hello;
+	cl.env_len = 5U;
+	memset(buf, 'x', sizeof(buf));
+	CHECK(zzapp_svc_env_get("PATH", buf, 0xffffffffU, &n) == AAR_OK);
+	CHECK(n == 5U && strcmp(buf, "hello") == 0);
+	CHECK(cl.nreq[AAR_OP_ENV_GET] == 1U && strcmp(cl.path, "hello") != 0);
+	CHECK(cl.last[AAR_OP_ENV_GET].buf_len == ZZAPP_XPORT_SCRATCH_BYTES);
+	CHECK(zzapp_xport_block_get(rec, ZZAPP_XPORT_BLOCK_DATA, &data) == 0);
+	CHECK(zzapp_svc_env_get("PATH", buf, 64U, &n) == AAR_OK);
+	CHECK(cl.last[AAR_OP_ENV_GET].buf_len == 64U);
+	CHECK(zzapp_svc_env_get("PATH", buf, 6U, &n) == AAR_OK && n == 5U);
+	CHECK(strcmp(buf, "hello") == 0);
+	/* A value that does not fit with its NUL is AAR_E_NOSPC, the length is
+	 * reported, and the caller's buffer is not touched. */
+	memset(buf, 'x', sizeof(buf));
+	CHECK(zzapp_svc_env_get("PATH", buf, 5U, &n) == AAR_E_NOSPC && n == 5U);
+	CHECK(buf[0] == 'x');
+	CHECK(zzapp_svc_env_get("PATH", buf, 3U, &n) == AAR_E_NOSPC && n == 5U);
+	CHECK(zzapp_svc_env_get("PATH", NULL, 0U, &n) == AAR_E_NOSPC && n == 5U);
+	CHECK(cl.last[AAR_OP_ENV_GET].buf_len == 5U);	/* the name and its NUL */
+	/* Argument checks, before anything reaches the client. */
+	before = cl.nreq[AAR_OP_ENV_GET];
+	CHECK(zzapp_svc_env_get(NULL, buf, 8U, &n) == AAR_E_INVAL);
+	CHECK(zzapp_svc_env_get("", buf, 8U, &n) == AAR_E_INVAL);
+	CHECK(zzapp_svc_env_get("PATH", buf, 8U, NULL) == AAR_E_INVAL);
+	CHECK(zzapp_svc_env_get("PATH", NULL, 8U, &n) == AAR_E_INVAL);
+	memset(name256, 'n', 256);
+	name256[256] = '\0';
+	CHECK(zzapp_svc_env_get(name256, buf, 8U, &n) == AAR_E_INVAL);
+	CHECK(cl.nreq[AAR_OP_ENV_GET] == before);
+	memcpy(name255, name256, 255);
+	name255[255] = '\0';
+	CHECK(zzapp_svc_env_get(name255, buf, 8U, &n) == AAR_OK);
+	CHECK(cl.nreq[AAR_OP_ENV_GET] == before + 1U && strlen(cl.path) == 255U);
+	cl.result = AAR_E_NOENT;
+	n = 99U;
+	CHECK(zzapp_svc_env_get("NOPE", buf, 8U, &n) == AAR_E_NOENT && n == 0U);
+	cl.result = AAR_OK;
+
+	/* Values beyond the scratch area: the first request learns the length,
+	 * the second has room for the value and its NUL. */
+	v = malloc(600000U);
+	big = malloc(600000U);
+	fill_pattern(v, 600000U);
+	cl.env_value = v;
+	cl.env_len = 5000U;
+	before = cl.nreq[AAR_OP_ENV_GET];
+	CHECK(zzapp_svc_env_get("BIG", (char *)big, 10000U, &n) == AAR_OK && n == 5000U);
+	CHECK(cl.nreq[AAR_OP_ENV_GET] - before == 2U);
+	CHECK(cl.last[AAR_OP_ENV_GET].buf_len == 5001U);
+	CHECK(memcmp(big, v, 5000U) == 0 && big[5000] == 0U);
+	before = cl.nreq[AAR_OP_ENV_GET];
+	CHECK(zzapp_svc_env_get("BIG", (char *)big, 5000U, &n) == AAR_E_NOSPC && n == 5000U);
+	CHECK(cl.nreq[AAR_OP_ENV_GET] - before == 1U);
+	before = cl.nreq[AAR_OP_ENV_GET];
+	CHECK(zzapp_svc_env_get("BIG", (char *)big, 5001U, &n) == AAR_OK && n == 5000U);
+	CHECK(cl.nreq[AAR_OP_ENV_GET] - before == 2U && big[5000] == 0U);
+	/* The largest value one request can carry is DATA_MAX - 1 bytes. */
+	cl.env_len = ZZAPP_XPORT_DATA_MAX - 1U;
+	before = cl.nreq[AAR_OP_ENV_GET];
+	CHECK(zzapp_svc_env_get("BIG", (char *)big, 300000U, &n) == AAR_OK);
+	CHECK(n == ZZAPP_XPORT_DATA_MAX - 1U && cl.nreq[AAR_OP_ENV_GET] - before == 2U);
+	CHECK(cl.last[AAR_OP_ENV_GET].buf_len == ZZAPP_XPORT_DATA_MAX);
+	CHECK(memcmp(big, v, n) == 0 && big[n] == 0U);
+	/* One more byte cannot be carried: AAR_E_NOSPC with the full length,
+	 * and nothing written, even for a caller that has room. */
+	cl.env_len = ZZAPP_XPORT_DATA_MAX;
+	memset(big, 0x5a, 16U);
+	before = cl.nreq[AAR_OP_ENV_GET];
+	CHECK(zzapp_svc_env_get("BIG", (char *)big, 400000U, &n) == AAR_E_NOSPC);
+	CHECK(n == ZZAPP_XPORT_DATA_MAX && big[0] == 0x5aU);
+	CHECK(cl.nreq[AAR_OP_ENV_GET] - before == 1U);
+	cl.env_len = 600000U;
+	CHECK(zzapp_svc_env_get("BIG", (char *)big, 0xffffffffU, &n) == AAR_E_NOSPC);
+	CHECK(n == 600000U && big[0] == 0x5aU);
+	free(v);
+	free(big);
+
+	/* Locale: a 64-byte record of big-endian words, unknown bits and
+	 * missing NULs repaired here, the structure capped at the caller's
+	 * size. */
+	zzapp_put_be32(cl.locale_rec + AAR_LOCALE_REC_UTC_OFFSET_MIN, (uint32_t)-90);
+	zzapp_put_be32(cl.locale_rec + AAR_LOCALE_REC_FLAGS, AAR_LOCALEF_OFFSET_KNOWN | 0x80U);
+	memset(cl.locale_rec + AAR_LOCALE_REC_LANGUAGE, 'x', 32U);
+	memcpy(cl.locale_rec + AAR_LOCALE_REC_COUNTRY, "GB", 2U);
+	memcpy(cl.locale_rec + AAR_LOCALE_REC_DECIMAL_POINT, ",", 1U);
+	memset(cl.locale_rec + AAR_LOCALE_REC_GROUP_SEPARATOR, 'y', 4U);
+	memset(&li, 0xee, sizeof(li));
+	li.size = sizeof(li);
+	CHECK(zzapp_svc_locale_info(&li) == AAR_OK);
+	CHECK(cl.last[AAR_OP_LOCALE_INFO].buf_len == AAR_LOCALE_REC_BYTES);
+	CHECK(li.size == sizeof(li) && li.utc_offset_min == -90);
+	CHECK(li.flags == AAR_LOCALEF_OFFSET_KNOWN);
+	CHECK(strlen(li.language) == 31U && li.language[0] == 'x');
+	CHECK(strcmp(li.country, "GB") == 0 && strcmp(li.decimal_point, ",") == 0);
+	CHECK(strlen(li.group_separator) == 3U);
+	CHECK(li.reserved[0] == 0U && li.reserved[2] == 0U);
+	memset(&li, 0xee, sizeof(li));
+	li.size = 4U;
+	CHECK(zzapp_svc_locale_info(&li) == AAR_OK);
+	CHECK(li.size == 4U && li.utc_offset_min == (int32_t)0xeeeeeeee);
+	memset(&li, 0xee, sizeof(li));
+	li.size = 0U;
+	CHECK(zzapp_svc_locale_info(&li) == AAR_OK && li.size == 0U);
+	CHECK(li.utc_offset_min == (int32_t)0xeeeeeeee && li.flags == 0xeeeeeeeeU);
+	CHECK(zzapp_svc_locale_info(NULL) == AAR_E_INVAL);
+	cl.result = AAR_E_ACCES;
+	li.size = sizeof(li);
+	CHECK(zzapp_svc_locale_info(&li) == AAR_E_ACCES && li.utc_offset_min == (int32_t)0xeeeeeeee);
+	cl.result = AAR_OK;
+	CHECK(mbox(ZZAPP_OP_RELEASE, handle, 0U, 0U, NULL, NULL) == SDK_STATUS_OK);
+}
+
+static void test_clipboard(void)
+{
+	client_t c;
+	zzapp_rec_t *rec;
+	uint32_t handle;
+	uint8_t *data;
+	uint8_t *out;
+	uint32_t n, before;
+
+	reset_all();
+	rec = claim(&c, &handle);
+	(void)rec;
+	data = malloc(700000U);
+	out = malloc(700000U);
+	fill_pattern(data, 700000U);
+	cl.clip_data = data;
+	cl.clip_len = 700000U;
+
+	/* A clip larger than one chunk is read in chunks of at most
+	 * ZZAPP_XPORT_DATA_MAX, the offset rising from 0. */
+	memset(out, 0, 700000U);
+	CHECK(zzapp_svc_clip_read(0U, AAR_CLIP_TEXT, out, 700000U, &n) == AAR_OK);
+	CHECK(n == 700000U && memcmp(out, data, 700000U) == 0);
+	CHECK(cl.nreq[AAR_OP_CLIP_READ] == 3U);
+	CHECK(cl.clip_max_len == ZZAPP_XPORT_DATA_MAX);
+	CHECK(cl.last[AAR_OP_CLIP_READ].arg[AAR_A_CLIP_OFFSET] == 2U * ZZAPP_XPORT_DATA_MAX);
+	CHECK(cl.last[AAR_OP_CLIP_READ].buf_len == 700000U - 2U * ZZAPP_XPORT_DATA_MAX);
+	/* A buffer that is too small: AAR_E_NOSPC, the full size, and the bytes
+	 * that fit. */
+	before = cl.nreq[AAR_OP_CLIP_READ];
+	memset(out, 0, 2000U);
+	CHECK(zzapp_svc_clip_read(255U, AAR_CLIP_IFF, out, 1000U, &n) == AAR_E_NOSPC);
+	CHECK(n == 700000U && memcmp(out, data, 1000U) == 0 && out[1000] == 0U);
+	CHECK(cl.nreq[AAR_OP_CLIP_READ] - before == 1U);
+	CHECK(cl.last[AAR_OP_CLIP_READ].arg[AAR_A_CLIP_UNIT] == 255U);
+	CHECK(cl.last[AAR_OP_CLIP_READ].arg[AAR_A_CLIP_TYPE] == AAR_CLIP_IFF);
+	/* Count only: no buffer at all. */
+	before = cl.nreq[AAR_OP_CLIP_READ];
+	CHECK(zzapp_svc_clip_read(0U, AAR_CLIP_TEXT, NULL, 0U, &n) == AAR_E_NOSPC && n == 700000U);
+	CHECK(cl.nreq[AAR_OP_CLIP_READ] - before == 1U);
+	CHECK(cl.last[AAR_OP_CLIP_READ].buf == 0U && cl.last[AAR_OP_CLIP_READ].buf_len == 0U);
+	/* A client that answers less than it was asked for is asked again at
+	 * the new offset. */
+	cl.clip_cap = 1000U;
+	before = cl.nreq[AAR_OP_CLIP_READ];
+	memset(out, 0, 4000U);
+	CHECK(zzapp_svc_clip_read(0U, AAR_CLIP_TEXT, out, 3000U, &n) == AAR_E_NOSPC);
+	CHECK(cl.nreq[AAR_OP_CLIP_READ] - before == 3U && n == 700000U);
+	CHECK(memcmp(out, data, 3000U) == 0 && out[3000] == 0U);
+	/* A client that stops answering bytes, or changes the clip's size under
+	 * a sequence, breaks it. */
+	cl.clip_stall = 1;
+	CHECK(zzapp_svc_clip_read(0U, AAR_CLIP_TEXT, out, 3000U, &n) == AAR_E_IO);
+	cl.clip_stall = 0;
+	cl.clip_drift = 1;
+	CHECK(zzapp_svc_clip_read(0U, AAR_CLIP_TEXT, out, 3000U, &n) == AAR_E_IO);
+	cl.clip_drift = 0;
+	cl.clip_cap = 0U;
+	/* An empty clip, and the client's errors. */
+	cl.clip_len = 0U;
+	n = 99U;
+	CHECK(zzapp_svc_clip_read(0U, AAR_CLIP_TEXT, out, 10U, &n) == AAR_OK && n == 0U);
+	cl.result = AAR_E_NOENT;
+	CHECK(zzapp_svc_clip_read(0U, AAR_CLIP_TEXT, out, 10U, &n) == AAR_E_NOENT && n == 0U);
+	cl.result = AAR_OK;
+	/* Unknown unit, unknown type, a missing buffer: nothing is sent. */
+	before = cl.nreq[AAR_OP_CLIP_READ];
+	CHECK(zzapp_svc_clip_read(256U, AAR_CLIP_TEXT, out, 10U, &n) == AAR_E_INVAL);
+	CHECK(zzapp_svc_clip_read(0U, 0U, out, 10U, &n) == AAR_E_INVAL);
+	CHECK(zzapp_svc_clip_read(0U, 3U, out, 10U, &n) == AAR_E_INVAL);
+	CHECK(zzapp_svc_clip_read(0U, AAR_CLIP_TEXT, NULL, 10U, &n) == AAR_E_INVAL);
+	CHECK(zzapp_svc_clip_read(0U, AAR_CLIP_TEXT, out, 10U, NULL) == AAR_E_INVAL);
+	CHECK(cl.nreq[AAR_OP_CLIP_READ] == before);
+
+	/* Write: chunks of at most ZZAPP_XPORT_DATA_MAX, offsets rising from 0,
+	 * the total in every one, and AAR_CLIPF_LAST on the final chunk only. */
+	cl.clip_wr_chunks = 0U;
+	cl.clip_committed = 0U;
+	memset(clip_sink, 0, 700000U);
+	CHECK(zzapp_svc_clip_write(3U, AAR_CLIP_TEXT, data, 600000U) == AAR_OK);
+	CHECK(cl.clip_wr_chunks == 3U && cl.clip_committed == 1U);
+	CHECK(cl.clip_wr_off[0] == 0U && cl.clip_wr_off[1] == ZZAPP_XPORT_DATA_MAX &&
+	      cl.clip_wr_off[2] == 2U * ZZAPP_XPORT_DATA_MAX);
+	CHECK(cl.clip_wr_len[0] == ZZAPP_XPORT_DATA_MAX && cl.clip_wr_len[1] == ZZAPP_XPORT_DATA_MAX);
+	CHECK(cl.clip_wr_len[2] == 600000U - 2U * ZZAPP_XPORT_DATA_MAX);
+	CHECK(cl.clip_wr_flags[0] == 0U && cl.clip_wr_flags[1] == 0U &&
+	      cl.clip_wr_flags[2] == AAR_CLIPF_LAST);
+	CHECK(cl.clip_wr_total[0] == 600000U && cl.clip_wr_total[2] == 600000U);
+	CHECK(cl.last[AAR_OP_CLIP_WRITE].arg[AAR_A_CLIP_UNIT] == 3U);
+	CHECK(memcmp(clip_sink, data, 600000U) == 0);
+	/* Exactly one chunk is the last one. */
+	cl.clip_wr_chunks = 0U;
+	CHECK(zzapp_svc_clip_write(0U, AAR_CLIP_IFF, data, ZZAPP_XPORT_DATA_MAX) == AAR_OK);
+	CHECK(cl.clip_wr_chunks == 1U && cl.clip_wr_flags[0] == AAR_CLIPF_LAST);
+	/* An empty clip is one request, no buffer, and the last. */
+	cl.clip_wr_chunks = 0U;
+	CHECK(zzapp_svc_clip_write(0U, AAR_CLIP_TEXT, NULL, 0U) == AAR_OK);
+	CHECK(cl.clip_wr_chunks == 1U && cl.clip_wr_flags[0] == AAR_CLIPF_LAST);
+	CHECK(cl.clip_wr_len[0] == 0U && cl.clip_wr_total[0] == 0U);
+	CHECK(cl.last[AAR_OP_CLIP_WRITE].buf == 0U);
+	/* An error on a middle chunk ends the sequence before the last one: the
+	 * client's clip is not replaced. */
+	cl.clip_wr_chunks = 0U;
+	cl.clip_committed = 0U;
+	cl.clip_fail_chunk = 2U;
+	CHECK(zzapp_svc_clip_write(0U, AAR_CLIP_TEXT, data, 600000U) == AAR_E_NOMEM);
+	CHECK(cl.clip_wr_chunks == 2U && cl.clip_committed == 0U);
+	CHECK(cl.clip_wr_flags[0] == 0U && cl.clip_wr_flags[1] == 0U);
+	cl.clip_fail_chunk = 0U;
+	/* A client that takes less than it was given breaks the sequence. */
+	cl.clip_wr_chunks = 0U;
+	cl.clip_take = 1U;
+	CHECK(zzapp_svc_clip_write(0U, AAR_CLIP_TEXT, data, 100U) == AAR_E_IO);
+	CHECK(cl.clip_wr_chunks == 1U);
+	cl.clip_take = 0U;
+	cl.clip_wr_chunks = 0U;
+	CHECK(zzapp_svc_clip_write(256U, AAR_CLIP_TEXT, data, 10U) == AAR_E_INVAL);
+	CHECK(zzapp_svc_clip_write(0U, 0U, data, 10U) == AAR_E_INVAL);
+	CHECK(zzapp_svc_clip_write(0U, 3U, data, 10U) == AAR_E_INVAL);
+	CHECK(zzapp_svc_clip_write(0U, AAR_CLIP_TEXT, NULL, 10U) == AAR_E_INVAL);
+	CHECK(cl.clip_wr_chunks == 0U);
+	free(data);
+	free(out);
+	CHECK(mbox(ZZAPP_OP_RELEASE, handle, 0U, 0U, NULL, NULL) == SDK_STATUS_OK);
+}
+
+/* ---- API 0.6: display --------------------------------------------------------------- */
+
+#define FEATURE_CAPS (AAR_DISPCAP_WINDOW | AAR_DISPCAP_RESIZE | \
+		      AAR_DISPCAP_POINTER_ABS | AAR_DISPCAP_TEXT_INPUT | \
+		      AAR_DISPCAP_CLOSE_REQUEST | AAR_DISPCAP_SCALED)
+
+/* The caps are what was asked for and what the client says it did, nothing
+ * else; a window or a scaled surface is the client's, never scanned out. */
+static void test_display_caps_v06(void)
+{
+	client_t c;
+	zzapp_rec_t *rec;
+	uint32_t handle;
+	aar_surface s;
+	struct zzapp_service_runtime *st;
+	uint32_t all = AAR_DISPLAY_WINDOW | AAR_DISPLAY_RESIZABLE |
+		       AAR_DISPLAY_POINTER_ABS | AAR_DISPLAY_TEXT_INPUT |
+		       AAR_DISPLAY_CLOSE_REQUEST | AAR_DISPLAY_SCALE;
+
+	reset_all();
+	rec = claim(&c, &handle);
+	give_space(rec);
+	rec->claim.client_caps = ZZAPP_CLIENT_SCANOUT_ACK | ZZAPP_CLIENT_LATEST;
+	st = runtime_of(rec);
+	cl.open_spare = 0x00600000U;
+
+	/* An unknown flag bit is refused; the eight known ones are not. */
+	CHECK(zzapp_svc_display_open(640U, 480U, AAR_FMT_RGB565, 0x100U, &s) == AAR_E_INVAL);
+	CHECK(zzapp_svc_display_open(640U, 480U, AAR_FMT_RGB565, 0x80000000U, &s) == AAR_E_INVAL);
+	CHECK(cl.nreq[AAR_OP_DISPLAY_OPEN] == 0U);
+
+	/* Every feature asked for and granted; runtime-owned bits and junk in
+	 * the reply are not the client's to grant. */
+	cl.open_caps = FEATURE_CAPS | AAR_DISPCAP_LATEST | AAR_DISPCAP_CLUT8 | 0x8000U;
+	CHECK(zzapp_svc_display_open(640U, 480U, AAR_FMT_RGB565,
+				     all | AAR_DISPLAY_VSYNC | AAR_DISPLAY_LATEST, &s) == AAR_OK);
+	CHECK(cl.last[AAR_OP_DISPLAY_OPEN].arg[AAR_A_DISPLAY_OPEN_FLAGS] ==
+	      (all | AAR_DISPLAY_VSYNC | AAR_DISPLAY_LATEST));
+	CHECK(s.caps == (AAR_DISPCAP_ASYNC | FEATURE_CAPS));
+	CHECK(st->display_caps == FEATURE_CAPS);
+	/* Never direct scanout, never card-owned, even with a client that
+	 * offers both. */
+	CHECK(st->display_scanout_ack == 0U && st->display_mailbox_active == 0);
+	CHECK(zzapp_display_latest() == 0);
+	CHECK(zzapp_svc_display_close(1U) == AAR_OK);
+	CHECK(st->display_caps == 0U && st->display_flags == 0U);
+
+	/* Asked for, not granted. */
+	cl.open_caps = 0U;
+	CHECK(zzapp_svc_display_open(640U, 480U, AAR_FMT_RGB565, all, &s) == AAR_OK);
+	CHECK(s.caps == AAR_DISPCAP_ASYNC && st->display_caps == 0U);
+	CHECK(st->display_scanout_ack == 1U);
+	CHECK(zzapp_svc_display_close(1U) == AAR_OK);
+	/* Granted, not asked for. */
+	cl.open_caps = FEATURE_CAPS;
+	CHECK(zzapp_svc_display_open(640U, 480U, AAR_FMT_RGB565, 0U, &s) == AAR_OK);
+	CHECK(s.caps == AAR_DISPCAP_ASYNC);
+	CHECK(zzapp_svc_display_close(1U) == AAR_OK);
+	/* A resizable window and its close gadget need the window. */
+	cl.open_caps = AAR_DISPCAP_WINDOW | AAR_DISPCAP_RESIZE | AAR_DISPCAP_CLOSE_REQUEST;
+	CHECK(zzapp_svc_display_open(640U, 480U, AAR_FMT_RGB565, AAR_DISPLAY_RESIZABLE |
+				     AAR_DISPLAY_CLOSE_REQUEST, &s) == AAR_OK);
+	CHECK(s.caps == AAR_DISPCAP_ASYNC);
+	CHECK(zzapp_svc_display_close(1U) == AAR_OK);
+	cl.open_caps = AAR_DISPCAP_RESIZE | AAR_DISPCAP_CLOSE_REQUEST;
+	CHECK(zzapp_svc_display_open(640U, 480U, AAR_FMT_RGB565, AAR_DISPLAY_WINDOW |
+				     AAR_DISPLAY_RESIZABLE | AAR_DISPLAY_CLOSE_REQUEST, &s) == AAR_OK);
+	CHECK(s.caps == AAR_DISPCAP_ASYNC);
+	CHECK(zzapp_svc_display_close(1U) == AAR_OK);
+	/* Scaled alone is the client's too. */
+	cl.open_caps = AAR_DISPCAP_SCALED;
+	CHECK(zzapp_svc_display_open(640U, 480U, AAR_FMT_RGB565, AAR_DISPLAY_SCALE |
+				     AAR_DISPLAY_LATEST, &s) == AAR_OK);
+	CHECK(s.caps == (AAR_DISPCAP_ASYNC | AAR_DISPCAP_SCALED));
+	CHECK(st->display_scanout_ack == 0U && zzapp_display_latest() == 0);
+	CHECK(zzapp_svc_display_close(1U) == AAR_OK);
+	/* A plain screen keeps both. */
+	cl.open_caps = 0U;
+	CHECK(zzapp_svc_display_open(640U, 480U, AAR_FMT_RGB565, AAR_DISPLAY_LATEST, &s) == AAR_OK);
+	CHECK((s.caps & AAR_DISPCAP_LATEST) && zzapp_display_latest() == 1);
+	zzapp_services_on_app_end();
+	(void)zzapp_rec_retire(rec->hdr.pid);
+	(void)mbox(ZZAPP_OP_RELEASE, handle, 0U, 0U, NULL, NULL);
+}
+
+/* A window or scaled display completes a flip on the client's reply even
+ * when the reply asks for a submitted pan: the card never scans it out, so
+ * there is no blank to wait for. */
+static void test_display_window_flip(void)
+{
+	client_t c;
+	zzapp_rec_t *rec;
+	uint32_t handle;
+	aar_surface s;
+	struct zzapp_service_runtime *st;
+	uint32_t flips;
+	unsigned round;
+
+	reset_all();
+	rec = claim(&c, &handle);
+	give_space(rec);
+	rec->claim.client_caps = ZZAPP_CLIENT_SCANOUT_ACK | ZZAPP_CLIENT_LATEST;
+	st = runtime_of(rec);
+	cl.open_spare = 0x00600000U;
+	for (round = 0U; round < 2U; round++) {
+		cl.open_caps = round == 0U ? AAR_DISPCAP_WINDOW : AAR_DISPCAP_SCALED;
+		CHECK(zzapp_svc_display_open(640U, 480U, AAR_FMT_RGB565,
+					     (round == 0U ? AAR_DISPLAY_WINDOW : AAR_DISPLAY_SCALE) |
+					     AAR_DISPLAY_LATEST | AAR_DISPLAY_VSYNC, &s) == AAR_OK);
+		CHECK(!(s.caps & AAR_DISPCAP_LATEST));
+		flips = cl.nreq[AAR_OP_DISPLAY_FLIP];
+		cl.flip_flags = ZZAPP_FLIPF_SUBMITTED;
+		cl.flip_front = st->display_back;
+		CHECK(zzapp_svc_display_flip(1U) == AAR_OK);
+		/* It went to the client, not to a card-owned mailbox, and nothing
+		 * waits for the scanout. */
+		CHECK(cl.nreq[AAR_OP_DISPLAY_FLIP] == flips + 1U);
+		CHECK(st->display_flip_ack == st->display_flip_gen);
+		CHECK(st->display_flip_submit == 0U && st->display_mailbox_active == 0);
+		CHECK(zzapp_display_flip_idle() == 1);
+		/* A blank at the address the client named does not matter. */
+		zzapp_services_display_vblank(st->display_flip_address);
+		CHECK(zzapp_svc_display_flip(1U) == AAR_OK);
+		CHECK(zzapp_svc_display_close(1U) == AAR_OK);
+	}
+	zzapp_services_on_app_end();
+	(void)zzapp_rec_retire(rec->hdr.pid);
+	(void)mbox(ZZAPP_OP_RELEASE, handle, 0U, 0U, NULL, NULL);
+}
+
+/* aar_display_last_present_us: 0 until a frame is known to be shown, then the
+ * time that was learnt; a submission, a timeout and an error are not it. */
+static void test_display_present_time(void)
+{
+	client_t c;
+	zzapp_rec_t *rec;
+	uint32_t handle;
+	aar_surface s;
+	struct zzapp_service_runtime *st;
+	aar_completion d;
+	uint64_t t1, t2;
+	uint32_t scan = 0U;
+
+	/* A window: the client's reply is the presentation. */
+	reset_all();
+	rec = claim(&c, &handle);
+	give_space(rec);
+	rec->claim.client_caps = ZZAPP_CLIENT_SCANOUT_ACK;
+	st = runtime_of(rec);
+	CHECK(zzapp_svc_display_last_present_us() == 0U);
+	cl.open_caps = AAR_DISPCAP_WINDOW;
+	CHECK(zzapp_svc_display_open(640U, 480U, AAR_FMT_RGB565, AAR_DISPLAY_WINDOW, &s) == AAR_OK);
+	CHECK(zzapp_svc_display_last_present_us() == 0U);
+	/* An error reply shows nothing. */
+	cl.result = AAR_E_IO;
+	CHECK(zzapp_svc_display_flip(1U) == AAR_E_IO);
+	cl.result = AAR_OK;
+	CHECK(zzapp_svc_display_last_present_us() == 0U);
+	CHECK(zzapp_svc_display_flip(1U) == AAR_OK);
+	t1 = zzapp_svc_display_last_present_us();
+	CHECK(t1 > 1000000U && t1 <= fake_now);
+	/* An async flip the client has not answered is not shown yet. */
+	cl.ignore = 1;
+	fake_now += 50000U;
+	CHECK(zzapp_svc_display_flip_async(1U) == AAR_OK);
+	client_service(&c);
+	CHECK(zzapp_display_flip_idle() == 0);
+	CHECK(zzapp_svc_display_last_present_us() == t1);
+	cl.ignore = 0;
+	fake_now += 50000U;
+	memset(&d, 0, sizeof(d));
+	d.op = AAR_OP_DISPLAY_FLIP;
+	d.id = rec->xport.req[ZZAPP_XPORT_REQ_FLIP].id;
+	client_post(&c, &d);
+	CHECK(zzapp_display_flip_idle() == 1);
+	t2 = zzapp_svc_display_last_present_us();
+	CHECK(t2 >= t1 + 100000U);
+	/* A new launch starts again from 0. */
+	zzapp_services_on_launch();
+	CHECK(zzapp_svc_display_last_present_us() == 0U);
+	zzapp_services_on_app_end();
+	(void)zzapp_rec_retire(rec->hdr.pid);
+	(void)mbox(ZZAPP_OP_RELEASE, handle, 0U, 0U, NULL, NULL);
+
+	/* A screen with scanout acknowledgement: submitting is not showing. The
+	 * firmware's 100 ms timeout lets the app go and is not showing either;
+	 * the blank that sees the address is. */
+	reset_all();
+	rec = claim(&c, &handle);
+	give_space(rec);
+	rec->claim.client_caps = ZZAPP_CLIENT_SCANOUT_ACK;
+	st = runtime_of(rec);
+	CHECK(zzapp_svc_display_open(640U, 480U, AAR_FMT_RGB565, 0U, &s) == AAR_OK);
+	cl.flip_flags = ZZAPP_FLIPF_SUBMITTED;
+	cl.no_vblank = 1;
+	cl.clock_step = 30000U;
+	CHECK(zzapp_svc_display_flip(1U) == AAR_OK);
+	CHECK(st->display_flip_ack == st->display_flip_gen);
+	CHECK(zzapp_svc_display_last_present_us() == 0U);
+	cl.no_vblank = 0;
+	cl.clock_step = 1000U;
+	CHECK(zzapp_svc_display_flip(1U) == AAR_OK);
+	t1 = zzapp_svc_display_last_present_us();
+	CHECK(t1 != 0U && t1 <= fake_now);
+	/* The blank itself, from the interrupt, stamps the time it ran. */
+	cl.ignore = 1;
+	CHECK(zzapp_svc_display_flip_async(1U) == AAR_OK);
+	memset(&d, 0, sizeof(d));
+	d.op = AAR_OP_DISPLAY_FLIP;
+	d.id = rec->xport.req[ZZAPP_XPORT_REQ_FLIP].id;
+	d.flags = ZZAPP_FLIPF_SUBMITTED;
+	client_post(&c, &d);
+	CHECK(zzapp_display_flip_idle() == 0);
+	CHECK(zzapp_svc_display_last_present_us() == t1);
+	fake_now += 16000U;
+	zzapp_services_display_vblank(st->display_flip_address);
+	CHECK(zzapp_svc_display_last_present_us() == fake_now);
+	zzapp_services_on_app_end();
+	(void)zzapp_rec_retire(rec->hdr.pid);
+	(void)mbox(ZZAPP_OP_RELEASE, handle, 0U, 0U, NULL, NULL);
+
+	/* A card-owned (LATEST) frame is shown when the blank latches it, not
+	 * when it is queued, and not when a latch is abandoned. */
+	reset_all();
+	rec = claim(&c, &handle);
+	give_space(rec);
+	rec->claim.client_caps = ZZAPP_CLIENT_LATEST;
+	st = runtime_of(rec);
+	cl.open_spare = 0x00600000U;
+	CHECK(zzapp_svc_display_open(640U, 480U, AAR_FMT_RGB565, AAR_DISPLAY_LATEST, &s) == AAR_OK);
+	CHECK(zzapp_display_latest() == 1);
+	CHECK(zzapp_svc_display_flip(1U) == AAR_OK);
+	CHECK(zzapp_svc_display_last_present_us() == 0U);
+	CHECK(zzapp_services_display_mailbox_begin(0x00400000U, &scan) == 1);
+	zzapp_services_display_mailbox_end(0);
+	CHECK(zzapp_svc_display_last_present_us() == 0U);
+	fake_now += 7000U;
+	CHECK(zzapp_services_display_mailbox_begin(0x00400000U, &scan) == 1);
+	zzapp_services_display_mailbox_end(1);
+	CHECK(zzapp_svc_display_last_present_us() == fake_now);
+	zzapp_services_on_app_end();
+	(void)zzapp_rec_retire(rec->hdr.pid);
+	(void)mbox(ZZAPP_OP_RELEASE, handle, 0U, 0U, NULL, NULL);
+}
+
+static void test_display_info_modes(void)
+{
+	client_t c;
+	zzapp_rec_t *rec;
+	uint32_t handle;
+	aar_surface s;
+	aar_display_info di;
+	aar_display_mode ms[100];
+	aar_display_mode *big;
+	uint32_t n, before;
+
+	reset_all();
+	rec = claim(&c, &handle);
+	give_space(rec);
+
+	/* Modes need no display; the first request holds at most 42 records. */
+	cl.mode_total = 100U;
+	memset(ms, 0xee, sizeof(ms));
+	before = cl.nreq[AAR_OP_DISPLAY_MODES];
+	CHECK(zzapp_svc_display_modes(ms, 10U, &n) == AAR_E_NOSPC && n == 100U);
+	CHECK(cl.nreq[AAR_OP_DISPLAY_MODES] - before == 1U);
+	CHECK(cl.last[AAR_OP_DISPLAY_MODES].buf_len == 240U);
+	CHECK(ms[0].width == 100U && ms[0].height == 200U && ms[0].refresh_mhz == 50000U);
+	CHECK(ms[0].formats == ((1U << AAR_FMT_RGB565) | (1U << AAR_FMT_BGRA8888) | (1U << AAR_FMT_CLUT8)));
+	CHECK(ms[0].flags == AAR_MODEF_PREFERRED && ms[0].reserved == 0U);
+	CHECK(ms[9].width == 109U && ms[10].width == 0xeeeeeeeeU);
+	/* A caller with room for them all has them all, in a second request. */
+	before = cl.nreq[AAR_OP_DISPLAY_MODES];
+	CHECK(zzapp_svc_display_modes(ms, 100U, &n) == AAR_OK && n == 100U);
+	CHECK(cl.nreq[AAR_OP_DISPLAY_MODES] - before == 2U);
+	CHECK(cl.last[AAR_OP_DISPLAY_MODES].buf_len == 2400U && ms[99].width == 199U);
+	/* A huge `max` stages what the client has, never more than a data
+	 * block of records. */
+	big = malloc(20000U * sizeof(*big));
+	cl.mode_total = 5U;
+	before = cl.nreq[AAR_OP_DISPLAY_MODES];
+	CHECK(zzapp_svc_display_modes(big, 20000U, &n) == AAR_OK && n == 5U);
+	CHECK(cl.nreq[AAR_OP_DISPLAY_MODES] - before == 1U);
+	cl.mode_total = 600U;
+	before = cl.nreq[AAR_OP_DISPLAY_MODES];
+	CHECK(zzapp_svc_display_modes(big, 0xffffffffU, &n) == AAR_OK && n == 600U);
+	CHECK(cl.nreq[AAR_OP_DISPLAY_MODES] - before == 2U);
+	CHECK(cl.last[AAR_OP_DISPLAY_MODES].buf_len == 600U * 24U && big[599].width == 699U);
+	cl.mode_total = 11000U;
+	cl.mode_max_len = 0U;
+	CHECK(zzapp_svc_display_modes(big, 20000U, &n) == AAR_E_NOSPC && n == 11000U);
+	CHECK(cl.mode_max_len == (ZZAPP_XPORT_DATA_MAX / 24U) * 24U);
+	CHECK(cl.mode_max_len <= ZZAPP_XPORT_DATA_MAX);
+	CHECK(big[ZZAPP_XPORT_DATA_MAX / 24U - 1U].width == 100U + ZZAPP_XPORT_DATA_MAX / 24U - 1U);
+	free(big);
+	/* Count only. */
+	cl.mode_total = 5U;
+	CHECK(zzapp_svc_display_modes(NULL, 0U, &n) == AAR_E_NOSPC && n == 5U);
+	CHECK(cl.last[AAR_OP_DISPLAY_MODES].buf == 0U && cl.last[AAR_OP_DISPLAY_MODES].buf_len == 0U);
+	cl.mode_total = 0U;
+	CHECK(zzapp_svc_display_modes(NULL, 0U, &n) == AAR_OK && n == 0U);
+	before = cl.nreq[AAR_OP_DISPLAY_MODES];
+	CHECK(zzapp_svc_display_modes(NULL, 3U, &n) == AAR_E_INVAL);
+	CHECK(zzapp_svc_display_modes(ms, 3U, NULL) == AAR_E_INVAL);
+	CHECK(cl.nreq[AAR_OP_DISPLAY_MODES] == before);
+
+	/* Info: the surface size is the runtime's, WINDOW and SCALED are what
+	 * was granted, and ACTIVE is the only bit the client adds. */
+	cl.info[0] = 111U;
+	cl.info[1] = 222U;
+	cl.info[2] = 60000U;
+	cl.info[3] = 800U;
+	cl.info[4] = 600U;
+	cl.info[5] = 0xffU;
+	memset(&di, 0xee, sizeof(di));
+	di.size = sizeof(di);
+	CHECK(zzapp_svc_display_info(1U, &di) == AAR_E_INVAL);	/* no display */
+	cl.open_caps = AAR_DISPCAP_WINDOW | AAR_DISPCAP_SCALED;
+	CHECK(zzapp_svc_display_open(640U, 480U, AAR_FMT_RGB565,
+				     AAR_DISPLAY_WINDOW | AAR_DISPLAY_SCALE, &s) == AAR_OK);
+	CHECK(zzapp_svc_display_info(2U, &di) == AAR_E_INVAL);
+	CHECK(zzapp_svc_display_info(1U, NULL) == AAR_E_INVAL);
+	CHECK(cl.nreq[AAR_OP_DISPLAY_INFO] == 0U);
+	CHECK(zzapp_svc_display_info(1U, &di) == AAR_OK);
+	CHECK(cl.last[AAR_OP_DISPLAY_INFO].arg[AAR_A_DISPLAY_ID] == 7U);
+	CHECK(di.size == sizeof(di) && di.width == 640U && di.height == 480U);
+	CHECK(di.refresh_mhz == 60000U && di.screen_width == 800U && di.screen_height == 600U);
+	CHECK(di.flags == (AAR_DISPINFO_ACTIVE | AAR_DISPINFO_WINDOW | AAR_DISPINFO_SCALED));
+	CHECK(di.reserved[0] == 0U && di.reserved[4] == 0U);
+	memset(&di, 0xee, sizeof(di));
+	di.size = 12U;
+	CHECK(zzapp_svc_display_info(1U, &di) == AAR_OK);
+	CHECK(di.size == 12U && di.height == 480U && di.refresh_mhz == 0xeeeeeeeeU);
+	cl.result = AAR_E_NOSYS;
+	CHECK(zzapp_svc_display_info(1U, &di) == AAR_E_NOSYS);
+	cl.result = AAR_OK;
+	CHECK(zzapp_svc_display_close(1U) == AAR_OK);
+	cl.open_caps = 0U;
+	CHECK(zzapp_svc_display_open(640U, 480U, AAR_FMT_RGB565, 0U, &s) == AAR_OK);
+	di.size = sizeof(di);
+	CHECK(zzapp_svc_display_info(1U, &di) == AAR_OK && di.flags == AAR_DISPINFO_ACTIVE);
+	zzapp_services_on_app_end();
+	(void)zzapp_rec_retire(rec->hdr.pid);
+	(void)mbox(ZZAPP_OP_RELEASE, handle, 0U, 0U, NULL, NULL);
+}
+
+static void test_display_title_pointer(void)
+{
+	client_t c;
+	zzapp_rec_t *rec;
+	uint32_t handle;
+	aar_surface s;
+	char t255[256], t256[257];
+	uint32_t px[64 * 64];
+	aar_pointer p;
+	uint32_t before, i;
+
+	reset_all();
+	rec = claim(&c, &handle);
+	give_space(rec);
+	memset(t255, 'T', 255);
+	t255[255] = '\0';
+	memset(t256, 'T', 256);
+	t256[256] = '\0';
+	CHECK(zzapp_svc_display_set_title(1U, "x") == AAR_E_INVAL);	/* no display */
+	CHECK(zzapp_svc_display_pointer(1U, AAR_POINTER_HIDDEN, NULL) == AAR_E_INVAL);
+	CHECK(zzapp_svc_display_open(640U, 480U, AAR_FMT_RGB565, 0U, &s) == AAR_OK);
+
+	CHECK(zzapp_svc_display_set_title(1U, "My Window") == AAR_OK);
+	CHECK(strcmp(cl.title, "My Window") == 0);
+	CHECK(cl.last[AAR_OP_DISPLAY_TITLE].arg[AAR_A_DISPLAY_ID] == 7U);
+	CHECK(cl.last[AAR_OP_DISPLAY_TITLE].buf_len == 10U);
+	CHECK(zzapp_svc_display_set_title(1U, "") == AAR_OK);
+	CHECK(cl.last[AAR_OP_DISPLAY_TITLE].buf_len == 1U);
+	CHECK(zzapp_svc_display_set_title(1U, t255) == AAR_OK);
+	CHECK(cl.last[AAR_OP_DISPLAY_TITLE].buf_len == 256U && strlen(cl.title) == 255U);
+	before = cl.nreq[AAR_OP_DISPLAY_TITLE];
+	CHECK(zzapp_svc_display_set_title(1U, t256) == AAR_E_INVAL);
+	CHECK(zzapp_svc_display_set_title(1U, NULL) == AAR_E_INVAL);
+	CHECK(zzapp_svc_display_set_title(2U, "x") == AAR_E_INVAL);
+	CHECK(cl.nreq[AAR_OP_DISPLAY_TITLE] == before);
+
+	/* Pointer modes. The image is read only for CUSTOM. */
+	before = cl.nreq[AAR_OP_DISPLAY_POINTER];
+	CHECK(zzapp_svc_display_pointer(1U, 4U, NULL) == AAR_E_INVAL);
+	CHECK(zzapp_svc_display_pointer(2U, AAR_POINTER_HIDDEN, NULL) == AAR_E_INVAL);
+	CHECK(cl.nreq[AAR_OP_DISPLAY_POINTER] == before);
+	CHECK(zzapp_svc_display_pointer(1U, AAR_POINTER_BUSY, NULL) == AAR_OK);
+	CHECK(cl.last[AAR_OP_DISPLAY_POINTER].arg[AAR_A_DISPLAY_ID] == 7U);
+	CHECK(cl.last[AAR_OP_DISPLAY_POINTER].arg[AAR_A_DISPLAY_POINTER_MODE] == AAR_POINTER_BUSY);
+	CHECK(cl.last[AAR_OP_DISPLAY_POINTER].buf == 0U);
+	memset(&p, 0, sizeof(p));
+	p.width = 99U;
+	CHECK(zzapp_svc_display_pointer(1U, AAR_POINTER_DEFAULT, &p) == AAR_OK);
+	CHECK(cl.last[AAR_OP_DISPLAY_POINTER].arg[AAR_A_DISPLAY_POINTER_W] == 0U);
+	for (i = 0U; i < 64U * 64U; i++)
+		px[i] = 0xff000000U | i;
+	before = cl.nreq[AAR_OP_DISPLAY_POINTER];
+	CHECK(zzapp_svc_display_pointer(1U, AAR_POINTER_CUSTOM, NULL) == AAR_E_INVAL);
+	memset(&p, 0, sizeof(p));
+	p.width = 2U;
+	p.height = 3U;
+	CHECK(zzapp_svc_display_pointer(1U, AAR_POINTER_CUSTOM, &p) == AAR_E_INVAL);	/* no pixels */
+	p.argb = px;
+	p.width = 0U;
+	CHECK(zzapp_svc_display_pointer(1U, AAR_POINTER_CUSTOM, &p) == AAR_E_INVAL);
+	p.width = 65U;
+	CHECK(zzapp_svc_display_pointer(1U, AAR_POINTER_CUSTOM, &p) == AAR_E_INVAL);
+	p.width = 2U;
+	p.height = 65U;
+	CHECK(zzapp_svc_display_pointer(1U, AAR_POINTER_CUSTOM, &p) == AAR_E_INVAL);
+	p.height = 0U;
+	CHECK(zzapp_svc_display_pointer(1U, AAR_POINTER_CUSTOM, &p) == AAR_E_INVAL);
+	p.height = 3U;
+	p.hot_x = -1;
+	CHECK(zzapp_svc_display_pointer(1U, AAR_POINTER_CUSTOM, &p) == AAR_E_INVAL);
+	p.hot_x = 2;
+	CHECK(zzapp_svc_display_pointer(1U, AAR_POINTER_CUSTOM, &p) == AAR_E_INVAL);
+	p.hot_x = 1;
+	p.hot_y = 3;
+	CHECK(zzapp_svc_display_pointer(1U, AAR_POINTER_CUSTOM, &p) == AAR_E_INVAL);
+	p.hot_y = -1;
+	CHECK(zzapp_svc_display_pointer(1U, AAR_POINTER_CUSTOM, &p) == AAR_E_INVAL);
+	CHECK(cl.nreq[AAR_OP_DISPLAY_POINTER] == before);
+	/* A good image goes out as big-endian words. */
+	p.hot_y = 2;
+	CHECK(zzapp_svc_display_pointer(1U, AAR_POINTER_CUSTOM, &p) == AAR_OK);
+	CHECK(cl.last[AAR_OP_DISPLAY_POINTER].arg[AAR_A_DISPLAY_POINTER_MODE] == AAR_POINTER_CUSTOM);
+	CHECK(cl.last[AAR_OP_DISPLAY_POINTER].arg[AAR_A_DISPLAY_POINTER_W] == 2U);
+	CHECK(cl.last[AAR_OP_DISPLAY_POINTER].arg[AAR_A_DISPLAY_POINTER_H] == 3U);
+	CHECK(cl.last[AAR_OP_DISPLAY_POINTER].arg[AAR_A_DISPLAY_POINTER_HOT_X] == 1U);
+	CHECK(cl.last[AAR_OP_DISPLAY_POINTER].arg[AAR_A_DISPLAY_POINTER_HOT_Y] == 2U);
+	CHECK(cl.ptr_len == 24U && cl.ptr_words[0] == px[0] && cl.ptr_words[1] == px[1]);
+	CHECK(cl.ptr_last == px[5]);
+	/* The largest image, 16 KiB, through the data block. */
+	p.width = 64U;
+	p.height = 64U;
+	p.hot_x = 63;
+	p.hot_y = 63;
+	CHECK(zzapp_svc_display_pointer(1U, AAR_POINTER_CUSTOM, &p) == AAR_OK);
+	CHECK(cl.ptr_len == 16384U && cl.ptr_last == px[4095]);
+	zzapp_services_on_app_end();
+	(void)zzapp_rec_retire(rec->hdr.pid);
+	(void)mbox(ZZAPP_OP_RELEASE, handle, 0U, 0U, NULL, NULL);
+}
+
+/* A window or scaled display is the client's: the request goes to the
+ * client, its answers pass through, and the card's own blank, which this
+ * screen does not show, never ends the wait. */
+static void test_display_wait_vblank(void)
+{
+	client_t c;
+	zzapp_rec_t *rec;
+	uint32_t handle;
+	aar_surface s;
+	struct zzapp_service_runtime *st;
+	uint64_t t0;
+	uint64_t dt;
+	unsigned round;
+
+	reset_all();
+	rec = claim(&c, &handle);
+	give_space(rec);
+	st = runtime_of(rec);
+	CHECK(zzapp_svc_display_wait_vblank(1000U) == AAR_E_INVAL);	/* no display */
+	for (round = 0U; round < 2U; round++) {
+		cl.open_caps = round == 0U ? AAR_DISPCAP_WINDOW : AAR_DISPCAP_SCALED;
+		CHECK(zzapp_svc_display_open(640U, 480U, AAR_FMT_RGB565,
+					     round == 0U ? AAR_DISPLAY_WINDOW : AAR_DISPLAY_SCALE,
+					     &s) == AAR_OK);
+		cl.nreq[AAR_OP_DISPLAY_VBLANK] = 0U;
+		CHECK(zzapp_svc_display_wait_vblank(0U) == AAR_E_INVAL);
+		CHECK(cl.nreq[AAR_OP_DISPLAY_VBLANK] == 0U);
+		CHECK(zzapp_svc_display_wait_vblank(50000U) == AAR_OK);
+		CHECK(cl.nreq[AAR_OP_DISPLAY_VBLANK] == 1U);
+		CHECK(cl.last[AAR_OP_DISPLAY_VBLANK].arg[AAR_A_DISPLAY_ID] == 7U);
+		CHECK(cl.last[AAR_OP_DISPLAY_VBLANK].arg[AAR_A_DISPLAY_VBLANK_TIMEOUT_US] == 50000U);
+		/* The client's own results pass through. */
+		cl.vblank_result = AAR_E_TIMEDOUT;
+		CHECK(zzapp_svc_display_wait_vblank(50000U) == AAR_E_TIMEDOUT);
+		cl.vblank_result = AAR_E_NOSYS;
+		CHECK(zzapp_svc_display_wait_vblank(50000U) == AAR_E_NOSYS);
+		cl.vblank_result = AAR_E_IO;
+		CHECK(zzapp_svc_display_wait_vblank(50000U) == AAR_E_IO);
+		cl.vblank_result = AAR_OK;
+		/* A client that never answers: AAR_E_TIMEDOUT, not before the
+		 * timeout the app gave and not long after it, whatever the card's
+		 * blank does meanwhile. */
+		cl.vblank_silent = 1;
+		cl.clock_step = 1000U;
+		cl.blank_at_yield = cl.yields + 1U;
+		cl.blank_addr = st->display_front;
+		t0 = fake_now;
+		CHECK(zzapp_svc_display_wait_vblank(50000U) == AAR_E_TIMEDOUT);
+		dt = fake_now - t0;
+		CHECK(dt >= 50000U && dt < 50000U + ZZAPP_VBLANK_GRACE_US + 3U * cl.clock_step);
+		CHECK(st->vblank_seq == 0U && st->vblank_waiting == 0U);
+		CHECK(zzapp_xport_req_state(rec, ZZAPP_XPORT_REQ_BLOCKING) == ZZAPP_XPORT_REQ_FREE);
+		CHECK(st->wait_kind == ZZAPP_WAIT_NONE);
+		cl.blank_at_yield = 0U;
+		/* The next wait is served as usual. */
+		cl.vblank_silent = 0;
+		CHECK(zzapp_svc_display_wait_vblank(50000U) == AAR_OK);
+		/* A stop ends the wait with AAR_E_IO. */
+		cl.vblank_silent = 1;
+		cl.stop_at_yield = cl.yields + 2U;
+		CHECK(zzapp_svc_display_wait_vblank(5000000U) == AAR_E_IO);
+		CHECK(zzapp_xport_req_state(rec, ZZAPP_XPORT_REQ_BLOCKING) == ZZAPP_XPORT_REQ_FREE);
+		cl.vblank_silent = 0;
+		cl.stop_at_yield = 0U;
+		rec->host.stop_requested = 0U;
+		/* Nothing here counts as a presentation. */
+		CHECK(zzapp_svc_display_last_present_us() == 0U);
+		CHECK(zzapp_svc_display_close(1U) == AAR_OK);
+	}
+	zzapp_services_on_app_end();
+	(void)zzapp_rec_retire(rec->hdr.pid);
+	(void)mbox(ZZAPP_OP_RELEASE, handle, 0U, 0U, NULL, NULL);
+}
+
+/* A display the card scans out directly is waited on natively: the blank
+ * callbacks of video.c end the wait, but only a blank of this display's own
+ * screen; the client is never asked. */
+static void test_display_native_vblank(void)
+{
+	client_t c;
+	zzapp_rec_t *rec;
+	uint32_t handle;
+	aar_surface s;
+	struct zzapp_service_runtime *st;
+	uint64_t t0;
+	uint64_t dt;
+	uint32_t rings;
+
+	reset_all();
+	rec = claim(&c, &handle);
+	give_space(rec);
+	rec->claim.client_caps = ZZAPP_CLIENT_SCANOUT_ACK;
+	st = runtime_of(rec);
+	CHECK(zzapp_svc_display_open(640U, 480U, AAR_FMT_RGB565, 0U, &s) == AAR_OK);
+	CHECK(zzapp_svc_display_wait_vblank(0U) == AAR_E_INVAL);
+
+	/* With nobody waiting a blank costs this record nothing. */
+	rings = zzapp_services_test_core1_doorbells();
+	zzapp_services_display_vblank(0x00400000U);
+	CHECK(st->vblank_seq == 0U && zzapp_services_test_core1_doorbells() == rings);
+
+	/* A blank of this screen (either page of it) ends the wait, with the
+	 * doorbell for the parked app; the client is not asked. */
+	cl.clock_step = 1000U;
+	cl.blank_at_yield = cl.yields + 3U;
+	cl.blank_addr = 0x00500000U;
+	CHECK(zzapp_svc_display_wait_vblank(50000U) == AAR_OK);
+	CHECK(cl.nreq[AAR_OP_DISPLAY_VBLANK] == 0U);
+	CHECK(st->vblank_seq == 1U && st->vblank_waiting == 0U && st->wait_kind == ZZAPP_WAIT_NONE);
+	CHECK(zzapp_services_test_core1_doorbells() == rings + 1U);
+	CHECK(zzapp_svc_display_last_present_us() == 0U);	/* a blank is no flip */
+	zzapp_services_display_vblank(0x00400000U);	/* nobody waits again */
+	CHECK(st->vblank_seq == 1U);
+
+	/* The blank of another screen, or none, confirms nothing: the wait ends
+	 * at its timeout, not before and not long after, and not as success. */
+	cl.blank_at_yield = cl.yields + 1U;
+	cl.blank_addr = 0x12345678U;
+	t0 = fake_now;
+	CHECK(zzapp_svc_display_wait_vblank(20000U) == AAR_E_TIMEDOUT);
+	dt = fake_now - t0;
+	CHECK(dt >= 20000U && dt < 20000U + 3U * cl.clock_step);
+	cl.blank_at_yield = cl.yields + 1U;
+	cl.blank_addr = 0U;
+	CHECK(zzapp_svc_display_wait_vblank(20000U) == AAR_E_TIMEDOUT);
+	cl.blank_at_yield = 0U;
+	CHECK(zzapp_svc_display_wait_vblank(20000U) == AAR_E_TIMEDOUT);
+	CHECK(st->vblank_seq == 1U && st->vblank_waiting == 0U && st->wait_kind == ZZAPP_WAIT_NONE);
+	CHECK(cl.nreq[AAR_OP_DISPLAY_VBLANK] == 0U);
+
+	/* A stop ends it; a blank that lands with the stop is reported first. */
+	cl.stop_at_yield = cl.yields + 2U;
+	CHECK(zzapp_svc_display_wait_vblank(5000000U) == AAR_E_IO);
+	CHECK(st->vblank_waiting == 0U && st->wait_kind == ZZAPP_WAIT_NONE);
+	rec->host.stop_requested = 0U;
+	cl.stop_at_yield = cl.yields + 1U;
+	cl.blank_at_yield = cl.yields + 1U;
+	cl.blank_addr = 0x00400000U;
+	CHECK(zzapp_svc_display_wait_vblank(5000000U) == AAR_OK);
+	cl.blank_at_yield = 0U;
+	cl.stop_at_yield = 0U;
+	rec->host.stop_requested = 0U;
+
+	/* The system pass wakes a parked waiter at the blank and not before. */
+	st->vblank_waiting = 1U;
+	st->wait_kind = ZZAPP_WAIT_FLIP;
+	st->wait_value = st->vblank_seq;
+	st->wait_deadline = 0U;
+	slot_state_lock_acquire();
+	set_add(&set_svc, rec->hdr.pid);
+	slot_state_lock_release();
+	service_test_wake_count = 0U;
+	zzapp_services_poll();
+	CHECK(service_test_wake_count == 0U);
+	zzapp_services_display_vblank(0x12345678U);
+	zzapp_services_poll();
+	CHECK(service_test_wake_count == 0U);
+	zzapp_services_display_vblank(0x00400000U);
+	zzapp_services_poll();
+	CHECK(service_test_wake_count == 1U);
+	st->vblank_waiting = 0U;
+	st->wait_kind = ZZAPP_WAIT_NONE;
+	zzapp_services_on_app_end();
+	(void)zzapp_rec_retire(rec->hdr.pid);
+	(void)mbox(ZZAPP_OP_RELEASE, handle, 0U, 0U, NULL, NULL);
+
+	/* A card-owned (LATEST) display: the blank the mailbox matched to its
+	 * buffers counts, with or without a frame to latch; a blank whose
+	 * address is not its buffers, or whose latch failed, does not. */
+	reset_all();
+	rec = claim(&c, &handle);
+	give_space(rec);
+	rec->claim.client_caps = ZZAPP_CLIENT_LATEST;
+	st = runtime_of(rec);
+	cl.open_spare = 0x00600000U;
+	CHECK(zzapp_svc_display_open(640U, 480U, AAR_FMT_RGB565, AAR_DISPLAY_LATEST, &s) == AAR_OK);
+	CHECK(zzapp_display_latest() == 1);
+	cl.clock_step = 1000U;
+	cl.blank_mailbox = 1;
+	cl.blank_addr = 0x00400000U;
+	cl.blank_at_yield = cl.yields + 2U;
+	CHECK(zzapp_svc_display_wait_vblank(50000U) == AAR_OK);
+	CHECK(st->vblank_seq == 1U && cl.nreq[AAR_OP_DISPLAY_VBLANK] == 0U);
+	cl.blank_addr = 0x09000000U;
+	cl.blank_at_yield = cl.yields + 1U;
+	CHECK(zzapp_svc_display_wait_vblank(20000U) == AAR_E_TIMEDOUT);
+	cl.blank_mailbox = 2;
+	cl.blank_addr = 0x00400000U;
+	cl.blank_at_yield = cl.yields + 1U;
+	CHECK(zzapp_svc_display_wait_vblank(20000U) == AAR_E_TIMEDOUT);
+	CHECK(st->vblank_seq == 1U && st->vblank_waiting == 0U);
+	/* A latched frame is a presentation as well as a blank. */
+	CHECK(zzapp_svc_display_flip(1U) == AAR_OK);
+	cl.blank_mailbox = 1;
+	cl.blank_at_yield = cl.yields + 1U;
+	CHECK(zzapp_svc_display_wait_vblank(50000U) == AAR_OK);
+	CHECK(st->vblank_seq == 2U && zzapp_svc_display_last_present_us() != 0U);
+	zzapp_services_on_app_end();
+	(void)zzapp_rec_retire(rec->hdr.pid);
+	(void)mbox(ZZAPP_OP_RELEASE, handle, 0U, 0U, NULL, NULL);
+}
+
+static void test_display_resize(void)
+{
+	client_t c;
+	zzapp_rec_t *rec;
+	uint32_t handle;
+	aar_surface s, s2, s3;
+	struct zzapp_service_runtime *st;
+	aar_completion d;
+	uint32_t old_front, old_back, old_front_alias, before, close_before;
+	uint32_t pal[4] = { 0x00112233U, 0x00445566U, 0x00778899U, 0x00aabbccU };
+
+	reset_all();
+	rec = claim(&c, &handle);
+	give_space(rec);
+	st = runtime_of(rec);
+
+	/* Without the granted cap: AAR_E_NOSYS, nothing sent. */
+	CHECK(zzapp_svc_display_resize(1U, 800U, 600U, &s2) == AAR_E_INVAL);	/* no display */
+	CHECK(zzapp_svc_display_open(640U, 480U, AAR_FMT_RGB565, AAR_DISPLAY_RESIZABLE, &s) == AAR_OK);
+	CHECK(zzapp_svc_display_resize(1U, 800U, 600U, &s2) == AAR_E_NOSYS);
+	CHECK(cl.nreq[AAR_OP_DISPLAY_RESIZE] == 0U);
+	CHECK(zzapp_svc_display_close(1U) == AAR_OK);
+
+	cl.open_caps = AAR_DISPCAP_WINDOW | AAR_DISPCAP_RESIZE;
+	CHECK(zzapp_svc_display_open(640U, 480U, AAR_FMT_RGB565,
+				     AAR_DISPLAY_WINDOW | AAR_DISPLAY_RESIZABLE, &s) == AAR_OK);
+	CHECK((s.caps & AAR_DISPCAP_RESIZE) && (s.caps & AAR_DISPCAP_WINDOW));
+	old_front = st->display_front;
+	old_back = st->display_back;
+	old_front_alias = st->display_alias[0];
+	CHECK(old_front == 0x00400000U && old_back == 0x00500000U);
+	CHECK(zzapp_as_alias_phys(&rec->proc.as, old_front_alias) == old_front);
+
+	/* Arguments. */
+	CHECK(zzapp_svc_display_resize(2U, 800U, 600U, &s2) == AAR_E_INVAL);
+	CHECK(zzapp_svc_display_resize(1U, 0U, 600U, &s2) == AAR_E_INVAL);
+	CHECK(zzapp_svc_display_resize(1U, 800U, 0U, &s2) == AAR_E_INVAL);
+	CHECK(zzapp_svc_display_resize(1U, AAR_DISPLAY_MAX_DIM + 1U, 600U, &s2) == AAR_E_INVAL);
+	CHECK(zzapp_svc_display_resize(1U, 800U, AAR_DISPLAY_MAX_DIM + 1U, &s2) == AAR_E_INVAL);
+	CHECK(zzapp_svc_display_resize(1U, 800U, 600U, NULL) == AAR_E_INVAL);
+	CHECK(cl.nreq[AAR_OP_DISPLAY_RESIZE] == 0U);
+
+	/* A flip pending. */
+	cl.ignore = 1;
+	CHECK(zzapp_svc_display_flip_async(1U) == AAR_OK);
+	client_service(&c);
+	CHECK(zzapp_svc_display_resize(1U, 800U, 600U, &s2) == AAR_E_BUSY);
+	CHECK(cl.nreq[AAR_OP_DISPLAY_RESIZE] == 0U);
+	cl.ignore = 0;
+	memset(&d, 0, sizeof(d));
+	d.op = AAR_OP_DISPLAY_FLIP;
+	d.id = rec->xport.req[ZZAPP_XPORT_REQ_FLIP].id;
+	client_post(&c, &d);
+	CHECK(zzapp_display_flip_idle() == 1);
+	old_front = st->display_front;
+	old_back = st->display_back;
+	old_front_alias = st->display_alias[0];
+
+	/* The client refuses: the surface is exactly as it was. */
+	cl.resize_result = AAR_E_NOMEM;
+	CHECK(zzapp_svc_display_resize(1U, 800U, 600U, &s2) == AAR_E_NOMEM);
+	CHECK(cl.nreq[AAR_OP_DISPLAY_RESIZE] == 1U);
+	CHECK(cl.last[AAR_OP_DISPLAY_RESIZE].arg[AAR_A_DISPLAY_ID] == 7U);
+	CHECK(cl.last[AAR_OP_DISPLAY_RESIZE].arg[AAR_A_DISPLAY_RESIZE_W] == 800U);
+	CHECK(cl.last[AAR_OP_DISPLAY_RESIZE].arg[AAR_A_DISPLAY_RESIZE_H] == 600U);
+	CHECK(st->display_bound == 1 && st->display_width == 640U && st->display_height == 480U);
+	CHECK(st->display_front == old_front && st->display_back == old_back);
+	CHECK(st->display_client_id == 7U && st->display_caps == (AAR_DISPCAP_WINDOW | AAR_DISPCAP_RESIZE));
+	CHECK(st->display_alias[0] == old_front_alias);
+	CHECK(zzapp_as_alias_phys(&rec->proc.as, old_front_alias) == 0x00400000U);
+	memset(&s3, 0, sizeof(s3));
+	s3.id = 1U;
+	CHECK(zzapp_svc_display_refresh(&s3) == AAR_OK);
+	CHECK(s3.width == 640U && s3.height == 480U && s3.pitch == 1280U);
+	CHECK(s3.front == s.front || s3.front == s.back);
+	CHECK(zzapp_svc_display_flip(1U) == AAR_OK);	/* still usable */
+	old_front = st->display_front;
+	old_back = st->display_back;
+	cl.resize_result = AAR_OK;
+
+	/* The client reallocates: the old mappings go, the new ones come, and
+	 * the geometry is the reply's. */
+	cl.resize_front = 0x00600000U;
+	cl.resize_back = 0x00700000U;
+	cl.resize_pitch = 1600U;
+	CHECK(zzapp_svc_display_resize(1U, 800U, 600U, &s2) == AAR_OK);
+	CHECK(s2.id == 1U && s2.width == 800U && s2.height == 600U && s2.pitch == 1600U);
+	CHECK(s2.format == AAR_FMT_RGB565 && s2.layout == AAR_LAYOUT_RGB565_BE);
+	CHECK((s2.caps & AAR_DISPCAP_RESIZE) && (s2.caps & AAR_DISPCAP_WINDOW));
+	CHECK(s2.front != NULL && s2.back != NULL);
+	CHECK(st->display_front == 0x00600000U && st->display_back == 0x00700000U);
+	CHECK(st->display_width == 800U && st->display_height == 600U);
+	CHECK(st->display_pitch == 1600U && st->display_bytes == 1600U * 600U);
+	CHECK(st->display_client_id == 9U && st->display_id == 1U);
+	CHECK(zzapp_as_alias_phys(&rec->proc.as, (uint32_t)(uintptr_t)s2.front) == 0x00600000U);
+	CHECK(zzapp_as_alias_phys(&rec->proc.as, (uint32_t)(uintptr_t)s2.back) == 0x00700000U);
+	/* Nothing maps the old bitmaps any more. */
+	CHECK(zzapp_as_alias_phys(&rec->proc.as, old_front_alias) != old_front);
+	CHECK(zzapp_as_alias_phys(&rec->proc.as, old_front_alias) != old_back);
+	CHECK(st->display_flip_gen == 0U && zzapp_display_flip_idle() == 1);
+	CHECK(set_display.count == 1U && st->display_bound == 1);
+	cl.flip_flags = 0U;
+	CHECK(zzapp_svc_display_flip(1U) == AAR_OK);
+	CHECK(cl.last[AAR_OP_DISPLAY_FLIP].arg[AAR_A_DISPLAY_ID] == 9U);
+
+	/* A reply that cannot be used leaves no display: the client is told to
+	 * close its screen, nothing stays mapped. */
+	close_before = cl.nreq[AAR_OP_DISPLAY_CLOSE];
+	cl.resize_front = 0x0c000000U;
+	CHECK(zzapp_svc_display_resize(1U, 1024U, 768U, &s3) == AAR_E_INVAL);
+	CHECK(cl.nreq[AAR_OP_DISPLAY_CLOSE] == close_before + 1U);
+	CHECK(cl.last[AAR_OP_DISPLAY_CLOSE].arg[0] == 9U);
+	CHECK(st->display_bound == 0 && set_display.count == 0U);
+	CHECK(st->display_caps == 0U && st->display_grant_bytes[0] == 0U &&
+	      st->display_grant_bytes[1] == 0U);
+	CHECK(zzapp_as_alias_phys(&rec->proc.as, (uint32_t)(uintptr_t)s2.front) == 0U);
+	CHECK(zzapp_as_alias_phys(&rec->proc.as, (uint32_t)(uintptr_t)s2.back) == 0U);
+	CHECK(zzapp_svc_display_flip(1U) == AAR_E_INVAL);
+	CHECK(zzapp_svc_display_resize(1U, 800U, 600U, &s3) == AAR_E_INVAL);
+	zzapp_services_on_app_end();
+	(void)zzapp_rec_retire(rec->hdr.pid);
+	(void)mbox(ZZAPP_OP_RELEASE, handle, 0U, 0U, NULL, NULL);
+
+	/* A CLUT8 screen the client replaced starts with its own colours: the
+	 * app's are sent again. */
+	reset_all();
+	rec = claim(&c, &handle);
+	give_space(rec);
+	st = runtime_of(rec);
+	rec->claim.client_caps = ZZAPP_CLIENT_CLUT8;
+	cl.open_caps = AAR_DISPCAP_WINDOW | AAR_DISPCAP_RESIZE;
+	cl.open_pitch = 320U;
+	cl.open_layout = AAR_LAYOUT_CLUT8;
+	CHECK(zzapp_svc_display_open(320U, 200U, AAR_FMT_CLUT8,
+				     AAR_DISPLAY_WINDOW | AAR_DISPLAY_RESIZABLE, &s) == AAR_OK);
+	CHECK(zzapp_svc_display_set_palette(1U, 252U, 4U, pal) == AAR_OK);
+	client_service(&c);
+	CHECK(cl.palette[252] == 0x00112233U);
+	memset(cl.palette, 0, sizeof(cl.palette));
+	before = cl.nreq[AAR_OP_DISPLAY_PALETTE];
+	cl.resize_front = 0x00600000U;
+	cl.resize_back = 0x00700000U;
+	cl.resize_pitch = 640U;
+	CHECK(zzapp_svc_display_resize(1U, 640U, 400U, &s2) == AAR_OK);
+	client_service(&c);
+	CHECK(cl.nreq[AAR_OP_DISPLAY_PALETTE] == before + 1U);
+	CHECK(cl.last[AAR_OP_DISPLAY_PALETTE].arg[AAR_A_DISPLAY_PALETTE_FIRST] == 252U);
+	CHECK(cl.last[AAR_OP_DISPLAY_PALETTE].arg[AAR_A_DISPLAY_PALETTE_COUNT] == 4U);
+	CHECK(cl.palette[252] == 0x00112233U && cl.palette[255] == 0x00aabbccU && cl.palette[0] == 0U);
+	(void)st;
+	zzapp_services_on_app_end();
+	(void)zzapp_rec_retire(rec->hdr.pid);
+	(void)mbox(ZZAPP_OP_RELEASE, handle, 0U, 0U, NULL, NULL);
+}
+
+/* The input events a display delivers only on request are not passed on
+ * without the matching granted cap. */
+static void test_display_event_gating(void)
+{
+	client_t c;
+	zzapp_rec_t *rec;
+	uint32_t handle;
+	aar_surface s;
+	aar_event ev, out[8];
+	uint32_t n;
+
+	reset_all();
+	rec = claim(&c, &handle);
+	give_space(rec);
+
+#define POST_EVENT(t, cd) do { \
+	memset(&ev, 0, sizeof(ev)); \
+	ev.type = (t); \
+	ev.code = (cd); \
+	CHECK(aar_queue_post_event(&c.cq, &ev, NULL, NULL) == AAR_OK); \
+} while (0)
+
+	/* No display: a resize event means nothing. */
+	POST_EVENT(AAR_EV_RESIZE, 0U);
+	POST_EVENT(AAR_EV_WHEEL, 0U);
+	CHECK(zzapp_svc_event_poll(out, 8U, &n) == AAR_OK);
+	CHECK(n == 1U && out[0].type == AAR_EV_WHEEL);
+	/* A resizable window without text input or close request. */
+	cl.open_caps = AAR_DISPCAP_WINDOW | AAR_DISPCAP_RESIZE;
+	CHECK(zzapp_svc_display_open(640U, 480U, AAR_FMT_RGB565,
+				     AAR_DISPLAY_WINDOW | AAR_DISPLAY_RESIZABLE, &s) == AAR_OK);
+	POST_EVENT(AAR_EV_RESIZE, 0U);
+	POST_EVENT(AAR_EV_TEXT, 'a');
+	POST_EVENT(AAR_EV_CLOSE_REQUEST, 0U);
+	POST_EVENT(AAR_EV_ACTIVE, 1U);
+	POST_EVENT(AAR_EV_MOUSE, 0U);
+	CHECK(zzapp_svc_event_poll(out, 8U, &n) == AAR_OK);
+	CHECK(n == 3U && out[0].type == AAR_EV_RESIZE && out[1].type == AAR_EV_ACTIVE &&
+	      out[2].type == AAR_EV_MOUSE);
+	CHECK(zzapp_svc_display_close(1U) == AAR_OK);
+	/* Everything granted. */
+	cl.open_caps = FEATURE_CAPS;
+	CHECK(zzapp_svc_display_open(640U, 480U, AAR_FMT_RGB565,
+				     AAR_DISPLAY_WINDOW | AAR_DISPLAY_RESIZABLE |
+				     AAR_DISPLAY_TEXT_INPUT | AAR_DISPLAY_CLOSE_REQUEST, &s) == AAR_OK);
+	POST_EVENT(AAR_EV_RESIZE, 0U);
+	POST_EVENT(AAR_EV_TEXT, 'a');
+	POST_EVENT(AAR_EV_CLOSE_REQUEST, 0U);
+	CHECK(zzapp_svc_event_poll(out, 8U, &n) == AAR_OK);
+	CHECK(n == 3U && out[1].type == AAR_EV_TEXT && out[2].type == AAR_EV_CLOSE_REQUEST);
+#undef POST_EVENT
+	zzapp_services_on_app_end();
+	(void)zzapp_rec_retire(rec->hdr.pid);
 	(void)mbox(ZZAPP_OP_RELEASE, handle, 0U, 0U, NULL, NULL);
 }
 
@@ -2515,6 +4010,18 @@ int main(void)
 	test_display_flip_front_and_timeout();
 	test_display_latest();
 	test_display_bad_tokens();
+	test_files_v06();
+	test_time_locale_env();
+	test_clipboard();
+	test_display_caps_v06();
+	test_display_window_flip();
+	test_display_present_time();
+	test_display_info_modes();
+	test_display_title_pointer();
+	test_display_wait_vblank();
+	test_display_native_vblank();
+	test_display_resize();
+	test_display_event_gating();
 	test_audio_card();
 	test_audio_ahi();
 	test_audio_ring_kept_by_quarantine();

@@ -28,6 +28,7 @@
 #include "sdk_compression.h"
 #include "sdk_crypto.h"
 #include "sdk_image_stream.h"
+#include "zzapp_services.h"
 #if defined(ZZAPP_HOST_TEST) && ZZAPP_PERF_COUNTERS
 void __attribute__((weak)) zzapp_svc_gl_telemetry_reset(uint32_t pid)
 { (void)pid; }
@@ -96,6 +97,48 @@ WEAK int zzapp_svc_display_close(uint32_t id) { (void)id; return AAR_E_NOSYS; }
 WEAK int zzapp_svc_event_poll(aar_event *o,uint32_t n,uint32_t *out) { (void)o;(void)n; if(out)*out=0; return AAR_E_NOSYS; }
 WEAK int zzapp_svc_audio_open(uint32_t r,uint32_t c,aar_audio *o) { (void)r;(void)c;(void)o; return AAR_E_NOSYS; }
 WEAK int zzapp_svc_audio_close(void) { return AAR_E_NOSYS; }
+#ifdef ZZAPP_HOST_TEST
+WEAK int zzapp_svc_file_delete(const char *path)
+{ (void)path; return AAR_E_NOSYS; }
+WEAK int zzapp_svc_file_rename(const char *from, const char *to, uint32_t flags)
+{ (void)from; (void)to; (void)flags; return AAR_E_NOSYS; }
+WEAK int zzapp_svc_dir_create(const char *path)
+{ (void)path; return AAR_E_NOSYS; }
+WEAK int zzapp_svc_file_set_date(const char *path, int64_t mtime)
+{ (void)path; (void)mtime; return AAR_E_NOSYS; }
+WEAK int zzapp_svc_file_set_protect(const char *path, uint32_t protect)
+{ (void)path; (void)protect; return AAR_E_NOSYS; }
+WEAK int zzapp_svc_file_truncate(int fd, uint64_t size)
+{ (void)fd; (void)size; return AAR_E_NOSYS; }
+WEAK int zzapp_svc_volume_info(const char *path, aar_volume_info *out)
+{ (void)path; (void)out; return AAR_E_NOSYS; }
+WEAK int zzapp_svc_time_unix_us(int64_t *out)
+{ (void)out; return AAR_E_NOSYS; }
+WEAK int zzapp_svc_locale_info(aar_locale_info *out)
+{ (void)out; return AAR_E_NOSYS; }
+WEAK int zzapp_svc_env_get(const char *name, char *buf, uint32_t bytes, uint32_t *out)
+{ (void)name; (void)buf; (void)bytes; (void)out; return AAR_E_NOSYS; }
+WEAK int zzapp_svc_clip_read(uint32_t unit, uint32_t type, void *buf,
+                             uint32_t bytes, uint32_t *out)
+{ (void)unit; (void)type; (void)buf; (void)bytes; (void)out; return AAR_E_NOSYS; }
+WEAK int zzapp_svc_clip_write(uint32_t unit, uint32_t type, const void *data,
+                              uint32_t bytes)
+{ (void)unit; (void)type; (void)data; (void)bytes; return AAR_E_NOSYS; }
+WEAK int zzapp_svc_display_info(uint32_t id, aar_display_info *out)
+{ (void)id; (void)out; return AAR_E_NOSYS; }
+WEAK int zzapp_svc_display_modes(aar_display_mode *out, uint32_t max, uint32_t *count)
+{ (void)out; (void)max; (void)count; return AAR_E_NOSYS; }
+WEAK int zzapp_svc_display_resize(uint32_t id, uint32_t w, uint32_t h, aar_surface *out)
+{ (void)id; (void)w; (void)h; (void)out; return AAR_E_NOSYS; }
+WEAK int zzapp_svc_display_set_title(uint32_t id, const char *title)
+{ (void)id; (void)title; return AAR_E_NOSYS; }
+WEAK int zzapp_svc_display_pointer(uint32_t id, uint32_t mode, const aar_pointer *image)
+{ (void)id; (void)mode; (void)image; return AAR_E_NOSYS; }
+WEAK int zzapp_svc_display_wait_vblank(uint32_t timeout)
+{ (void)timeout; return AAR_E_NOSYS; }
+WEAK uint64_t zzapp_svc_display_last_present_us(void)
+{ return 0U; }
+#endif
 WEAK void zzapp_svc_gl_release(uint32_t pid, uint32_t generation)
 { (void)pid; (void)generation; }
 
@@ -1100,6 +1143,146 @@ static int api_console_read(void *p,uint32_t n,uint32_t *out){zzapp_api_enter();
 static int api_msg_send(const void *p){zzapp_api_enter();int r=zzapp_svc_msg_send(p);zzapp_api_leave();return r;}
 static int api_msg_poll(void *p){zzapp_api_enter();int r=zzapp_svc_msg_poll(p);zzapp_api_leave();return r;}
 static int api_msg_wait(uint32_t timeout_us){zzapp_api_enter();int r=zzapp_svc_msg_wait(timeout_us);zzapp_api_leave();return r;}
+WRAP1(api_file_delete, const char *, zzapp_svc_file_delete(a))
+WRAP1(api_dir_create, const char *, zzapp_svc_dir_create(a))
+WRAP1(api_time_unix_us, int64_t *, zzapp_svc_time_unix_us(a))
+WRAP1(api_locale_info, aar_locale_info *, zzapp_svc_locale_info(a))
+WRAP1(api_display_wait_vblank, uint32_t, zzapp_svc_display_wait_vblank(a))
+
+static int api_file_rename(const char *from, const char *to, uint32_t flags)
+{
+    int rc;
+    zzapp_api_enter();
+    rc = zzapp_svc_file_rename(from, to, flags);
+    zzapp_api_leave();
+    return rc;
+}
+
+static int api_file_set_date(const char *path, int64_t mtime)
+{
+    int rc;
+    zzapp_api_enter();
+    rc = zzapp_svc_file_set_date(path, mtime);
+    zzapp_api_leave();
+    return rc;
+}
+
+static int api_file_set_protect(const char *path, uint32_t protect)
+{
+    int rc;
+    zzapp_api_enter();
+    rc = zzapp_svc_file_set_protect(path, protect);
+    zzapp_api_leave();
+    return rc;
+}
+
+static int api_file_truncate(int fd, uint64_t size)
+{
+    int rc;
+    zzapp_api_enter();
+    rc = zzapp_svc_file_truncate(fd, size);
+    zzapp_api_leave();
+    return rc;
+}
+
+static int api_volume_info(const char *path, aar_volume_info *out)
+{
+    int rc;
+    zzapp_api_enter();
+    rc = zzapp_svc_volume_info(path, out);
+    zzapp_api_leave();
+    return rc;
+}
+
+static int api_env_get(const char *name, char *buf, uint32_t bytes, uint32_t *out)
+{
+    int rc;
+    zzapp_api_enter();
+    rc = zzapp_svc_env_get(name, buf, bytes, out);
+    zzapp_api_leave();
+    return rc;
+}
+
+static int api_clip_read(uint32_t unit, uint32_t type, void *buf,
+                         uint32_t bytes, uint32_t *out)
+{
+    int rc;
+    zzapp_api_enter();
+    rc = zzapp_svc_clip_read(unit, type, buf, bytes, out);
+    zzapp_api_leave();
+    return rc;
+}
+
+static int api_clip_write(uint32_t unit, uint32_t type, const void *data,
+                          uint32_t bytes)
+{
+    int rc;
+    zzapp_api_enter();
+    rc = zzapp_svc_clip_write(unit, type, data, bytes);
+    zzapp_api_leave();
+    return rc;
+}
+
+static int api_display_info(uint32_t id, aar_display_info *out)
+{
+    int rc;
+    zzapp_api_enter();
+    rc = zzapp_svc_display_info(id, out);
+    zzapp_api_leave();
+    return rc;
+}
+
+static int api_display_modes(aar_display_mode *out, uint32_t max, uint32_t *count)
+{
+    int rc;
+    zzapp_api_enter();
+    rc = zzapp_svc_display_modes(out, max, count);
+    zzapp_api_leave();
+    return rc;
+}
+
+static int api_display_resize(uint32_t id, uint32_t w, uint32_t h, aar_surface *out)
+{
+    int rc;
+    zzapp_api_enter();
+    /* The module retains render targets at bind time. Let the app unbind
+     * explicitly before replacing their storage and geometry. */
+    if (id && id == zzapp_display_id() &&
+        minigl_binding_matches(api_pid(), zzapp_current_generation()))
+        rc = AAR_E_BUSY;
+    else
+        rc = zzapp_svc_display_resize(id, w, h, out);
+    zzapp_api_leave();
+    return rc;
+}
+
+static int api_display_set_title(uint32_t id, const char *title)
+{
+    int rc;
+    zzapp_api_enter();
+    rc = zzapp_svc_display_set_title(id, title);
+    zzapp_api_leave();
+    return rc;
+}
+
+static int api_display_pointer(uint32_t id, uint32_t mode, const aar_pointer *image)
+{
+    int rc;
+    zzapp_api_enter();
+    rc = zzapp_svc_display_pointer(id, mode, image);
+    zzapp_api_leave();
+    return rc;
+}
+
+static uint64_t api_display_last_present_us(void)
+{
+    uint64_t time;
+    zzapp_api_enter();
+    time = zzapp_svc_display_last_present_us();
+    zzapp_api_leave();
+    return time;
+}
+
 static const aar_gl *api_gl_bind(uint32_t id){const aar_gl*out=NULL;zzapp_api_enter();if(zzapp_minigl_bind(id,&out)!=AAR_OK)out=NULL;zzapp_api_leave();return out;}
 static const aar_gl *api_gl_bind_flags(uint32_t id,uint32_t flags){const aar_gl*out=NULL;zzapp_api_enter();if(zzapp_minigl_bind_flags(id,flags,&out)!=AAR_OK)out=NULL;zzapp_api_leave();return out;}
 #if ZZAPP_PERF_COUNTERS
@@ -1171,6 +1354,12 @@ static const aar_api g_api_full = {
     .event_poll = api_event_poll,
     .msg_send = api_msg_send, .msg_poll = api_msg_poll,
     .msg_wait = api_msg_wait,
+    .file_delete = api_file_delete, .file_rename = api_file_rename,
+    .dir_create = api_dir_create, .file_set_date = api_file_set_date,
+    .file_set_protect = api_file_set_protect, .file_truncate = api_file_truncate,
+    .volume_info = api_volume_info,
+    .time_unix_us = api_time_unix_us, .locale_info = api_locale_info,
+    .env_get = api_env_get, .clip_read = api_clip_read, .clip_write = api_clip_write,
     /* optional */
     .ext = api_ext, .map_file = api_map_file, .unmap_file = api_unmap_file,
     /* display */
@@ -1181,6 +1370,10 @@ static const aar_api g_api_full = {
     .display_set_palette = api_display_set_palette,
     .display_close = api_display_close,
     .display_latest_dropped = api_display_latest_dropped,
+    .display_info = api_display_info, .display_modes = api_display_modes,
+    .display_resize = api_display_resize, .display_set_title = api_display_set_title,
+    .display_pointer = api_display_pointer, .display_wait_vblank = api_display_wait_vblank,
+    .display_last_present_us = api_display_last_present_us,
     /* audio */
     .audio_open = api_audio_open, .audio_close = api_audio_close,
     /* GL */
@@ -1211,7 +1404,7 @@ static void api_build_table(uint32_t groups)
     memcpy(&g_api_out, &g_api_full, sizeof(g_api_out));
     g_api_out.groups = groups;
     if ((groups & AAR_GROUP_DISPLAY) == 0u)
-        CLEAR_SLOTS(display_open, display_latest_dropped);
+        CLEAR_SLOTS(display_open, display_last_present_us);
     if ((groups & AAR_GROUP_AUDIO) == 0u)
         CLEAR_SLOTS(audio_open, audio_stats);
     if ((groups & AAR_GROUP_GL) == 0u)

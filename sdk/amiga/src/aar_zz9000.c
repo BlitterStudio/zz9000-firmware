@@ -252,14 +252,14 @@ static int query_raw(struct zz_state *s, struct zz_query *qi)
 	qi->tables_free = be32(p + ZZAPP_QUERY_TABLES_FREE);
 	qi->tables_total = be32(p + ZZAPP_QUERY_TABLES_TOTAL);
 	qi->hostheap_free = be32(p + ZZAPP_QUERY_HOSTHEAP_FREE);
-	/* The ABI major is compared with the value the firmware writes, not
-	 * with ZZAPP_QUERY_ABI_MAJOR, which is the offset of the word. */
-	if (qi->abi_major != ZZAPP_ABI_MAJOR || !(qi->caps & ZZAPP_CAP_Z3)) {
+	/* The 0.6 app table has a different slot layout; do not claim an older
+	 * card or negotiate a newer private mailbox layout here. */
+	if (qi->abi_major != ZZAPP_ABI_MAJOR || qi->abi_minor != ZZAPP_ABI_MINOR ||
+	    !(qi->caps & ZZAPP_CAP_Z3)) {
 		s->abi_ok = 0;
 		return AAR_E_NOSYS;
 	}
 	s->abi_ok = 1;
-	/* An older firmware reports 0 here (the word held the state, always 0). */
 	if (!s->events) {
 		s->events_token = qi->events;
 		events_map(s);

@@ -1130,7 +1130,8 @@ static int note_descriptor_ok(const uint8_t *desc, struct load_image *img)
     /* The image is ELF32 ARM: profile A32. */
     if (profile != AAR_PROFILE_A32)
         return AAR_E_PROFILE;
-    if (api_major != AAR_API_MAJOR || api_minor > AAR_API_MINOR)
+    if (api_major != AAR_API_MAJOR || api_minor < AAR_API_MINOR_OLDEST ||
+        api_minor > AAR_API_MINOR)
         return AAR_E_INVAL;
     if (stack_bytes == 0u)
         stack_bytes = ZZAPP_STACK_DEFAULT;

@@ -48,6 +48,7 @@ typedef enum {
     ZZAPP_SVC_LENGTH_GL_PIXELS,
     ZZAPP_SVC_LENGTH_GL_INDICES,
     ZZAPP_SVC_LENGTH_GL_GET,
+    ZZAPP_SVC_LENGTH_GL_VECTOR, /* pname determines the input float count */
     /* A uint64_t byte count in two consecutive words, low word first (the
      * AAPCS register pair or an 8-aligned stack pair). A high word that is
      * not zero is AAR_E_INVAL: the firmware handles no such length. */
@@ -72,7 +73,9 @@ typedef struct {
 
 enum {
     /* No pointers or shared firmware state: dispatch without the API lock. */
-    ZZAPP_SVC_FAST_NO_LOCK = 1U
+    ZZAPP_SVC_FAST_NO_LOCK = 1U,
+    /* Count-only or short-buffer results still deliver the full count. */
+    ZZAPP_SVC_COPY_OUT_ON_NOSPC = 2U
 };
 
 typedef struct {
