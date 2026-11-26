@@ -1212,6 +1212,10 @@ static inline void sdk_audio_meter_result_pack(
 #define SDK_AUDIO_CODEC_MP3            1U
 #define SDK_AUDIO_CODEC_FLAC           2U
 #define SDK_AUDIO_CODEC_VORBIS         3U
+/* DECODE_MP3: EXPECT_END makes a decode that stops short of the end of the
+ * stream BAD_REQUEST (mp3_expect_end_ok in mp3/decode_mp3.c); RESULT_END is
+ * set when all source bytes are used. See ZZ9KAudioDecodeFlags in
+ * sdk/include/zz9k/abi.h. */
 #define SDK_AUDIO_DECODE_FLAG_EXPECT_END (1U << 0)
 #define SDK_AUDIO_DECODE_RESULT_END    (1U << 0)
 #define SDK_MAX_AUDIO_STREAMS          4U

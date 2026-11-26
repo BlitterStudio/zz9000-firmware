@@ -1193,6 +1193,11 @@ int main(int argc, char **argv)
   status = zz9k_decode_mp3(ctx, &desc, &result);
   if (status != ZZ9K_STATUS_OK) {
     printf("mp3 decode failed: %s (%d)\n", zz9k_status_name(status), status);
+    if (status == ZZ9K_STATUS_BAD_REQUEST) {
+      printf("note: the file is not a complete MP3 stream (a cut-off last "
+             "frame, or bytes after the last frame that are no tag), or "
+             "it is not MP3\n");
+    }
     goto cleanup;
   }
 

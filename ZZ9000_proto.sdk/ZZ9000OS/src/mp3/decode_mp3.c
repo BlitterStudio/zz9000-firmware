@@ -46,17 +46,66 @@ int decode_mp3_samples(struct mp3_decode_ctx *ctx, void* output_buffer,
 	return total_bytes_decoded;
 }
 
+static uint32_t mp3_le32(const uint8_t *p) {
+	return (uint32_t)p[0] | ((uint32_t)p[1] << 8) |
+	       ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
+}
+
+/* End of the audio in the input: the length with trailing ID3v1 (and its
+ * "TAG+" extension) and APEv2 tags removed. minimp3's own skip treats an
+ * APEv2 tag as always carrying a header and cuts 32 bytes too many from one
+ * that has none, which drops the last frame, so the tags are measured here.
+ * Nothing before first, the offset of the first frame, is removed. */
+static size_t mp3_audio_end(const uint8_t *buf, size_t size, size_t first) {
+	size_t end = size;
+	size_t before;
+
+	if (first > size)
+		return size;
+	do {
+		before = end;
+		if (end - first >= 128 && !memcmp(buf + end - 128, "TAG", 3)) {
+			end -= 128;
+			if (end - first >= 227 && !memcmp(buf + end - 227, "TAG+", 4))
+				end -= 227;
+		}
+		if (end - first >= 32 && !memcmp(buf + end - 32, "APETAGEX", 8)) {
+			/* Footer: size counts the items and the footer, flag bit 31
+			 * says a 32-byte header precedes the items. */
+			const uint8_t *footer = buf + end - 32;
+			uint32_t tag_size = mp3_le32(footer + 12);
+			size_t total = tag_size;
+
+			if (mp3_le32(footer + 20) & 0x80000000UL)
+				total += 32;
+			if (tag_size >= 32 && total <= end - first)
+				end -= total;
+		}
+	} while (end != before);
+	return end;
+}
+
 int decode_mp3_init(struct mp3_decode_ctx *ctx, uint8_t* input_buffer,
                     size_t input_buffer_size) {
 	memset(&ctx->frame_info, 0, sizeof(ctx->frame_info));
+	ctx->src_size = 0;
+	ctx->audio_end = 0;
 
 	// sets up input_buffer as mp3d->file.buffer
 	int ret = mp3dec_ex_open_buf(&ctx->mp3d, input_buffer,
 	                             input_buffer_size, MP3D_DO_NOT_SCAN);
 	if (ret) {
 		printf("mp3dec_ex_open_buf failed: %d\n", ret);
+		return ret;
 	}
-	return ret;
+	ctx->src_size = input_buffer_size;
+	ctx->audio_end = mp3_audio_end(input_buffer, input_buffer_size,
+	                               (size_t)ctx->mp3d.start_offset);
+	/* end_offset is zero when no frame was found; the caller rejects that
+	 * through the zero sample rate. */
+	if (ctx->mp3d.end_offset)
+		ctx->mp3d.end_offset = ctx->audio_end;
+	return 0;
 }
 
 int mp3_get_hz(const struct mp3_decode_ctx *ctx) {
@@ -67,8 +116,62 @@ int mp3_get_channels(const struct mp3_decode_ctx *ctx) {
 	return ctx->mp3d.info.channels;
 }
 
+/* PCM the decoder holds that decode_mp3_samples() could not deliver. The
+ * samples a VBR header marks as encoder padding are not pending. */
+static int mp3_pcm_pending(const mp3dec_ex_t *d) {
+	if (d->detected_samples && d->cur_sample >= d->detected_samples)
+		return 0;
+	return d->buffer_consumed < d->buffer_samples;
+}
+
+enum mp3_input_state mp3_input_state(const struct mp3_decode_ctx *ctx) {
+	const mp3dec_ex_t *d = &ctx->mp3d;
+
+	if (d->offset < ctx->audio_end || mp3_pcm_pending(d))
+		return MP3_INPUT_MORE;
+	/* All the audio bytes are consumed. minimp3 resets its header state
+	 * when the last decode call found no frame, which is what a truncated
+	 * final frame or trailing junk looks like: the call skips the rest. */
+	if (d->mp3d.header[0] != 0xff)
+		return MP3_INPUT_DAMAGED;
+	/* A Xing or Info header declares the sample count (detected_samples,
+	 * after minimp3 removes the encoder delay and padding). Input that ends
+	 * on a frame boundary with fewer samples delivered lost whole frames.
+	 * Streams without that header declare no length, so a cut on a frame
+	 * boundary cannot be told from a complete file. */
+	if (d->detected_samples && d->cur_sample < d->detected_samples)
+		return MP3_INPUT_DAMAGED;
+	return MP3_INPUT_COMPLETE;
+}
+
+int mp3_expect_end_ok(const struct mp3_decode_ctx *ctx, size_t bytes_written,
+                      size_t output_capacity) {
+	switch (mp3_input_state(ctx)) {
+	case MP3_INPUT_COMPLETE:
+		return 1;
+	case MP3_INPUT_MORE:
+		/* The output filled first: the caller asked for a partial decode. */
+		return bytes_written >= output_capacity;
+	default:
+		return 0;
+	}
+}
+
 unsigned long mp3_get_bytes_consumed(const struct mp3_decode_ctx *ctx) {
-	return (unsigned long)ctx->mp3d.offset;
+	const mp3dec_ex_t *d = &ctx->mp3d;
+	size_t used = (size_t)d->offset;
+
+	if (mp3_pcm_pending(d)) {
+		/* The output filled inside the last frame: that frame is not used
+		 * up, so it and anything after it stay unconsumed. */
+		size_t last = ctx->frame_info.frame_bytes > 0 ?
+		              (size_t)ctx->frame_info.frame_bytes : 0;
+		used = used > last ? used - last : 0;
+	} else if (used >= ctx->audio_end) {
+		/* Recognised trailing tags count as consumed once the audio is. */
+		return ctx->src_size;
+	}
+	return (unsigned long)(used < ctx->src_size ? used : ctx->src_size);
 }
 
 int mp3_probe_complete_frame(const mp3dec_t *decoder,

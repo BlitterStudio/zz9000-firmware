@@ -1164,6 +1164,39 @@ if (ZZ9KDecodeMp3(&desc, &result) == ZZ9K_STATUS_OK) {
 rate and channel count. Callers that need this resident LVO should check
 `ZZ9K_LIBRARY_MIN_REVISION_AUDIO_DECODE`.
 
+`ZZ9K_AUDIO_DECODE_FLAG_EXPECT_END` says the source range is the complete MP3
+file. With it the firmware fails the call with `ZZ9K_STATUS_BAD_REQUEST` when
+the input does not end cleanly: the last frame is cut off, bytes follow the
+last frame that are not a tag, or the decoder stopped before the end of the
+stream (for example when the file holds more frames than its Xing or Info
+header counts). The output contents are undefined after `BAD_REQUEST`. These
+tags are not a fault: an ID3v2 tag at the start, and an ID3v1 tag (with or
+without its `TAG+` block) or an APEv2 tag (with or without a header) at the
+end. A Lyrics3 tag is not recognised and counts as bytes after the last frame.
+The check looks at the end of the stream only. A damaged frame in the middle
+is dropped by the decoder in both modes, and neither mode reports it.
+
+A file cut off exactly between two frames is reported only when it starts with
+a Xing or Info header, because that header declares the sample count and the
+decode delivers fewer samples. Without that header the length is unknown, and
+such a file looks complete.
+
+Running out of output space is not a fault. The call succeeds with
+`bytes_consumed` short of the source length and `ZZ9K_AUDIO_DECODE_RESULT_END`
+clear, whether or not `EXPECT_END` is set. A frame whose PCM only partly fits
+is not counted in `bytes_consumed`.
+
+Without `EXPECT_END` the same damaged input decodes what it can and succeeds.
+
+`ZZ9K_AUDIO_DECODE_RESULT_END` is set when the decoder used all the source
+bytes. After a complete decode `bytes_consumed` equals the source length, also
+when an ID3v1 or APEv2 tag follows the audio. Without `EXPECT_END`, a cut-off
+last frame or trailing junk leaves `END` set too, because the decoder skips
+what it cannot decode, and the last frame is missing from the output. `END`
+alone does not show that every frame was decoded; pass `EXPECT_END` when that
+matters. `zz9k-mp3` passes it on the one-shot path, so it reports a file with
+a cut-off end as `BAD_REQUEST`.
+
 The MP3-only `ZZ9KAudioStreamBegin(const ZZ9KAudioStreamBeginDesc *desc, ZZ9KAudioStreamResult *result)` begins the original stream contract. Use `ZZ9KAudioStreamBeginEx()` when the caller selects a codec explicitly. The result uses `ZZ9K_AUDIO_STREAM_RESULT_DONE` when EOF has been decoded and all PCM has been read. Its sample-format constants are `ZZ9K_AUDIO_SAMPLE_FORMAT_S16LE`, `ZZ9K_AUDIO_SAMPLE_FORMAT_S16BE`, `ZZ9K_AUDIO_SAMPLE_FORMAT_S32LE`, and `ZZ9K_AUDIO_SAMPLE_FORMAT_S32BE`.
 
 ### Stream playback and gain
