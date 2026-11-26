@@ -64,10 +64,12 @@ $(BUILD)/gl.o: $(SDK)/libaar/src/gl.c $(SDK)/libaar/src/aar_internal.h | $(BUILD
 
 # libaar's newlib glue defines _sbrk, _exit, _open and the other syscall stubs.
 # On a glibc host those names are the C library's own, so the wrapper renames
-# them to aar_host_* before it includes the glue. The firmware include
-# directory is left out: its linux/errno.h shim hides glibc's errno constants.
-$(BUILD)/syscalls.o: host_syscalls.c $(SDK)/libaar/src/syscalls.c | $(BUILD)
-	$(CC) -DZZAPP_HOST_TEST -I$(SDK)/include -I$(SDK)/libaar/src $(HOST_CFLAGS) -c -o $@ $<
+# them to aar_host_* before it includes the glue. The glue also includes
+# newlib's <reent.h>, which glibc lacks; host_include/ supplies the one type it
+# needs. The firmware include directory is left out: its linux/errno.h shim
+# hides glibc's errno constants.
+$(BUILD)/syscalls.o: host_syscalls.c $(SDK)/libaar/src/syscalls.c host_include/reent.h | $(BUILD)
+	$(CC) -DZZAPP_HOST_TEST -I$(SDK)/include -I$(SDK)/libaar/src -Ihost_include $(HOST_CFLAGS) -c -o $@ $<
 
 $(BUILD)/%: %.c $(ZZAPP_HARNESS_OBJS) | $(BUILD)
 	@mkdir -p $(dir $@)
