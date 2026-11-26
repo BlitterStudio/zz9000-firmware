@@ -93,12 +93,6 @@ static int parse_one(struct SDKDVDPSDemux *d)
 	uint32_t avail = d->staged - d->head;
 	uint8_t sid;
 	uint32_t total;
-	uint32_t payload_at;
-	uint32_t payload_length;
-	uint64_t pts = SDK_DVD_PS_NO_TS;
-	uint64_t dts = SDK_DVD_PS_NO_TS;
-	uint32_t queued_audio_before = d->audio.count;
-	int queued = 1;
 
 	if (avail < 4U)
 		return need_more(d);
@@ -160,6 +154,27 @@ static int parse_one(struct SDKDVDPSDemux *d)
 		d->packets_seen++;
 		return 1;
 	}
+	if (!sdk_dvd_ps_handle_pes(d, p, total))
+		return 0;
+	consume(d, total);
+	return 1;
+}
+
+/* Routes one complete PES packet (start code to last payload byte) to the
+ * video or audio queue: PTS/DTS parsing and the stream selection live here
+ * so the Program Stream and Transport Stream front ends share them.
+ * Returns 0 when the queue is full (nothing consumed), 1 once the packet is
+ * queued, dropped or counted as ignored or malformed. */
+int sdk_dvd_ps_handle_pes(struct SDKDVDPSDemux *d, const uint8_t *p,
+                          uint32_t total)
+{
+	uint8_t sid = p[3];
+	uint32_t payload_at;
+	uint32_t payload_length;
+	uint64_t pts = SDK_DVD_PS_NO_TS;
+	uint64_t dts = SDK_DVD_PS_NO_TS;
+	uint32_t queued_audio_before = d->audio.count;
+	int queued = 1;
 
 	payload_at = 6U;
 	if (total >= 9U && (p[6] & 0xc0U) == 0x80U) {
@@ -168,14 +183,12 @@ static int parse_one(struct SDKDVDPSDemux *d)
 		payload_at = 9U + optional;
 		if (payload_at > total) {
 			d->malformed_packets++;
-			consume(d, total);
 			return 1;
 		}
 		if ((flags & 0x80U) != 0U) {
 			if (optional < 5U || !valid_timestamp(p + 9U,
 			    (flags & 0x40U) != 0U ? 3U : 2U)) {
 				d->malformed_packets++;
-				consume(d, total);
 				return 1;
 			}
 			pts = pes_timestamp(p + 9U);
@@ -183,7 +196,6 @@ static int parse_one(struct SDKDVDPSDemux *d)
 		if ((flags & 0x40U) != 0U) {
 			if (optional < 10U || !valid_timestamp(p + 14U, 1U)) {
 				d->malformed_packets++;
-				consume(d, total);
 				return 1;
 			}
 			dts = pes_timestamp(p + 14U);
@@ -198,7 +210,6 @@ static int parse_one(struct SDKDVDPSDemux *d)
 			if (payload_at + 5U > total ||
 			    !valid_timestamp(p + payload_at, 2U)) {
 				d->malformed_packets++;
-				consume(d, total);
 				return 1;
 			}
 			pts = pes_timestamp(p + payload_at);
@@ -209,7 +220,6 @@ static int parse_one(struct SDKDVDPSDemux *d)
 			    !valid_timestamp(p + payload_at, 3U) ||
 			    !valid_timestamp(p + payload_at + 5U, 1U)) {
 				d->malformed_packets++;
-				consume(d, total);
 				return 1;
 			}
 			pts = pes_timestamp(p + payload_at);
@@ -304,7 +314,6 @@ static int parse_one(struct SDKDVDPSDemux *d)
 			d->audio_packets_dropped++;
 			d->audio_bytes_dropped += total;
 			d->bytes_ignored += total;
-			consume(d, total);
 			d->packets_seen++;
 			return 1;
 		}
@@ -314,9 +323,20 @@ static int parse_one(struct SDKDVDPSDemux *d)
 		d->malformed_packets++;
 	if (d->audio.count != queued_audio_before)
 		d->audio_drop_run_active = 0U;
-	consume(d, total);
 	d->packets_seen++;
 	return 1;
+}
+
+/* One parse step: the attached front end (Transport Stream) or the
+ * Program Stream parser. */
+static int parse_next(struct SDKDVDPSDemux *d)
+{
+	return d->parse ? d->parse(d) : parse_one(d);
+}
+
+void sdk_dvd_ps_consume(struct SDKDVDPSDemux *d, uint32_t bytes)
+{
+	consume(d, bytes);
 }
 
 void sdk_dvd_ps_init(struct SDKDVDPSDemux *d)
@@ -339,7 +359,7 @@ void sdk_dvd_ps_write(struct SDKDVDPSDemux *d, const uint8_t *src,
 		uint32_t room;
 		uint32_t copy;
 
-		while ((state = parse_one(d)) == 1) {}
+		while ((state = parse_next(d)) == 1) {}
 		if (state == 0)
 			break;
 		room = SDK_DVD_PS_STAGING_CAPACITY - d->staged;
@@ -363,14 +383,14 @@ void sdk_dvd_ps_write(struct SDKDVDPSDemux *d, const uint8_t *src,
 	}
 	if (used == length && eof)
 		d->eof = 1U;
-	while ((state = parse_one(d)) == 1) {}
+	while ((state = parse_next(d)) == 1) {}
 	if (accepted)
 		*accepted = used;
 }
 
 static void pump(struct SDKDVDPSDemux *d)
 {
-	while (parse_one(d) == 1) {}
+	while (parse_next(d) == 1) {}
 }
 
 static int pop(struct SDKDVDPSDemux *d, struct SDKDVDPSQueue *q,

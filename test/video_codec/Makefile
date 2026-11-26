@@ -9,7 +9,9 @@ WEBM_MODULE_SRC := $(FIRMWARE_SRC)/../modules/webm
 
 test: build/video_codec_test build/media_timeline_test build/media_codec_test \
 	build/matroska_mpeg_test \
-	build/media_codec_test_sanitize build/dvd_codec_test build/dvd_codec_test_sanitize
+	build/media_codec_test_sanitize build/dvd_codec_test build/dvd_codec_test_sanitize \
+	build/ts_demux_test build/ts_demux_test_sanitize \
+	build/ts_codec_test build/ts_codec_test_sanitize
 	build/video_codec_test
 	build/media_timeline_test
 	build/media_codec_test
@@ -19,6 +21,12 @@ test: build/video_codec_test build/media_timeline_test build/media_codec_test \
 	build/dvd_codec_test
 	ASAN_OPTIONS=halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1 \
 		build/dvd_codec_test_sanitize
+	build/ts_demux_test
+	ASAN_OPTIONS=halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1 \
+		build/ts_demux_test_sanitize
+	build/ts_codec_test
+	ASAN_OPTIONS=halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1 \
+		build/ts_codec_test_sanitize
 
 build/media_timeline_test: media_timeline_test.c \
 	$(FIRMWARE_SRC)/sdk_media_timeline.c \
@@ -49,6 +57,7 @@ MPEG_SRCS := $(FIRMWARE_SRC)/sdk_video_mpeg2.c \
 	$(WEBM_MODULE_SRC)/webm_parse.c \
 	$(WEBM_MODULE_SRC)/webm_window.c \
 	$(FIRMWARE_SRC)/sdk_dvd_ps.c \
+	$(FIRMWARE_SRC)/sdk_dvd_ts.c \
 	$(FIRMWARE_SRC)/sdk_dvd_ac3.c \
 	$(FIRMWARE_SRC)/sdk_dvd_lpcm.c \
 	$(FIRMWARE_SRC)/mp3/decode_mp3.c \
@@ -61,6 +70,7 @@ MPEG_LIBS := $(LIBMPEG2_HOST_LIB) $(LIBA52_HOST_LIB)
 # every test binary below.
 MPEG_HDRS := $(FIRMWARE_SRC)/sdk_video_backend.h \
 	$(FIRMWARE_SRC)/sdk_dvd_ps.h \
+	$(FIRMWARE_SRC)/sdk_dvd_ts.h \
 	$(FIRMWARE_SRC)/sdk_dvd_ac3.h \
 	$(FIRMWARE_SRC)/sdk_dvd_lpcm.h \
 	$(FIRMWARE_SRC)/sdk_media_timeline.h \
@@ -121,5 +131,38 @@ build/dvd_bench: dvd_bench.c $(DVD_FIXTURES) $(MPEG_DEPS)
 	mkdir -p build
 	$(CC) $(CFLAGS) $(MPEG_FLAGS) -o $@ dvd_bench.c $(MPEG_SRCS) \
 		$(MPEG_LIBS) -lm
+
+# The Transport Stream demux needs neither codec library.
+TS_DEMUX_SRCS := $(FIRMWARE_SRC)/sdk_dvd_ps.c $(FIRMWARE_SRC)/sdk_dvd_ts.c \
+	$(FIRMWARE_SRC)/sdk_dvd_lpcm.c
+TS_DEMUX_HDRS := $(FIRMWARE_SRC)/sdk_dvd_ps.h $(FIRMWARE_SRC)/sdk_dvd_ts.h \
+	$(FIRMWARE_SRC)/sdk_dvd_lpcm.h
+TS_FIXTURES := ts_mpeg2_ps_fixture.inc ts_mpeg2_ts_fixture.inc \
+	ts_mpeg2_m2ts_fixture.inc ts_mpeg1_ps_fixture.inc \
+	ts_mpeg1_ts_fixture.inc ts_mpeg2_2a_ps_fixture.inc \
+	ts_mpeg2_2a_ts_fixture.inc
+
+build/ts_demux_test: ts_demux_test.c $(TS_FIXTURES) $(TS_DEMUX_SRCS) \
+	$(TS_DEMUX_HDRS)
+	mkdir -p build
+	$(CC) $(CFLAGS) -I$(FIRMWARE_SRC) -o $@ ts_demux_test.c \
+		$(TS_DEMUX_SRCS)
+
+build/ts_demux_test_sanitize: ts_demux_test.c $(TS_FIXTURES) \
+	$(TS_DEMUX_SRCS) $(TS_DEMUX_HDRS)
+	mkdir -p build
+	$(CC) $(SANITIZE_CFLAGS) -I$(FIRMWARE_SRC) -o $@ ts_demux_test.c \
+		$(TS_DEMUX_SRCS)
+
+build/ts_codec_test: ts_codec_test.c $(TS_FIXTURES) $(MPEG_DEPS)
+	mkdir -p build
+	$(CC) $(CFLAGS) $(MPEG_FLAGS) -o $@ ts_codec_test.c $(MPEG_SRCS) \
+		$(MPEG_LIBS) -lm
+
+build/ts_codec_test_sanitize: ts_codec_test.c $(TS_FIXTURES) $(MPEG_DEPS)
+	mkdir -p build
+	$(CC) $(SANITIZE_CFLAGS) $(MPEG_FLAGS) -o $@ ts_codec_test.c \
+		$(MPEG_SRCS) $(MPEG_LIBS) -lm
+
 clean:
 	rm -rf build

@@ -214,6 +214,12 @@ default shared heap are Zorro III diagnostics.
     fits the 224 KiB pool, such as 352x288 YUY2; 640x360 must fail without
     reserving memory or changing overlay state.
 
+    Play a Transport Stream the same way, for example `ZZPlay --fps
+    Work:Video/test.ts` for an MPEG-2 or MPEG-1 video with MP2 audio. ZZPlay
+    must not report that the firmware refused the stream. The overlay
+    behavior is the same as for the Program Stream and the audio is in sync.
+    An `.m2ts` file with 192-byte packets plays the same.
+
 11. Check ZZPlay network playback. This needs a running TCP/IP stack;
     the `https://` part also needs AmiSSL 5. Use an MP3 station that the
     test network reaches.

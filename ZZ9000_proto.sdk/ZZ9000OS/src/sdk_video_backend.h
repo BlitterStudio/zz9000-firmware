@@ -17,6 +17,7 @@
 #define SDK_VIDEO_CODEC_VP9 4U
 #define SDK_VIDEO_CONTAINER_MPEG_PS 1U
 #define SDK_VIDEO_CONTAINER_WEBM 2U
+#define SDK_VIDEO_CONTAINER_MPEG_TS 3U
 
 struct SDKVideoDecoderInfo {
 	uint32_t width;

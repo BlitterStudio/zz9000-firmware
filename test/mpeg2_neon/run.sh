@@ -58,7 +58,7 @@ $CC $FW -std=c99 -Wall -Wextra -DSDK_VIDEO_HOST_TEST=1 \
     -o mpeg2_neon_test \
     /src/test/mpeg2_neon/mpeg2_neon_test.c $F/sdk_mpeg2_neon.c \
     $F/sdk_video_mpeg2.c $W/webm_parse.c $W/webm_window.c \
-    $F/sdk_dvd_ps.c $F/sdk_dvd_ac3.c \
+    $F/sdk_dvd_ps.c $F/sdk_dvd_ts.c $F/sdk_dvd_ac3.c \
     $F/sdk_dvd_lpcm.c $F/mp3/decode_mp3.c $F/sdk_media_timeline.c \
     $F/sdk_media_profile.c $F/sdk_video_yuy2.c m_*.o a_*.o -lm -static
 qemu-arm ./mpeg2_neon_test "$@"

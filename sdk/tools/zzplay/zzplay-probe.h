@@ -23,6 +23,10 @@ typedef struct ZZPlayVideoInfo {
   uint32_t height;
   uint32_t frame_rate_milli;
   int is_program_stream;
+  /* An MPEG Transport Stream (188-byte packets, or 192 with a timestamp
+   * in front: M2TS). has_video_pes and has_audio_pes then describe the
+   * video and MPEG audio PIDs its PMT names. */
+  int is_transport_stream;
   int has_video_pes;
   int has_audio_pes;
   int is_mpeg2;
@@ -72,7 +76,8 @@ typedef enum ZZPlayMediaKind {
   ZZPLAY_MEDIA_KIND_WEBP,
   ZZPLAY_MEDIA_KIND_FLAC,
   ZZPLAY_MEDIA_KIND_VORBIS,
-  ZZPLAY_MEDIA_KIND_WEBM
+  ZZPLAY_MEDIA_KIND_WEBM,
+  ZZPLAY_MEDIA_KIND_MPEG_TS
 } ZZPlayMediaKind;
 
 typedef struct ZZPlayProbeInfo {
@@ -83,9 +88,9 @@ typedef struct ZZPlayProbeInfo {
   ZZPlayFLACInfo flac;
   ZZPlayVorbisInfo vorbis;
   ZZPlayWebMInfo webm;
-  /* A network source that starts like video (WebM, WebP or an MPEG
-   * Program Stream). Video plays only from files, so kind stays
-   * UNSUPPORTED. */
+  /* A network source that starts like video (WebM, WebP, an MPEG Program
+   * Stream or Transport Stream). Video plays only from files, so kind
+   * stays UNSUPPORTED. */
   int network_video;
 } ZZPlayProbeInfo;
 

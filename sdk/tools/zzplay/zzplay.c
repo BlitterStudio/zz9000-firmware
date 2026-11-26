@@ -3253,7 +3253,8 @@ static int zzplay_preroll_input(struct ZZPlayRuntime *runtime,
   TimeVal_Type now;
   uint32_t accepted_before;
 
-  if (runtime->container.container != ZZ9K_VIDEO_CONTAINER_MPEG_PS) {
+  if (runtime->container.container != ZZ9K_VIDEO_CONTAINER_MPEG_PS &&
+      runtime->container.container != ZZ9K_VIDEO_CONTAINER_MPEG_TS) {
     return ZZ9K_STATUS_OK;
   }
   GetSysTime(&started);
@@ -4060,8 +4061,8 @@ static const char *zzplay_mpeg_audio_name(ZZPlayMediaAudio audio)
   }
 }
 
-/* Service flags, codec and messages for an MPEG Program Stream, once the
- * audio decision says whether its audio will be decoded. */
+/* Service flags, codec and messages for an MPEG Program Stream or Transport
+ * Stream, once the audio decision says whether its audio will be decoded. */
 static void zzplay_mpeg_service_policy(ZZPlayContainerPolicy *policy,
                                        const ZZPlayVideoInfo *video,
                                        int audio_decoded)
@@ -4121,11 +4122,17 @@ static int zzplay_prepare_mpeg(struct ZZPlayRuntime *runtime,
   ZZPlayAudioBackend requested;
   int strict = 0;
   ZZPlayContainerPolicy *policy = &runtime->container;
+  const char *stream = "Program Stream";
 
   info = run->probe->video;
+  if (info.is_transport_stream) {
+    stream = "Transport Stream";
+  }
   memset(policy, 0, sizeof(*policy));
   policy->title = info.is_mpeg2 ? "MPEG-2" : "MPEG-1";
-  policy->container = ZZ9K_VIDEO_CONTAINER_MPEG_PS;
+  policy->container = info.is_transport_stream
+                          ? ZZ9K_VIDEO_CONTAINER_MPEG_TS
+                          : ZZ9K_VIDEO_CONTAINER_MPEG_PS;
   policy->skip_late_b = 1U;
   /* A sustained reference-picture lag recovers at the next MPEG I picture. */
   policy->keyframe_skip = 1U;
@@ -4140,10 +4147,11 @@ static int zzplay_prepare_mpeg(struct ZZPlayRuntime *runtime,
                 ZZ9K_STATUS_UNSUPPORTED);
     return 0;
   }
-  if (!info.is_program_stream || !info.has_video_pes) {
+  if ((!info.is_program_stream && !info.is_transport_stream) ||
+      !info.has_video_pes) {
     zzplay_error(runtime,
             "zzplay: %s elementary streams are not supported; "
-            "a Program Stream is required\n",
+            "a Program Stream or Transport Stream is required\n",
             policy->title);
     zzplay_fail(runtime, ZZPLAY_FAILURE_INVALID_INPUT,
                 ZZ9K_STATUS_UNSUPPORTED);
@@ -4156,8 +4164,8 @@ static int zzplay_prepare_mpeg(struct ZZPlayRuntime *runtime,
       requested != ZZPLAY_AUDIO_AUTO && requested != ZZPLAY_AUDIO_NONE &&
       strict) {
     zzplay_error(runtime,
-            "zzplay: the Program Stream has no supported audio "
-            "(MP2, AC-3 or LPCM)\n");
+            "zzplay: the %s has no supported audio (%s)\n", stream,
+            info.is_transport_stream ? "MP2" : "MP2, AC-3 or LPCM");
     zzplay_fail(runtime, ZZPLAY_FAILURE_INVALID_INPUT,
                 ZZ9K_STATUS_UNSUPPORTED);
     return 0;
@@ -4186,9 +4194,8 @@ static int zzplay_prepare_mpeg(struct ZZPlayRuntime *runtime,
     }
     if (decision->status != ZZPLAY_BACKEND_OK) {
       zzplay_error(runtime,
-              "zzplay: audio backend %s cannot play Program "
-              "Stream %s (status %u)\n",
-              zzplay_audio_backend_name(requested),
+              "zzplay: audio backend %s cannot play %s %s (status %u)\n",
+              zzplay_audio_backend_name(requested), stream,
               zzplay_mpeg_audio_name(info.audio_codec),
               (unsigned)decision->status);
       zzplay_fail(runtime, ZZPLAY_FAILURE_CAPABILITY,
@@ -4203,12 +4210,21 @@ static int zzplay_prepare_mpeg(struct ZZPlayRuntime *runtime,
     decision->status = ZZPLAY_BACKEND_OK;
     decision->selected = ZZPLAY_AUDIO_NONE;
     runtime->audio_backend = ZZPLAY_AUDIO_NONE;
-    zzplay_info("zzplay: warning: video-only Program Stream\n");
+    zzplay_info("zzplay: warning: video-only %s\n", stream);
   }
   zzplay_mpeg_service_policy(policy, &info, runtime->audio_enabled);
-  zzplay_info("zzplay: %s/PS %lux%lu, %lu.%03lu fps, "
+  if (info.is_transport_stream) {
+    /* No service flag names Transport Stream support: a firmware without
+     * it refuses the container at Begin, like an unsupported geometry. */
+    policy->begin_refused =
+        "zzplay: the firmware refused this Transport Stream (unsupported "
+        "video geometry, or no Transport Stream support in this "
+        "firmware)\n";
+  }
+  zzplay_info("zzplay: %s/%s %lux%lu, %lu.%03lu fps, "
          "program audio %s\n",
          policy->title,
+         info.is_transport_stream ? "TS" : "PS",
          (unsigned long)info.width, (unsigned long)info.height,
          (unsigned long)(info.frame_rate_milli / 1000U),
          (unsigned long)(info.frame_rate_milli % 1000U),
@@ -5374,6 +5390,7 @@ static const struct ZZPlayEngineEntry {
   ZZPlayEngineFn run;
 } zzplay_engines[] = {
   { ZZPLAY_MEDIA_KIND_MPEG_PS, zzplay_engine_mpeg },
+  { ZZPLAY_MEDIA_KIND_MPEG_TS, zzplay_engine_mpeg },
   { ZZPLAY_MEDIA_KIND_MP3, zzplay_mp3_run },
   { ZZPLAY_MEDIA_KIND_WEBP, zzplay_engine_webp },
   { ZZPLAY_MEDIA_KIND_FLAC, zzplay_flac_run },
@@ -5539,7 +5556,7 @@ static ZZPlayAppStep zzplay_app_play_index(ZZPlayApp *app, int32_t index)
   } else if (!engine) {
     zzplay_launch_reportf(
         &app->ctl, &app->options,
-         "cannot play %s: not a supported MPEG Program Stream, WebM, MP3, FLAC, Ogg Vorbis or WebP animation file",
+         "cannot play %s: not a supported MPEG Program Stream or Transport Stream, WebM, MP3, FLAC, Ogg Vorbis or WebP animation file",
         app->entry_path);
   } else if (!app->card_available && probe.kind != ZZPLAY_MEDIA_KIND_MP3) {
     zzplay_launch_reportf(&app->ctl, &app->options,

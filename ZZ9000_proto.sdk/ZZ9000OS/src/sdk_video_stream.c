@@ -296,6 +296,7 @@ static uint16_t sdk_video_stream_begin_locked(
 		module_id = ZZM_MODULE_WEBM;
 	}
 	if ((begin->container == SDK_VIDEO_CONTAINER_MPEG_PS ||
+	     begin->container == SDK_VIDEO_CONTAINER_MPEG_TS ||
 	     begin->container == SDK_VIDEO_CONTAINER_WEBM) &&
 	    (begin->codec == SDK_VIDEO_CODEC_MPEG1 ||
 	     begin->codec == SDK_VIDEO_CODEC_MPEG2)) {

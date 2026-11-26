@@ -626,6 +626,336 @@ static void zzplay_ps_demux(ZZPlayPSDemux *d, const uint8_t *data,
   }
 }
 
+/* MPEG Transport Stream. The probe follows the firmware demux's choices
+ * (sdk_dvd_ts.c): the first non-zero program of the PAT, and in its PMT
+ * the first video PID of stream type 0x01 or 0x02 and the first audio PID
+ * of type 0x03 or 0x04. The video PES payload goes to the sequence-header
+ * scan, so a header split across packets is read whole. */
+#define ZZPLAY_TS_SYNC 0x47U
+#define ZZPLAY_TS_PACKET_BYTES 188U
+#define ZZPLAY_TS_M2TS_BYTES 192U
+#define ZZPLAY_TS_NO_PID 0xffffU
+#define ZZPLAY_TS_SECTION_MAX 1024U
+
+typedef struct ZZPlayTSDemux {
+  uint32_t size;       /* 188, or 192 for M2TS */
+  uint32_t offset;     /* where the sync byte sits in a packet */
+  uint32_t fill;
+  uint8_t packet[ZZPLAY_TS_M2TS_BYTES];
+  uint16_t pmt_pid;
+  uint16_t program;
+  uint16_t video_pid;
+  uint16_t audio_pid;
+  uint8_t have_pmt;
+  uint8_t pes_stage;   /* video PES: 0 idle, 1 header, 2 skip, 3 payload */
+  uint8_t pes_len;
+  uint8_t pes_skip;
+  uint8_t pes_hdr[9];
+  uint8_t section_open;
+  uint32_t section_fill;
+  uint8_t section[ZZPLAY_TS_SECTION_MAX];
+} ZZPlayTSDemux;
+
+/* The packet size (188, or 192 for M2TS) when the data starts with sync
+ * bytes spaced that far apart: three of them, or both when the data ends
+ * before the third. 0 when it does not. */
+static uint32_t zzplay_ts_packet_size(const uint8_t *data, size_t length)
+{
+  static const uint8_t sizes[2] = {ZZPLAY_TS_PACKET_BYTES,
+                                   ZZPLAY_TS_M2TS_BYTES};
+  unsigned s;
+
+  for (s = 0U; s < 2U; s++) {
+    size_t offset = s == 0U ? 0U : 4U;
+    unsigned seen = 0U;
+    unsigned k;
+
+    for (k = 0U; k < 3U; k++) {
+      size_t at = offset + (size_t)k * sizes[s];
+
+      if (at >= length) {
+        break;
+      }
+      if (data[at] != ZZPLAY_TS_SYNC) {
+        seen = 0U;
+        break;
+      }
+      seen++;
+    }
+    if (seen >= 2U) {
+      return sizes[s];
+    }
+  }
+  return 0U;
+}
+
+static uint16_t zzplay_ts_u16(const uint8_t *p)
+{
+  return (uint16_t)(((uint16_t)p[0] << 8) | p[1]);
+}
+
+/* CRC-32/MPEG-2 of a PSI section including its CRC is 0. */
+static uint32_t zzplay_ts_crc32(const uint8_t *p, uint32_t length)
+{
+  uint32_t crc = 0xffffffffU;
+  uint32_t i;
+  uint32_t bit;
+
+  for (i = 0U; i < length; i++) {
+    crc ^= (uint32_t)p[i] << 24;
+    for (bit = 0U; bit < 8U; bit++) {
+      crc = (crc & 0x80000000U) != 0U ? (crc << 1) ^ 0x04c11db7U : crc << 1;
+    }
+  }
+  return crc;
+}
+
+static void zzplay_ts_init(ZZPlayTSDemux *d, uint32_t size)
+{
+  memset(d, 0, sizeof(*d));
+  d->size = size;
+  d->offset = size == ZZPLAY_TS_M2TS_BYTES ? 4U : 0U;
+  d->pmt_pid = ZZPLAY_TS_NO_PID;
+  d->video_pid = ZZPLAY_TS_NO_PID;
+  d->audio_pid = ZZPLAY_TS_NO_PID;
+}
+
+static void zzplay_ts_section_done(ZZPlayTSDemux *d, uint32_t total)
+{
+  const uint8_t *s = d->section;
+  uint32_t at;
+  uint32_t end;
+
+  if ((s[1] & 0x80U) == 0U || total < 12U || (s[5] & 1U) == 0U ||
+      zzplay_ts_crc32(s, total) != 0U) {
+    return;
+  }
+  end = total - 4U;
+  if (s[0] == 0x00U && d->pmt_pid == ZZPLAY_TS_NO_PID) {
+    for (at = 8U; at + 4U <= end; at += 4U) {
+      if (zzplay_ts_u16(s + at) != 0U) {
+        d->program = zzplay_ts_u16(s + at);
+        d->pmt_pid = (uint16_t)(zzplay_ts_u16(s + at + 2U) & 0x1fffU);
+        d->section_open = 0U;
+        return;
+      }
+    }
+  } else if (s[0] == 0x02U && d->pmt_pid != ZZPLAY_TS_NO_PID &&
+             zzplay_ts_u16(s + 3U) == d->program) {
+    for (at = 12U + (zzplay_ts_u16(s + 10U) & 0x0fffU); at + 5U <= end;) {
+      uint8_t type = s[at];
+      uint16_t pid = (uint16_t)(zzplay_ts_u16(s + at + 1U) & 0x1fffU);
+      uint32_t es_info = zzplay_ts_u16(s + at + 3U) & 0x0fffU;
+
+      if (at + 5U + es_info > end) {
+        break;
+      }
+      at += 5U + es_info;
+      if (pid == 0U || pid == 0x1fffU || pid == d->pmt_pid) {
+        continue;
+      }
+      if (d->video_pid == ZZPLAY_TS_NO_PID &&
+          (type == 0x01U || type == 0x02U)) {
+        d->video_pid = pid;
+      } else if (d->audio_pid == ZZPLAY_TS_NO_PID &&
+                 (type == 0x03U || type == 0x04U)) {
+        d->audio_pid = pid;
+      }
+    }
+    d->have_pmt = d->video_pid != ZZPLAY_TS_NO_PID ||
+                  d->audio_pid != ZZPLAY_TS_NO_PID;
+  }
+}
+
+/* Section bytes of the PID being watched (the PAT, then the program's
+ * PMT). A section may span packets and a packet may hold several. */
+static void zzplay_ts_section_feed(ZZPlayTSDemux *d, const uint8_t *data,
+                                   uint32_t length)
+{
+  while (length != 0U) {
+    uint32_t total;
+    uint32_t take;
+
+    if (!d->section_open) {
+      if (data[0] == 0xffU) {
+        return;
+      }
+      d->section_open = 1U;
+      d->section_fill = 0U;
+    }
+    total = d->section_fill >= 3U
+                ? 3U + (zzplay_ts_u16(d->section + 1U) & 0x0fffU) : 3U;
+    take = total - d->section_fill;
+    if (take > length) {
+      take = length;
+    }
+    if (d->section_fill + take > ZZPLAY_TS_SECTION_MAX) {
+      d->section_open = 0U;
+      return;
+    }
+    memcpy(d->section + d->section_fill, data, take);
+    d->section_fill += take;
+    data += take;
+    length -= take;
+    if (d->section_fill < 3U) {
+      continue;
+    }
+    total = 3U + (zzplay_ts_u16(d->section + 1U) & 0x0fffU);
+    if (total > ZZPLAY_TS_SECTION_MAX) {
+      d->section_open = 0U;
+      return;
+    }
+    if (d->section_fill == total) {
+      d->section_open = 0U;
+      zzplay_ts_section_done(d, total);
+      if (d->have_pmt) {
+        return;
+      }
+    }
+  }
+}
+
+static void zzplay_ts_section_packet(ZZPlayTSDemux *d, int pusi,
+                                     const uint8_t *payload, uint32_t length)
+{
+  if (pusi) {
+    uint32_t pointer = payload[0];
+
+    if (1U + pointer > length) {
+      d->section_open = 0U;
+      return;
+    }
+    if (d->section_open) {
+      zzplay_ts_section_feed(d, payload + 1U, pointer);
+    }
+    d->section_open = 0U;
+    zzplay_ts_section_feed(d, payload + 1U + pointer, length - 1U - pointer);
+  } else if (d->section_open) {
+    zzplay_ts_section_feed(d, payload, length);
+  }
+}
+
+/* Video PES payload to the sequence-header scan, header stripped. */
+static void zzplay_ts_video(ZZPlayTSDemux *d, ZZPlaySeqScan *es,
+                            ZZPlayVideoInfo *info, int pusi,
+                            const uint8_t *payload, uint32_t length)
+{
+  uint32_t i = 0U;
+
+  if (pusi) {
+    d->pes_stage = 1U;
+    d->pes_len = 0U;
+  }
+  while (i < length) {
+    if (d->pes_stage == 1U) {
+      d->pes_hdr[d->pes_len++] = payload[i++];
+      if (d->pes_len == 4U) {
+        if (d->pes_hdr[0] != 0U || d->pes_hdr[1] != 0U ||
+            d->pes_hdr[2] != 1U || d->pes_hdr[3] < 0xe0U ||
+            d->pes_hdr[3] > 0xefU) {
+          d->pes_stage = 0U;
+          return;
+        }
+        info->has_video_pes = 1;
+      } else if (d->pes_len == 9U) {
+        if ((d->pes_hdr[6] & 0xc0U) != 0x80U) {
+          d->pes_stage = 0U;
+          return;
+        }
+        d->pes_skip = d->pes_hdr[8];
+        d->pes_stage = d->pes_skip != 0U ? 2U : 3U;
+      }
+    } else if (d->pes_stage == 2U) {
+      uint32_t take = length - i < d->pes_skip ? length - i : d->pes_skip;
+
+      d->pes_skip = (uint8_t)(d->pes_skip - take);
+      i += take;
+      if (d->pes_skip == 0U) {
+        d->pes_stage = 3U;
+      }
+    } else if (d->pes_stage == 3U) {
+      zzplay_seq_put(es, info, payload + i, length - i);
+      return;
+    } else {
+      return;
+    }
+  }
+}
+
+static void zzplay_ts_packet(ZZPlayTSDemux *d, ZZPlaySeqScan *es,
+                             ZZPlayVideoInfo *info)
+{
+  const uint8_t *t = d->packet + d->offset;
+  uint16_t pid = (uint16_t)(zzplay_ts_u16(t + 1U) & 0x1fffU);
+  int pusi = (t[1] & 0x40U) != 0U;
+  uint32_t control = (t[3] >> 4) & 3U;
+  uint32_t at = 4U;
+  const uint8_t *payload;
+  uint32_t length;
+
+  /* Transport errors and scrambled payloads are not read. */
+  if ((t[1] & 0x80U) != 0U || (t[3] & 0xc0U) != 0U) {
+    return;
+  }
+  if ((control & 2U) != 0U) {
+    if (t[4] > 183U) {
+      return;
+    }
+    at = 5U + t[4];
+  }
+  if ((control & 1U) == 0U || at >= ZZPLAY_TS_PACKET_BYTES) {
+    return;
+  }
+  payload = t + at;
+  length = ZZPLAY_TS_PACKET_BYTES - at;
+  if (!d->have_pmt) {
+    uint16_t watched = d->pmt_pid == ZZPLAY_TS_NO_PID ? 0U : d->pmt_pid;
+
+    if (pid == watched) {
+      zzplay_ts_section_packet(d, pusi, payload, length);
+    }
+    return;
+  }
+  if (pid == d->video_pid) {
+    zzplay_ts_video(d, es, info, pusi, payload, length);
+  } else if (pid == d->audio_pid && pusi && length >= 4U &&
+             payload[0] == 0U && payload[1] == 0U && payload[2] == 1U &&
+             payload[3] >= 0xc0U && payload[3] <= 0xdfU) {
+    /* MPEG audio is the only audio the firmware takes from a Transport
+     * Stream. */
+    info->has_audio_pes = 1;
+    info->audio_codec = ZZPLAY_MEDIA_AUDIO_MP2;
+  }
+}
+
+static void zzplay_ts_feed(ZZPlayTSDemux *d, const uint8_t *data,
+                           size_t length, ZZPlaySeqScan *es,
+                           ZZPlayVideoInfo *info)
+{
+  while (length != 0U) {
+    size_t take = d->size - d->fill;
+
+    if (take > length) {
+      take = length;
+    }
+    memcpy(d->packet + d->fill, data, take);
+    d->fill += (uint32_t)take;
+    data += take;
+    length -= take;
+    if (d->fill < d->size) {
+      continue;
+    }
+    if (d->packet[d->offset] == ZZPLAY_TS_SYNC) {
+      zzplay_ts_packet(d, es, info);
+      d->fill = 0U;
+    } else {
+      /* Sync lost: slide one byte at a time until it is found again. */
+      memmove(d->packet, d->packet + 1U, d->size - 1U);
+      d->fill = d->size - 1U;
+    }
+  }
+}
+
 int zzplay_probe_file(ZZPlayFile *file, ZZPlayVideoInfo *info)
 {
   uint8_t *buffer;
@@ -633,6 +963,8 @@ int zzplay_probe_file(ZZPlayFile *file, ZZPlayVideoInfo *info)
   ZZPlaySeqScan raw;
   ZZPlaySeqScan es;
   ZZPlayPSDemux demux;
+  ZZPlayTSDemux ts;
+  uint32_t ts_size = 0U;
   size_t total = 0U;
 
   if (!file || !info ||
@@ -662,15 +994,29 @@ int zzplay_probe_file(ZZPlayFile *file, ZZPlayVideoInfo *info)
     }
     got = zzplay_file_read(file, buffer + raw.length, want);
     raw.length += got;
-    zzplay_probe_mpeg_program(buffer, raw.length, info);
-    if (info->is_program_stream) {
-      /* Packs start a Program Stream, so the demux sees it from its
-       * first pack. */
-      zzplay_ps_demux(&demux, buffer + raw.length - got, got, &es, info);
+    if (total == 0U && got != 0U) {
+      ts_size = zzplay_ts_packet_size(buffer, got);
+      if (ts_size != 0U) {
+        zzplay_ts_init(&ts, ts_size);
+        info->is_transport_stream = 1;
+      }
+    }
+    if (ts_size != 0U) {
+      zzplay_ts_feed(&ts, buffer + raw.length - got, got, &es, info);
       zzplay_seq_scan(&es, info);
-      zzplay_seq_carry(&raw);
+      raw.length = 0U;
     } else {
-      zzplay_seq_scan(&raw, info);
+      zzplay_probe_mpeg_program(buffer, raw.length, info);
+      if (info->is_program_stream) {
+        /* Packs start a Program Stream, so the demux sees it from its
+         * first pack. */
+        zzplay_ps_demux(&demux, buffer + raw.length - got, got, &es,
+                        info);
+        zzplay_seq_scan(&es, info);
+        zzplay_seq_carry(&raw);
+      } else {
+        zzplay_seq_scan(&raw, info);
+      }
     }
     total += got;
     if (got == 0U) {
@@ -811,17 +1157,23 @@ int zzplay_probe_media_file(ZZPlayFile *file, ZZPlayProbeInfo *info)
 
   if (network) {
     /* The Program Stream scan reads 256 KiB and then rewinds, which a
-     * stream cannot do; a pack start code is enough to refuse it. */
-    if (got >= 4U && buffer[0] == 0U && buffer[1] == 0U &&
-        buffer[2] == 1U && buffer[3] == 0xBAU) {
+     * stream cannot do; a pack start code, or the sync bytes of a
+     * Transport Stream, are enough to refuse it. */
+    if ((got >= 4U && buffer[0] == 0U && buffer[1] == 0U &&
+         buffer[2] == 1U && buffer[3] == 0xBAU) ||
+        zzplay_ts_packet_size(buffer, got) != 0U) {
       info->network_video = 1;
       goto done;
     }
-  } else if (zzplay_probe_file(file, &info->video) &&
-             info->video.is_program_stream &&
-             info->video.has_video_pes) {
-    info->kind = ZZPLAY_MEDIA_KIND_MPEG_PS;
-    return 1;
+  } else if (zzplay_probe_file(file, &info->video)) {
+    if (info->video.is_program_stream && info->video.has_video_pes) {
+      info->kind = ZZPLAY_MEDIA_KIND_MPEG_PS;
+      return 1;
+    }
+    if (info->video.is_transport_stream && info->video.has_video_pes) {
+      info->kind = ZZPLAY_MEDIA_KIND_MPEG_TS;
+      return 1;
+    }
   }
   if (zzplay_file_read(file, id3, sizeof(id3)) == sizeof(id3) &&
       memcmp(id3, "ID3", 3U) == 0) {

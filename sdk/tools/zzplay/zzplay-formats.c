@@ -10,6 +10,10 @@ static const char *const zzplay_mpeg_ps_extensions[] = {
   "mpg", "mpeg", "vob", NULL
 };
 
+static const char *const zzplay_mpeg_ts_extensions[] = {
+  "ts", "m2t", "mts", "m2ts", NULL
+};
+
 static const char *const zzplay_webm_extensions[] = {
   "webm", "mkv", NULL
 };
@@ -33,6 +37,12 @@ static const ZZPlayFormat zzplay_formats_table[] = {
     ZZPLAY_MEDIA_KIND_MPEG_PS,
     "MPEG Program Stream",
     zzplay_mpeg_ps_extensions,
+    ZZPLAY_FORMAT_HAS_VIDEO
+  },
+  {
+    ZZPLAY_MEDIA_KIND_MPEG_TS,
+    "MPEG Transport Stream",
+    zzplay_mpeg_ts_extensions,
     ZZPLAY_FORMAT_HAS_VIDEO
   },
   {

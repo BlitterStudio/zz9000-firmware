@@ -1,6 +1,7 @@
 /*
- * libmpeg2 + bounded PS/VOB demux backend: MPEG-1 and MPEG-2 video in a
- * Program Stream, with MP2 / DVD-LPCM / AC-3 audio.
+ * libmpeg2 + bounded PS/VOB and TS demux backend: MPEG-1 and MPEG-2 video in
+ * a Program Stream or Transport Stream, with MP2 / DVD-LPCM / AC-3 audio
+ * (a Transport Stream carries MP2 only).
  *
  * The backend implements the codec-neutral sdk_video_backend contract with
  * the sdk_media_timeline integer clock and an S16BE PCM ring, so media
@@ -15,6 +16,7 @@
 #include "sdk_media_profile.h"
 #include "sdk_media_timeline.h"
 #include "sdk_dvd_ps.h"
+#include "sdk_dvd_ts.h"
 #include "sdk_dvd_lpcm.h"
 #include "sdk_dvd_ac3.h"
 #include "sdk_mpeg2_neon.h"
@@ -137,6 +139,7 @@ struct m2_audio_entry {
 
 struct sdk_video_mpeg2 {
  	struct SDKDVDPSDemux demux;
+	struct SDKDVDTSDemux *ts;    /* Transport Stream state behind demux */
  	mpeg2dec_t *decoder;
  	uint8_t *es;
  	uint8_t *video_fifo;         /* M2_VIDEO_FIFO_CAPACITY bytes */
@@ -212,6 +215,7 @@ struct sdk_video_mpeg2 {
 	uint32_t mkv_pcm_rate;
 	uint16_t mkv_pcm_channels;
 	uint8_t mkv_container;
+	uint8_t ts_container;
 	uint8_t mkv_opened;
 	uint8_t mkv_unsupported;
 	uint8_t mkv_input_wanted;
@@ -1961,6 +1965,39 @@ static void *mpeg1_create(uint32_t pool_owner)
 	return d;
 }
 
+static void mpeg2_destroy(void *decoder);
+
+/* A Transport Stream session: the demux state (two PES reassembly buffers,
+ * over 128 KiB) is allocated only for these, not for every Program Stream
+ * session. */
+static void *mpeg_ts_create(uint32_t pool_owner, uint8_t mpeg1)
+{
+	struct sdk_video_mpeg2 *d =
+		(struct sdk_video_mpeg2 *)mpeg2_create(pool_owner);
+
+	if (!d)
+		return 0;
+	d->ts = (struct SDKDVDTSDemux *)M2_MALLOC(sizeof(*d->ts));
+	if (!d->ts) {
+		mpeg2_destroy(d);
+		return 0;
+	}
+	d->mpeg1 = mpeg1;
+	d->ts_container = 1U;
+	sdk_dvd_ts_init(d->ts, &d->demux);
+	return d;
+}
+
+static void *mpeg1_ts_create(uint32_t pool_owner)
+{
+	return mpeg_ts_create(pool_owner, 1U);
+}
+
+static void *mpeg2_ts_create(uint32_t pool_owner)
+{
+	return mpeg_ts_create(pool_owner, 0U);
+}
+
 static void mpeg2_destroy(void *decoder)
 {
 	struct sdk_video_mpeg2 *d = (struct sdk_video_mpeg2 *)decoder;
@@ -1974,6 +2011,7 @@ static void mpeg2_destroy(void *decoder)
 	M2_FREE(d->mkv_block);
 	M2_FREE(d->mkv_win.data);
 	sdk_dvd_ac3_destroy(&d->ac3);
+	M2_FREE(d->ts);
 	M2_FREE(d->audio_fifo);
 	M2_FREE(d->video_fifo);
 	M2_FREE(d->es);
@@ -2249,7 +2287,8 @@ static int mpeg2_configure_media(void *decoder,
 	if (!d || !config || d->media_configured)
 		return 0;
 	if (!(d->mkv_container ? mpeg2_audio_ok :
-	      (d->mpeg1 ? mpeg1_audio_ok : mpeg2_audio_ok))(config->audio_codec))
+	      (d->mpeg1 || d->ts_container ? mpeg1_audio_ok :
+	       mpeg2_audio_ok))(config->audio_codec))
 		return 0;
 	/* No audio: no ring, and route_audio never selects a stream, so
 	 * every audio packet is dropped and the end waits on video only. */
@@ -2424,6 +2463,41 @@ static const struct SDKVideoDecoderOps mpeg2_ops = {
 	.geometry_ok = geometry_ok,
 	.audio_ok = mpeg2_audio_ok,
 };
+
+/* MPEG audio is the only audio an MPEG Transport Stream carries here. */
+static const struct SDKVideoDecoderOps mpeg1_ts_ops = {
+	.codec = SDK_VIDEO_CODEC_MPEG1,
+	.container = SDK_VIDEO_CONTAINER_MPEG_TS,
+	.name = "libmpeg2 MPEG-1/TS",
+	.create = mpeg1_ts_create,
+	.destroy = mpeg2_destroy,
+	.write = mpeg2_write,
+	.get_info = mpeg2_get_info,
+	.decode = mpeg2_decode,
+	.configure_media = mpeg2_configure_media,
+	.get_media_info = mpeg2_get_media_info,
+	.ack_media = mpeg2_ack_media,
+	.set_decode_flags = mpeg2_set_decode_flags,
+	.geometry_ok = geometry_ok,
+	.audio_ok = mpeg1_audio_ok,
+};
+
+static const struct SDKVideoDecoderOps mpeg2_ts_ops = {
+	.codec = SDK_VIDEO_CODEC_MPEG2,
+	.container = SDK_VIDEO_CONTAINER_MPEG_TS,
+	.name = "libmpeg2 MPEG-2/TS",
+	.create = mpeg2_ts_create,
+	.destroy = mpeg2_destroy,
+	.write = mpeg2_write,
+	.get_info = mpeg2_get_info,
+	.decode = mpeg2_decode,
+	.configure_media = mpeg2_configure_media,
+	.get_media_info = mpeg2_get_media_info,
+	.ack_media = mpeg2_ack_media,
+	.set_decode_flags = mpeg2_set_decode_flags,
+	.geometry_ok = geometry_ok,
+	.audio_ok = mpeg1_audio_ok,
+};
 static const struct SDKVideoDecoderOps mkv_mpeg1_ops = {
 	.codec = SDK_VIDEO_CODEC_MPEG1,
 	.container = SDK_VIDEO_CONTAINER_WEBM,
@@ -2461,6 +2535,13 @@ static const struct SDKVideoDecoderOps mkv_mpeg2_ops = {
 const struct SDKVideoDecoderOps *zzm_mpeg2_module_find_ops(uint32_t codec,
 	                                                        uint32_t container)
 {
+	if (container == SDK_VIDEO_CONTAINER_MPEG_TS) {
+		if (codec == SDK_VIDEO_CODEC_MPEG1)
+			return &mpeg1_ts_ops;
+		if (codec == SDK_VIDEO_CODEC_MPEG2)
+			return &mpeg2_ts_ops;
+		return 0;
+	}
 	if (container == SDK_VIDEO_CONTAINER_MPEG_PS) {
 		if (codec == SDK_VIDEO_CODEC_MPEG1)
 			return &mpeg1_ops;
