@@ -1242,6 +1242,49 @@ static void test_baseline_write_path(void)
 		"commit requires a valid scene slot", NULL);
 }
 
+static void test_separation_write_path(void)
+{
+	struct SDKAudioSceneWritePayload wr;
+	struct SDKAudioControlStateGetPayload get;
+
+	audio_scene_init();
+	clear_writes();
+	memset(&wr, 0, sizeof(wr));
+	memset(&get, 0, sizeof(get));
+
+	/* Scene index is ignored for SEPARATION, even out of range at
+	 * stage time; a commit still needs a valid slot. */
+	put32(wr.scene, 200);
+	put32(wr.param, SDK_AUDIO_SCENE_PARAM_SEPARATION);
+	put32(wr.value, 54);
+	check(run_op(SDK_OP_AUDIO_SCENE_WRITE, &wr, sizeof(wr)) ==
+		SDK_STATUS_OK, "separation stage ignores the scene index",
+		NULL);
+	put32(wr.scene, 5);
+	put32(wr.flags, SDK_AUDIO_SCENE_WRITE_FLAG_COMMIT);
+	check(run_op(SDK_OP_AUDIO_SCENE_WRITE, &wr, sizeof(wr)) ==
+		SDK_STATUS_OK, "separation commit", NULL);
+	pump_scene();
+	check(count_writes(WRITE_SEP_SUB) == 9,
+		"separation commit writes the crossfeed group",
+		fmt("writes=%d", count_writes(WRITE_SEP_SUB)));
+
+	/* The state reply carries the live value and the valid flag:
+	 * ZZTop seeds its slider from it. */
+	check(run_op(SDK_OP_AUDIO_CONTROL_STATE_GET, &get, sizeof(get)) ==
+		SDK_STATUS_OK, "state get after separation", NULL);
+	check((w32(&result_buf[20]) & SDK_AUDIO_CONTROL_FLAG_SEPARATION) != 0 &&
+		w32(&result_buf[32]) == 54,
+		"state get reports the live separation",
+		fmt("flags=0x%lx sep=%lu", (unsigned long)w32(&result_buf[20]),
+			(unsigned long)w32(&result_buf[32])));
+
+	put32(wr.value, 101);
+	put32(wr.flags, 0);
+	check(run_op(SDK_OP_AUDIO_SCENE_WRITE, &wr, sizeof(wr)) ==
+		SDK_STATUS_BAD_REQUEST, "separation above 100 refused", NULL);
+}
+
 static void test_calibration_write_path(void)
 {
 	struct SDKAudioSceneWritePayload wr;
@@ -1404,6 +1447,7 @@ int main(void)
 	test_baseline_write_persists_through_queued_save();
 	test_scene_rename_persists_through_queued_save();
 	test_baseline_write_path();
+	test_separation_write_path();
 	test_calibration_write_path();
 	test_unsupported_and_validation();
 

@@ -1744,6 +1744,7 @@ int audio_adau_separation_substep(int percent, int substep)
 				readback, ADAU_PARAMETER_WORD_BYTES))
 		return -1;
 	if (substep == 8) {
+		printf("[sep] separation: %d%% (live edit verified)\n", percent);
 		valid = 0;
 		return 1;
 	}
