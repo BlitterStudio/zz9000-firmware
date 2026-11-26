@@ -1,4 +1,4 @@
-# MPEG-1/MPEG-2 Program Stream and Matroska decoder module.
+# MPEG-1/MPEG-2 Program Stream, Transport Stream and Matroska decoder module.
 # Decoder implementation is deliberately absent from BOOT's object list.
 ZZM_MPEG2_DIR := modules/mpeg2
 ZZM_MPEG2_BUILD := $(BUILD_DIR)/modules/mpeg2
@@ -9,6 +9,7 @@ ZZM_MPEG2_OBJS := \
 	$(ZZM_MPEG2_BUILD)/sdk_video_mpeg2.o \
 	$(ZZM_MPEG2_BUILD)/sdk_mpeg2_neon.o \
 	$(ZZM_MPEG2_BUILD)/sdk_dvd_ps.o \
+	$(ZZM_MPEG2_BUILD)/sdk_dvd_ts.o \
 	$(ZZM_MPEG2_BUILD)/sdk_dvd_lpcm.o \
 	$(ZZM_MPEG2_BUILD)/sdk_dvd_ac3.o \
 	$(ZZM_MPEG2_BUILD)/webm_parse.o \
@@ -34,6 +35,10 @@ $(ZZM_MPEG2_BUILD)/sdk_mpeg2_neon.o: $(SRC_DIR)/sdk_mpeg2_neon.c
 	$(CC) $(ZZM_MPEG2_CFLAGS) -MMD -MP -o $@ $<
 
 $(ZZM_MPEG2_BUILD)/sdk_dvd_ps.o: $(SRC_DIR)/sdk_dvd_ps.c
+	@mkdir -p $(dir $@)
+	$(CC) $(ZZM_MPEG2_CFLAGS) -MMD -MP -o $@ $<
+
+$(ZZM_MPEG2_BUILD)/sdk_dvd_ts.o: $(SRC_DIR)/sdk_dvd_ts.c
 	@mkdir -p $(dir $@)
 	$(CC) $(ZZM_MPEG2_CFLAGS) -MMD -MP -o $@ $<
 

@@ -37,6 +37,12 @@ struct SDKDVDPSQueue {
 	uint32_t count;
 };
 
+struct SDKDVDPSDemux;
+
+/* One parse step over the staged input; returns 0 when an output queue is
+ * full, 1 when it consumed a unit and 2 when it needs more input. */
+typedef int (*sdk_dvd_ps_parse_fn)(struct SDKDVDPSDemux *demux);
+
 struct SDKDVDPSDemux {
 	uint8_t staging[SDK_DVD_PS_STAGING_CAPACITY];
 	/* Unparsed input is staging[head..staged). Parsing advances head;
@@ -72,6 +78,11 @@ struct SDKDVDPSDemux {
 	uint8_t first_dropped_audio_pts_valid;
 	uint8_t last_dropped_audio_pts_valid;
 	uint8_t audio_drop_run_active;
+	/* Front end replacing the Program Stream parser over the same staging
+	 * and queues (the Transport Stream demux in sdk_dvd_ts.h); null for a
+	 * Program Stream. parser_state belongs to that front end. */
+	sdk_dvd_ps_parse_fn parse;
+	void *parser_state;
 };
 
 void sdk_dvd_ps_init(struct SDKDVDPSDemux *demux);
@@ -88,5 +99,15 @@ int sdk_dvd_ps_pop_video(struct SDKDVDPSDemux *demux,
 int sdk_dvd_ps_pop_audio(struct SDKDVDPSDemux *demux,
                          struct SDKDVDPSPacket *packet);
 int sdk_dvd_ps_done(const struct SDKDVDPSDemux *demux);
+
+/* For front ends that fill the shared queues: drop bytes from the head of
+ * the staged input, and route one complete PES packet (start code to last
+ * payload byte) to the video or audio queue with PTS/DTS parsing and
+ * stream selection. The router returns 0 when the queue is full and
+ * nothing was consumed, 1 once the packet was queued, dropped or counted
+ * as ignored or malformed. */
+void sdk_dvd_ps_consume(struct SDKDVDPSDemux *demux, uint32_t bytes);
+int sdk_dvd_ps_handle_pes(struct SDKDVDPSDemux *demux, const uint8_t *pes,
+                          uint32_t length);
 
 #endif

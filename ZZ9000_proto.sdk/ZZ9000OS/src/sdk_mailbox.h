@@ -1243,6 +1243,7 @@ static inline void sdk_audio_meter_result_pack(
 #define SDK_VIDEO_CODEC_VP9            4U
 #define SDK_VIDEO_CONTAINER_MPEG_PS    1U
 #define SDK_VIDEO_CONTAINER_WEBM       2U
+#define SDK_VIDEO_CONTAINER_MPEG_TS    3U
 #define SDK_VIDEO_OUTPUT_DIRECT_OVERLAY 1U
 #define SDK_VIDEO_SESSION_WRITE_EOF    (1U << 0)
 #define SDK_VIDEO_SESSION_STATE_NEED_INPUT  1U
