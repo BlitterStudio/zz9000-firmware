@@ -23,6 +23,7 @@ LEASE_FLAC_HOST := $(FW)/../build/deps/flac/1.5.0/host
 LEASE_VORBIS_HOST := $(FW)/../build/deps/vorbis/ogg-1.3.6-tremor-820fb3237ea8/host
 LEASE_RECLAIM_LIBS := $(LEASE_FLAC_HOST)/libflacdec.a $(LEASE_VORBIS_HOST)/libvorbisdec.a
 LEASE_RECLAIM_SOURCES := g/lease_reclaim_test.c $(FW)/sdk_decode_owners.c \
+	$(FW)/sdk_decode_heap.c \
 	$(FW)/audio_fabric_stream_codec.c $(FW)/sdk_audio_stream.c \
 	$(FW)/sdk_audio_stream_native.c $(FW)/sdk_audio_flac.c \
 	$(FW)/sdk_audio_vorbis.c $(FW)/sdk_flac_alloc.c $(FW)/sdk_vorbis_alloc.c \

@@ -338,6 +338,11 @@ void audio_fabric_lease_poll_busy(void);
  */
 int audio_fabric_ring_release(uint32_t slot, uint32_t generation);
 
+/* Start of an Amiga reset: end every codec lease decoder and free its pool
+ * memory while the Amiga gate is closed and before the lent fast-RAM window is
+ * revoked. The leases themselves end in audio_fabric_reset(). Main loop only. */
+void audio_fabric_codec_reset_quiesce(void);
+
 /*
  * One per-slot state snapshot. pump_identity names the pump slot's
  * producer while a playback bind exists (SDK_AUDIO_METER_IDENTITY_*

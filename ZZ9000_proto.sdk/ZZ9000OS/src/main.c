@@ -965,6 +965,11 @@ void handle_amiga_reset(enum amiga_reset_mode mode) {
 	 * The direct poll below then covers a RasterIX fetch that outlives the
 	 * worker, including the cold-restart safety path in the quiesce. */
 	scheduler_quiesce_for_reset();
+	/* Codec lease decoders hold pool memory, some of it possibly in the lent
+	 * fast-RAM window taken back below: free it while the gate is closed and
+	 * the window is still the card's. The leases themselves are dropped by
+	 * sdk_mailbox_init() further down. */
+	audio_fabric_codec_reset_quiesce();
 	protect_rasterix_card_pool();
 	/* Card pool range B is the fast-RAM window, lent to the ARM while fast
 	 * RAM is not advertised. Take it back before the gate can reopen.

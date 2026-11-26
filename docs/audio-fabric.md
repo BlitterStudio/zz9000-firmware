@@ -400,8 +400,24 @@ region belong to one card-pool owner, `SDK_AUDIO_LEASE_DECODE_OWNER`
 `sdk_compression.h`). A core-1 reset reclaims the shared core-1 decode heap
 (`SDK_DECODE_POOL_OWNER`) and the app decoder owners, so it leaves a running
 lease and its decoded audio untouched. The lease's memory is released when
-the lease ends, on release, revocation and an Amiga reset, and the owner
-is not used by any app serial, video session or module id.
+the lease ends, on release and on revocation. The owner is not used by any
+app serial, video session or module id.
+
+An Amiga reset takes the lent fast-RAM window back from the card pool, and
+the Amiga then owns that memory, so a decoder in it must be gone before the
+take-back: libFLAC frees read an allocation header and a freed Tremor region
+is a free the pool ignores. The reset handler therefore calls
+`audio_fabric_codec_reset_quiesce()` once it has closed the Amiga gate
+(REG6) and quiesced core 1, and before `take_back_lent_card_pool()`. It
+ends every codec lease decoder and frees its pool memory, on the main loop,
+so no decoder pass is in flight; the ISR never touches the decoder
+backend. The leases and their staged PCM stay until `audio_fabric_reset()`
+runs from `sdk_mailbox_init()` later in the handler, which finds no decoder
+left. Until then a decoder pass does not start and a codec acquire answers
+`EBUSY`; `audio_fabric_reset()` lifts the hold. Core-1 decode backends are
+unchanged. `test/audio/audio_codec_reset_order_test.c` runs a FLAC and a
+Vorbis lease in the lent range through the reset order and the wrong order
+over the real card pool.
 
 ## Instrument build
 

@@ -84,6 +84,25 @@ void audio_fabric_codec_register(const struct fabric_codec_ops *ops)
 	g_codec_ops = ops;
 }
 
+/* Set from the start of an Amiga reset until audio_fabric_reset() has dropped
+ * the leases: no decoder runs or starts in between. */
+static uint8_t g_codec_reset_quiesced;
+
+void audio_fabric_codec_reset_quiesce(void)
+{
+	uint32_t slot;
+
+	g_codec_reset_quiesced = 1U;
+	/* A decoder pass is never in flight here (the main loop is in the reset
+	 * handler) and the ISR never touches the backend, so the decoders and
+	 * their pool memory can go now, while the Amiga's gate is closed and
+	 * before the lent fast-RAM window is revoked. The lease and its staged
+	 * PCM stay until audio_fabric_reset(). */
+	for (slot = AUDIO_FABRIC_SLOT_MAILBOX;
+	     slot < AUDIO_FABRIC_LEASE_SLOT_END; slot++)
+		fabric_codec_end(slot);
+}
+
 /* Non-volatile big-endian word accessors for the shared control block:
  * sdk_mailbox.h's helpers take plain byte pointers, the control lines
  * are firmware-shared memory read through volatile views. */
@@ -259,6 +278,7 @@ void fabric_lease_reset_rings(void)
 			fabric_ring_zero(map.ring[slot], map.control[slot],
 				map.capacity);
 	}
+	g_codec_reset_quiesced = 0U;
 }
 
 /* Per-slot source metering (KTD7): peak in the scene meter's 16.16
@@ -1095,7 +1115,7 @@ static void fabric_codec_poll(uint32_t slot)
 
 static void fabric_codec_poll_all(void)
 {
-	if (g_codec_ops == NULL)
+	if (g_codec_ops == NULL || g_codec_reset_quiesced)
 		return;
 	for (uint32_t slot = AUDIO_FABRIC_SLOT_MAILBOX;
 	     slot < AUDIO_FABRIC_LEASE_SLOT_END; slot++) {
@@ -1669,6 +1689,8 @@ int audio_fabric_ring_acquire(uint32_t slot, uint32_t identity,
 	               (flags & (SDK_AUDIO_RING_ACQUIRE_FLAG_SOURCE_RATE |
 	                         SDK_AUDIO_RING_ACQUIRE_FLAG_SOURCE_S16BE)) != 0U)))
 		return AUDIO_FABRIC_LEASE_EBAD_SLOT;
+	if (codec && g_codec_reset_quiesced)
+		return AUDIO_FABRIC_LEASE_EBUSY;
 	if (grant != NULL) {
 		memset(grant, 0, sizeof(*grant));
 	}
