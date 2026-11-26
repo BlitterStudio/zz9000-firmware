@@ -342,6 +342,10 @@ static struct {
     int started, stopped, released;
     unsigned map_calls, map_violations;
     struct { uint32_t token, bytes; } maps[MAX_MAPS];
+    unsigned surf_calls, surf_frees;
+    uint32_t surf_bytes;            /* what the last surface_alloc was asked */
+    int surf_fail;                  /* surface_alloc answers this AAR_E_* */
+    int surf_skew;                  /* surface_alloc returns an off-granule address */
 } card;
 
 static void reply_status(aar_zz_reply *r, int status)
@@ -640,6 +644,42 @@ static int fb_token(void *user, const volatile void *ptr, uint32_t bytes,
     return ptr_token(ptr, bytes, token);
 }
 
+/* The stable surface: a block of the fake host-visible heap, cleared as the
+ * card does. The handle is the card address. `surf_skew` returns an address
+ * off the granule, which the library must refuse and free. */
+static int fb_surface_alloc(void *user, uint32_t bytes, uint32_t *handle,
+                            volatile uint8_t **ptr)
+{
+    void *p;
+    uint32_t addr, total = card.surf_skew ? bytes + 4096U : bytes;
+
+    (void)user;
+    card.surf_calls++;
+    card.surf_bytes = bytes;
+    if (card.surf_fail)
+        return card.surf_fail;
+    if (heap_alloc(NULL, total, 4096U, 0U, 0U, &p, &addr) != 0)
+        return AAR_E_NOMEM;
+    memset(p, 0, total);
+    *handle = addr;
+    *ptr = (volatile uint8_t *)p + (card.surf_skew ? 16U : 0U);
+    return AAR_OK;
+}
+
+static int fb_surface_free(void *user, uint32_t handle)
+{
+    uint32_t i;
+
+    (void)user;
+    for (i = 0U; i < HEAP_BLOCKS; i++)
+        if (heap.block[i].ptr && heap.block[i].card == handle) {
+            card.surf_frees++;
+            return heap_release(NULL, heap.block[i].ptr, handle) == 0 ?
+                   AAR_OK : AAR_E_STALE;
+        }
+    return AAR_E_STALE;
+}
+
 static aar_zz_board board;
 
 /* ---- The client: the core over the platform --------------------------------- */
@@ -695,6 +735,8 @@ static void client_init(void)
     board.prepare = fb_prepare;
     board.map = fb_map;
     board.token = fb_token;
+    board.surface_alloc = fb_surface_alloc;
+    board.surface_free = fb_surface_free;
     board.acquire = cl_acq;
     board.release = cl_rel;
     aar_zz9000_host_board(&board);
@@ -1013,9 +1055,9 @@ static void test_query_and_extension(void)
     CHECK(card.calls == 1U && card.claims == 0U);
 
     ext = aar_core_ext(&core, AAR_PLATFORM_ZZ9000, AAR_EXT_ZZ9000_CLIENT);
-    CHECK(ext != NULL && AAR_CLIENT_EXT_ZZ9000_COVERS(ext, lease_pause));
-    /* The table ends at lease_pause: set_log_sink left it. */
-    CHECK(ext->size == offsetof(aar_client_ext_zz9000, lease_pause) + sizeof(ext->lease_pause));
+    CHECK(ext != NULL && AAR_CLIENT_EXT_ZZ9000_COVERS(ext, surface_free));
+    /* The table ends at surface_free: set_log_sink left it. */
+    CHECK(ext->size == offsetof(aar_client_ext_zz9000, surface_free) + sizeof(ext->surface_free));
     CHECK(aar_core_ext(&core, AAR_PLATFORM_ZZ9000, 99U) == NULL);
     CHECK(aar_core_ext(&core, AAR_PLATFORM_NONE, AAR_EXT_ZZ9000_CLIENT) == NULL);
 
@@ -1042,6 +1084,60 @@ static void test_query_and_extension(void)
     /* The library's own handle is closed as usual; the card no longer knows it. */
     rc = CLOSE(h);
     CHECK(rc == AAR_OK);
+}
+
+/* The stable surfaces of the extension table: whole granules, aligned,
+ * cleared, the card's promise checked, and every failure frees. */
+static void test_surface_alloc_free(void)
+{
+    const aar_client_ext_zz9000 *ext;
+    ULONG handle = 7U;
+    APTR ptr = (APTR)(uintptr_t)1;
+    volatile uint8_t *v;
+    uint32_t token, i;
+    int cleared = 1;
+
+    reset_all();
+    ext = aar_core_ext(&core, AAR_PLATFORM_ZZ9000, AAR_EXT_ZZ9000_CLIENT);
+    CHECK(ext != NULL && AAR_CLIENT_EXT_ZZ9000_COVERS(ext, surface_free) &&
+          ext->surface_alloc != NULL && ext->surface_free != NULL);
+
+    /* Bad arguments never reach the card and leave the outputs empty. */
+    CHECK(ext->surface_alloc(0U, &handle, &ptr) == AAR_E_INVAL && handle == 0U && ptr == 0);
+    CHECK(ext->surface_alloc(1U, NULL, &ptr) == AAR_E_INVAL);
+    CHECK(ext->surface_alloc(1U, &handle, NULL) == AAR_E_INVAL);
+    CHECK(ext->surface_alloc(0xffffffffU, &handle, &ptr) == AAR_E_INVAL);
+    CHECK(card.surf_calls == 0U);
+
+    /* 5000 bytes are two whole granules, granule-aligned, and cleared. */
+    CHECK(ext->surface_alloc(5000U, &handle, &ptr) == AAR_OK);
+    CHECK(handle != 0U && ptr != 0 && card.surf_bytes == 8192U && heap.live == 1U);
+    v = (volatile uint8_t *)(uintptr_t)ptr;
+    CHECK(ptr_token(v, 8192U, &token) == AAR_OK && (token & 4095U) == 0U);
+    for (i = 0U; i < 8192U; i++)
+        if (v[i] != 0U)
+            cleared = 0;
+    CHECK(cleared);
+
+    /* The handle frees once; a second free and the null handle are stale. */
+    CHECK(ext->surface_free(handle) == AAR_OK && heap.live == 0U);
+    CHECK(ext->surface_free(handle) == AAR_E_STALE);
+    CHECK(ext->surface_free(0U) == AAR_E_STALE);
+
+    /* A card failure comes back as it is, with nothing held. */
+    card.surf_fail = AAR_E_NOMEM;
+    handle = 7U;
+    ptr = (APTR)(uintptr_t)1;
+    CHECK(ext->surface_alloc(4096U, &handle, &ptr) == AAR_E_NOMEM &&
+          handle == 0U && ptr == 0 && heap.live == 0U);
+    card.surf_fail = 0;
+
+    /* A block that breaks the promise (not granule-aligned) is freed, not
+     * handed on. */
+    card.surf_skew = 1;
+    CHECK(ext->surface_alloc(4096U, &handle, &ptr) == AAR_E_IO &&
+          handle == 0U && ptr == 0 && heap.live == 0U && card.surf_frees == 2U);
+    card.surf_skew = 0;
 }
 
 static void test_requests_end_to_end(void)
@@ -3425,6 +3521,7 @@ int main(void)
     test_open_and_refusal();
     test_abi_and_capability_checks();
     test_query_and_extension();
+    test_surface_alloc_free();
     test_list_walks_claims_with_gaps();
     test_requests_end_to_end();
     test_list_names_cross_the_request_buffer();

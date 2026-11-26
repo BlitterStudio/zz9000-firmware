@@ -622,7 +622,18 @@ does not point scanout at them, and records presentation when the client
 acknowledges a completed flip. Direct scanout records it when the new
 address is latched. `aar_display_wait_vblank` waits for the ZZ9000 blank
 when the card scans out the app's display. For WINDOW or SCALED displays it
-asks the client and can return `AAR_E_NOSYS`. `aar_display_vsync` remains a
+asks the client and can return `AAR_E_NOSYS`, unless the client set
+`AAR_DISP_REPLY_SCANOUT` in the `DISPLAY_OPEN` reply flags. Then
+`AAR_R_DISPLAY_OPEN_SPARE` is not an app buffer: it is the card address of
+the P96 screen that owns the window, kept only to compare with the scanout
+address at the ZZ9000 blank. The wait is native and returns `AAR_OK` only for
+a blank that scans out exactly that screen; any other scanout, including
+staging memory and the app's own surface, does not count. Stop and timeout
+behave as for direct scanout, and flips keep the client's completion. The
+screen is kept across `aar_display_resize` and dropped at close. An address
+outside the P96 window, equal to the app's front or back buffer, or a flag on
+a direct-scanout open is ignored and the wait is delegated to the client as
+before; the open does not fail. `aar_display_vsync` remains a
 pacing hint. Unbind GL before calling `aar_display_resize`: an active GL
 binding owns render targets sized for the old surface and returns
 `AAR_E_BUSY` on resize.

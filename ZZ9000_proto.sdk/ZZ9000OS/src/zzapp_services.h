@@ -163,8 +163,13 @@ int zzapp_svc_display_vsync(void);
  * zzapp_services_display_mailbox_end count one when the address VDMA was
  * pointed at is the display's own), AAR_E_TIMEDOUT at the timeout if none was
  * seen; on a window or scaled display it is the client's: its AAR_OK,
- * AAR_E_TIMEDOUT or AAR_E_NOSYS pass through. last_present_us is the time the
- * last flip or GL swap was seen shown, 0 before the first. */
+ * AAR_E_TIMEDOUT or AAR_E_NOSYS pass through, unless the client named the
+ * P96 screen that owns the window (AAR_DISP_REPLY_SCANOUT, SPARE of the open
+ * reply, a card address inside the P96 window and not the app's own buffers):
+ * then the wait is native and only a blank that scans out exactly that
+ * screen counts. A name that is not usable degrades to the client's wait.
+ * last_present_us is the time the last flip or GL swap was seen shown, 0
+ * before the first. */
 int zzapp_svc_display_info(uint32_t surface_id, struct aar_display_info *out);
 int zzapp_svc_display_modes(struct aar_display_mode *out, uint32_t max,
 			    uint32_t *out_n);

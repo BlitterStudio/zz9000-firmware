@@ -280,6 +280,12 @@ struct zzapp_service_runtime {
 	 * client granted (AAR_DISPCAP_WINDOW .. SCALED, bits 3 to 8). */
 	uint32_t display_flags;
 	uint32_t display_caps;
+	/* The P96 screen a WINDOW or SCALED display's client named at open
+	 * (AAR_DISP_REPLY_SCANOUT), as a card address, 0 when none or not valid.
+	 * Only an address to compare the ISR's scanout address with: never
+	 * leased, mapped or published as an app surface. Written under
+	 * g_slot_state_lock. */
+	uint32_t display_source;
 	/* The native vertical-blank wait of a direct-scanout display: the count
 	 * of blanks the card has seen on this record's screen (written under
 	 * g_slot_state_lock by core 0's blank callbacks, only while a waiter
@@ -3324,6 +3330,26 @@ static int display_scanout_owned(const struct zzapp_service_runtime *state,
 	return address == state->display_flip_address;
 }
 
+/* 1 when the display is composed by the client (WINDOW or SCALED). */
+static int display_client_owned(const struct zzapp_service_runtime *state)
+{
+	return (state->display_caps & (AAR_DISPCAP_WINDOW | AAR_DISPCAP_SCALED)) != 0U;
+}
+
+/* 1 when a blank that scanned out `address` is a blank of the screen the
+ * record's waiter is waiting on. A client-owned display's own buffers are
+ * never scanned out: only the P96 screen the client named counts, and only by
+ * exact address. */
+static int display_blank_owned(const struct zzapp_service_runtime *state,
+			       uint32_t address)
+{
+	if (address == 0U)
+		return 0;
+	if (display_client_owned(state))
+		return state->display_source != 0U && address == state->display_source;
+	return display_scanout_owned(state, address);
+}
+
 /* One record of the vblank pass; the caller holds g_slot_state_lock. 1 when
  * it acknowledged the flip a parked app may be waiting for, or counted a
  * blank for an app parked on one. */
@@ -3336,9 +3362,10 @@ static int display_vblank_locked(zzapp_rec_t *rec, uint32_t scanout_address)
 	if (!state->display_bound ||
 	    __atomic_load_n(&state->display_mailbox_active, __ATOMIC_ACQUIRE))
 		return 0;
-	/* A native blank waiter is registered only by a direct-scanout display,
-	 * and only a blank of its own screen counts. */
-	if (state->vblank_waiting && display_scanout_owned(state, scanout_address)) {
+	/* A native blank waiter is registered only by a direct-scanout display
+	 * or a client-owned one with a named screen, and only a blank of that
+	 * screen counts. */
+	if (state->vblank_waiting && display_blank_owned(state, scanout_address)) {
 		__atomic_store_n(&state->vblank_seq, state->vblank_seq + 1U,
 				 __ATOMIC_RELEASE);
 		woke = 1;
@@ -3634,11 +3661,29 @@ static int display_bind(zzapp_rec_t *rec, uint32_t flags_req,
 	uint32_t bpp = format_bpp(format);
 	uint32_t bytes;
 	uint32_t caps;
+	uint32_t source = 0U;
 	int client_owned;
 	int rc;
 
 	if (state->display_bound && !resize)
 		return AAR_E_BUSY;
+	/* A window or a scaled surface is composed by the client: the card never
+	 * scans it out directly, so there is no scanout acknowledgement to wait
+	 * for and no card-owned (LATEST) presentation. With the client's
+	 * AAR_DISP_REPLY_SCANOUT, SPARE names the P96 screen that owns the
+	 * window instead of an app buffer: it is only compared with the ISR's
+	 * scanout address, so it must lie in the P96 window to be used, and a
+	 * name that does not degrades to the client-delegated wait. A resize
+	 * keeps the screen the open named. */
+	caps = display_feature_caps(flags_req, c->flags);
+	client_owned = (caps & (AAR_DISPCAP_WINDOW | AAR_DISPCAP_SCALED)) != 0U;
+	if (client_owned && resize)
+		source = state->display_source;
+	if (client_owned && (c->flags & AAR_DISP_REPLY_SCANOUT) != 0U) {
+		if (!resize && spare >= ZZAPP_P96_LO && spare < ZZAPP_P96_HI)
+			source = spare;
+		spare = 0U;
+	}
 	if (layout == 0U)
 		layout = default_layout(format);
 	if (!layout_matches_format(format, layout))
@@ -3661,6 +3706,8 @@ static int display_bind(zzapp_rec_t *rec, uint32_t flags_req,
 	} else {
 		state->display_back_owned = 0;
 	}
+	if (source == front || source == back)
+		source = 0U;
 	if (grant_surface_buffers(front, back, spare, bytes) != AAR_OK) {
 		release_unbound_back(back);
 		return AAR_E_NOMEM;
@@ -3698,11 +3745,6 @@ static int display_bind(zzapp_rec_t *rec, uint32_t flags_req,
 		}
 	}
 
-	/* A window or a scaled surface is composed by the client: the card never
-	 * scans it out directly, so there is no scanout acknowledgement to wait
-	 * for and no card-owned (LATEST) presentation. */
-	caps = display_feature_caps(flags_req, c->flags);
-	client_owned = (caps & (AAR_DISPCAP_WINDOW | AAR_DISPCAP_SCALED)) != 0U;
 	state->display_width = width;
 	state->display_height = height;
 	state->display_pitch = pitch;
@@ -3727,6 +3769,7 @@ static int display_bind(zzapp_rec_t *rec, uint32_t flags_req,
 		!client_owned;
 	state->display_flags = flags_req;
 	state->display_caps = caps;
+	state->display_source = source;
 	if (!resize)
 		memset(state->palette_set, 0, sizeof(state->palette_set));
 	state->display_id = 1U;
@@ -4112,6 +4155,7 @@ static void display_unbind(zzapp_rec_t *rec)
 	state->display_caps = 0U;
 	memset(state->palette_set, 0, sizeof(state->palette_set));
 	state->display_flip_address = 0U;
+	state->display_source = 0U;
 	set_del(&set_display, rec->hdr.pid);
 	slot_state_lock_release();
 }
@@ -4404,6 +4448,11 @@ int zzapp_svc_display_pointer(uint32_t surface_id, uint32_t mode,
  * deadline there (the timeout and a short grace, ZZAPP_VBLANK_GRACE_US) only
  * covers a client that answers nothing, and ends in AAR_E_TIMEDOUT too. The
  * card's own clock is never used for it.
+ *
+ * Exception: a client that named the P96 screen owning the window
+ * (AAR_DISP_REPLY_SCANOUT, a valid address) is waited on natively like a
+ * direct-scanout display, counting only the blanks that scan out exactly
+ * that screen. Without it, or with an unusable name, the wait is delegated.
  */
 static int display_native_vblank(struct zzapp_service_runtime *state,
 				 uint32_t timeout_us)
@@ -4457,7 +4506,7 @@ int zzapp_svc_display_wait_vblank(uint32_t timeout_us)
 
 	if (timeout_us == 0U || !state || !state->display_bound)
 		return AAR_E_INVAL;
-	if ((state->display_caps & (AAR_DISPCAP_WINDOW | AAR_DISPCAP_SCALED)) == 0U)
+	if (!display_client_owned(state) || state->display_source != 0U)
 		return display_native_vblank(state, timeout_us);
 	args[AAR_A_DISPLAY_ID] = state->display_client_id;
 	args[AAR_A_DISPLAY_VBLANK_TIMEOUT_US] = timeout_us;

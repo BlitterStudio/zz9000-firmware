@@ -264,7 +264,7 @@ static struct {
 	uint32_t vol[4];		/* blocks total, used, block bytes, flags */
 	uint32_t protect;		/* the protection word FILE_STAT reports */
 	uint32_t open_caps;		/* reply flags of a display open and resize */
-	uint32_t resize_front, resize_back, resize_pitch, resize_w, resize_h;
+	uint32_t resize_front, resize_back, resize_spare, resize_pitch, resize_w, resize_h;
 	int32_t resize_result;
 	uint32_t info[6];		/* the out words of DISPLAY_INFO */
 	uint32_t mode_total, mode_max_len;
@@ -483,6 +483,7 @@ static void client_handle(client_t *c, const aar_request *r)
 		d.out[AAR_R_DISPLAY_OPEN_LAYOUT] = cl.open_layout;
 		d.out[AAR_R_DISPLAY_OPEN_FRONT] = cl.resize_front;
 		d.out[AAR_R_DISPLAY_OPEN_BACK] = cl.resize_back;
+		d.out[AAR_R_DISPLAY_OPEN_SPARE] = cl.resize_spare;
 		break;
 	case AAR_OP_DISPLAY_TITLE:
 		if (buf)
@@ -2663,7 +2664,7 @@ static void test_display_caps_v06(void)
 
 	/* Every feature asked for and granted; runtime-owned bits and junk in
 	 * the reply are not the client's to grant. */
-	cl.open_caps = FEATURE_CAPS | AAR_DISPCAP_LATEST | AAR_DISPCAP_CLUT8 | 0x8000U;
+	cl.open_caps = FEATURE_CAPS | AAR_DISPCAP_LATEST | AAR_DISPCAP_CLUT8 | 0x4000U;
 	CHECK(zzapp_svc_display_open(640U, 480U, AAR_FMT_RGB565,
 				     all | AAR_DISPLAY_VSYNC | AAR_DISPLAY_LATEST, &s) == AAR_OK);
 	CHECK(cl.last[AAR_OP_DISPLAY_OPEN].arg[AAR_A_DISPLAY_OPEN_FLAGS] ==
@@ -3273,6 +3274,161 @@ static void test_display_native_vblank(void)
 	cl.blank_at_yield = cl.yields + 1U;
 	CHECK(zzapp_svc_display_wait_vblank(50000U) == AAR_OK);
 	CHECK(st->vblank_seq == 2U && zzapp_svc_display_last_present_us() != 0U);
+	zzapp_services_on_app_end();
+	(void)zzapp_rec_retire(rec->hdr.pid);
+	(void)mbox(ZZAPP_OP_RELEASE, handle, 0U, 0U, NULL, NULL);
+}
+
+/* One native-wait attempt with the card's blank at `addr` on the first yield. */
+static int wait_blank_at(uint32_t addr, uint32_t timeout_us)
+{
+	int rc;
+
+	cl.blank_at_yield = cl.yields + 1U;
+	cl.blank_addr = addr;
+	rc = zzapp_svc_display_wait_vblank(timeout_us);
+	cl.blank_at_yield = 0U;
+	return rc;
+}
+
+/* A WINDOW or SCALED display whose client names the P96 screen that owns it
+ * (AAR_DISP_REPLY_SCANOUT, SPARE) is waited on natively, and only the blank
+ * that scans out exactly that screen ends the wait. The name is no app
+ * surface. Without the flag, or with a name outside the P96 window or equal
+ * to the app's own buffers, the wait stays with the client. */
+static void test_display_window_source_vblank(void)
+{
+	enum { SCREEN = 0x00900000, OTHER = 0x00A00000, OUTSIDE = 0x04000000 };
+	client_t c;
+	zzapp_rec_t *rec;
+	uint32_t handle;
+	aar_surface s, s2;
+	struct zzapp_service_runtime *st;
+	uint64_t t0;
+	uint64_t dt;
+	unsigned round;
+	unsigned bad;
+	uint32_t bad_spare[4] = { 0U, OUTSIDE, 0x00400000U, 0x00100000U };
+
+	reset_all();
+	rec = claim(&c, &handle);
+	give_space(rec);
+	st = runtime_of(rec);
+	cl.clock_step = 1000U;
+	for (round = 0U; round < 2U; round++) {
+		uint32_t caps = round == 0U ?
+			(AAR_DISPCAP_WINDOW | AAR_DISPCAP_RESIZE) : AAR_DISPCAP_SCALED;
+		uint32_t flags = round == 0U ?
+			(AAR_DISPLAY_WINDOW | AAR_DISPLAY_RESIZABLE) : AAR_DISPLAY_SCALE;
+		uint32_t seq = st->vblank_seq;
+
+		/* Named screen: native wait, never the client. */
+		cl.open_caps = caps | AAR_DISP_REPLY_SCANOUT;
+		cl.open_spare = SCREEN;
+		CHECK(zzapp_svc_display_open(640U, 480U, AAR_FMT_RGB565, flags, &s) == AAR_OK);
+		CHECK(st->display_source == SCREEN);
+		CHECK(st->display_spare == 0U);	/* not an app surface */
+		CHECK((s.caps & AAR_DISP_REPLY_SCANOUT) == 0U);
+		CHECK(st->display_scanout_ack == 0U && st->display_mailbox_active == 0);
+		cl.nreq[AAR_OP_DISPLAY_VBLANK] = 0U;
+		CHECK(wait_blank_at(SCREEN, 50000U) == AAR_OK);
+		CHECK(st->vblank_seq == ++seq && st->vblank_waiting == 0U);
+		CHECK(cl.nreq[AAR_OP_DISPLAY_VBLANK] == 0U);
+		CHECK(st->wait_kind == ZZAPP_WAIT_NONE);
+		/* No other scanout counts: another screen, staging memory, the
+		 * app's own buffers, nothing. Each ends at the timeout. */
+		{
+			uint32_t wrong[5] = { OTHER, SCREEN + 0x1000U, st->display_front,
+					      st->display_back, 0U };
+			unsigned i;
+
+			for (i = 0U; i < 5U; i++) {
+				t0 = fake_now;
+				CHECK(wait_blank_at(wrong[i], 20000U) == AAR_E_TIMEDOUT);
+				dt = fake_now - t0;
+				CHECK(dt >= 20000U && dt < 20000U + 3U * cl.clock_step);
+			}
+		}
+		CHECK(st->vblank_seq == seq && st->vblank_waiting == 0U);
+		CHECK(cl.nreq[AAR_OP_DISPLAY_VBLANK] == 0U);
+		/* A blank with nobody waiting costs nothing. */
+		zzapp_services_display_vblank(SCREEN);
+		CHECK(st->vblank_seq == seq);
+		/* A stop ends the wait, and a blank of the screen is no flip. */
+		cl.stop_at_yield = cl.yields + 2U;
+		CHECK(zzapp_svc_display_wait_vblank(5000000U) == AAR_E_IO);
+		CHECK(st->vblank_waiting == 0U && st->wait_kind == ZZAPP_WAIT_NONE);
+		cl.stop_at_yield = 0U;
+		rec->host.stop_requested = 0U;
+		zzapp_services_display_vblank(SCREEN);
+		CHECK(zzapp_svc_display_last_present_us() == 0U);
+
+		/* A resize keeps the owning screen whatever its reply carries: a
+		 * flagged reply with another SPARE, then an unflagged one. */
+		if (round == 0U) {
+			cl.resize_front = 0x00700000U;
+			cl.resize_back = 0x00800000U;
+			cl.resize_pitch = 1280U;
+			cl.resize_spare = OTHER;
+			CHECK(zzapp_svc_display_resize(s.id, 320U, 240U, &s2) == AAR_OK);
+			CHECK(st->display_source == SCREEN && st->display_spare == 0U);
+			CHECK(st->display_front == 0x00700000U);
+			CHECK(wait_blank_at(SCREEN, 50000U) == AAR_OK);
+			CHECK(wait_blank_at(OTHER, 20000U) == AAR_E_TIMEDOUT);
+			CHECK(wait_blank_at(st->display_front, 20000U) == AAR_E_TIMEDOUT);
+			cl.open_caps = caps;
+			cl.resize_spare = 0U;
+			CHECK(zzapp_svc_display_resize(s.id, 400U, 300U, &s2) == AAR_OK);
+			CHECK(st->display_source == SCREEN);
+			CHECK(wait_blank_at(SCREEN, 50000U) == AAR_OK);
+			CHECK(wait_blank_at(OTHER, 20000U) == AAR_E_TIMEDOUT);
+			CHECK(cl.nreq[AAR_OP_DISPLAY_VBLANK] == 0U);
+			cl.open_caps = caps | AAR_DISP_REPLY_SCANOUT;
+		}
+
+		/* The name goes with the display. */
+		CHECK(zzapp_svc_display_close(s.id) == AAR_OK);
+		CHECK(st->display_source == 0U);
+		CHECK(zzapp_svc_display_wait_vblank(1000U) == AAR_E_INVAL);
+
+		/* Not named, or named wrongly: the client is asked, the open
+		 * still works, and no native blank is accepted. A name that is
+		 * not the owning screen is not an app buffer either. */
+		for (bad = 0U; bad < 5U; bad++) {
+			seq = st->vblank_seq;
+			if (bad < 4U) {
+				cl.open_caps = caps | AAR_DISP_REPLY_SCANOUT;
+				cl.open_spare = bad_spare[bad];
+			} else {
+				cl.open_caps = caps;	/* no flag: SPARE is an app buffer */
+				cl.open_spare = SCREEN;
+			}
+			CHECK(zzapp_svc_display_open(640U, 480U, AAR_FMT_RGB565, flags, &s) == AAR_OK);
+			CHECK(st->display_source == 0U);
+			CHECK(st->display_spare == (bad < 4U ? 0U : (uint32_t)SCREEN));
+			cl.nreq[AAR_OP_DISPLAY_VBLANK] = 0U;
+			cl.vblank_silent = 1;
+			t0 = fake_now;
+			CHECK(wait_blank_at(SCREEN, 50000U) == AAR_E_TIMEDOUT);
+			dt = fake_now - t0;
+			CHECK(dt >= 50000U + ZZAPP_VBLANK_GRACE_US - 3U * cl.clock_step);
+			CHECK(cl.nreq[AAR_OP_DISPLAY_VBLANK] == 1U);
+			CHECK(st->vblank_seq == seq);
+			cl.vblank_silent = 0;
+			CHECK(zzapp_svc_display_wait_vblank(50000U) == AAR_OK);
+			CHECK(cl.nreq[AAR_OP_DISPLAY_VBLANK] == 2U);
+			CHECK(zzapp_svc_display_close(s.id) == AAR_OK);
+		}
+	}
+
+	/* A flag on a direct-scanout open is not a name: SPARE stays the
+	 * app's buffer and no source is kept. */
+	cl.open_caps = AAR_DISP_REPLY_SCANOUT;
+	cl.open_spare = SCREEN;
+	CHECK(zzapp_svc_display_open(640U, 480U, AAR_FMT_RGB565, 0U, &s) == AAR_OK);
+	CHECK(st->display_source == 0U && st->display_spare == (uint32_t)SCREEN);
+	CHECK(zzapp_svc_display_close(s.id) == AAR_OK);
+
 	zzapp_services_on_app_end();
 	(void)zzapp_rec_retire(rec->hdr.pid);
 	(void)mbox(ZZAPP_OP_RELEASE, handle, 0U, 0U, NULL, NULL);
@@ -4108,6 +4264,7 @@ int main(void)
 	test_display_title_pointer();
 	test_display_wait_vblank();
 	test_display_native_vblank();
+	test_display_window_source_vblank();
 	test_display_resize();
 	test_display_event_gating();
 	test_audio_card();
