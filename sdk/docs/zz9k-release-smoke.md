@@ -110,6 +110,7 @@ default shared heap are Zorro III diagnostics.
    zz9k-jpeg --fb --hold 200 Work:Pictures/test.jpg
    zz9k-png Work:Pictures/test.png
    zz9k-png --fb --hold 200 Work:Pictures/test.png
+   zz9k-pngdecode Work:Pictures/test.png
    zz9k-view Work:Pictures/test.jpg Work:Pictures/test.png Work:Pictures/test.webp
    zz9k-dtprobe --client Work:Pictures/test.jpg
    zz9k-dtprobe --client Work:Pictures/test.png
@@ -119,6 +120,10 @@ default shared heap are Zorro III diagnostics.
 
    Expected result: the listed decoders complete without SDK status errors. `zz9k-view` opens
    one resizable window and its next/previous keys move between the images.
+   `zz9k-pngdecode` ends with `one-shot PNG decode ok` after it reports that
+   the one-shot and session pixels match. On firmware without
+   `ZZ9K_SERVICE_FLAG_IMAGE_PNG_ONE_SHOT` it stops with `this firmware has no
+   one-shot PNG decode`, which is not a failure of that firmware.
    Check JPEG, PNG, and WebP in RGB555 (15-bit), RGB565 (16-bit), and
    BGRA8888 (32-bit) RTG modes. Check that resize and occlusion redraw through
    visible clips leave surrounding RTG contents intact. MultiView and
@@ -126,7 +131,8 @@ default shared heap are Zorro III diagnostics.
 
    On Zorro II, skip the plain `zz9k-jpeg` command because it uses a
    legacy-default CPU-visible output tile. Run `zz9k-jpeg --fb`, both PNG
-   forms, `zz9k-view`, and the DataType clients. While those clients run,
+   forms, `zz9k-view`, and the DataType clients. Skip `zz9k-pngdecode` when
+   the file does not fit the free host window. While those clients run,
    `zz9k-info` must continue to report an active acknowledged layout and
    host-window free space must return after close.
 

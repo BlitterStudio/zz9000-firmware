@@ -342,14 +342,24 @@ qualification remains separate from the host checks; record it in
 
 For FPGA changes, run the relevant simulation on the Vivado host. The
 formatter simulation accepts the working tree or the committed baseline; the
-overlay scaling simulation covers the PIP line fetcher and scaler:
+overlay scaling simulation covers the PIP line fetcher and scaler; the
+receive-window read-ahead bench runs in xsim:
 
 ```bash
 test/video/run_formatter_sim.sh current
 test/video/run_formatter_sim.sh master
 test/video/run_overlay_scale_sim.sh
+test/rxpf/run.sh
 python3 test/video/run_videocap_phase_sim.py
 python3 test/video/run_variant_elaboration.py
+```
+
+The Zorro III bus bench runs in Verilator and the workflow runs it. It checks
+read-after-write ordering through the AXI port and that DTACK never leads the
+read data:
+
+```bash
+bash test/zorro_order/run_verilator.sh
 ```
 
 ## Tool lookup and CI
@@ -376,6 +386,7 @@ you changed.
 | RTG comparative micro-benchmarks | `make -C test/rtg bench` |
 | Media sessions | `make -C test/media test` |
 | Palette shadow state | `make -C test/palette test` |
+| SDK service catalog and mailbox handlers (discovery, palette query, retired video-session opcodes) | `make -C test/sdk_service test` |
 | Output gamma LUT | `make -C test/gamma test` |
 | Audio capture, fabric and voice engine | `make -C test/audio test` |
 | `ZZ9000.CFG` parser and loader | `make -C test/config test` |

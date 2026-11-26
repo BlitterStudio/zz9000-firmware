@@ -186,7 +186,7 @@ per-card clean ceilings, and a boot limiter threshold. Values are decimal.
 |---|---|---|
 | `audio_active` | `0`–`7` | Scene selected at boot and after each Amiga warm reset. |
 | `audio_baseline` | Unsigned 16-bit decimal | Paula/AX balance packed as `paula*256+ax`, with each leg `0`–`255`; 127 is 0 dB. |
-| `audio_separation` | `0`–`100` | Stereo separation of the whole card output, Paula and AX alike, in percent. 100 (the default) is full stereo; 0 is mono. About 70 suits headphones. |
+| `audio_separation` | `0`–`100` | Stereo separation of all card output, Paula and AX alike, in percent. 100 (the default) is full stereo; 0 is mono. About 70 suits headphones. Firmware applies it at boot, and an audio scene save writes it back. |
 | `audio_limiter` | `1`–`100` | Limiter threshold in hundredths of full scale. Absent or invalid uses 47 (0.47 FS); 95 suits the new ZZ9000 Audio card. |
 | `audio_ceiling_paula` | `1`–`4095` | Measured clean Paula-only ceiling. |
 | `audio_ceiling_ax` | `1`–`4095` | Measured clean AX-only ceiling. |
