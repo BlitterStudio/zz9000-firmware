@@ -56,6 +56,7 @@ static void stream_reset(struct SDKDVDTSStream *s)
 	s->continued = 0U;
 	s->fill = 0U;
 	s->total = 0U;
+	s->known = 0U;
 }
 
 /* Hands the buffered PES (or chunk) to the queue; 0 when it is full. A
@@ -87,6 +88,34 @@ static int stream_flush(struct SDKDVDPSDemux *d, struct SDKDVDTSStream *s)
 	return 1;
 }
 
+/* Checks the header bytes collected so far as they arrive: start code,
+ * then stream id, then the length once six bytes are there. 0 when the PES
+ * is dropped. */
+static int header_check(struct SDKDVDPSDemux *d, struct SDKDVDTSDemux *ts,
+                        struct SDKDVDTSStream *s)
+{
+	uint32_t i;
+
+	for (i = 0U; i < s->fill && i < 3U; i++) {
+		if (s->data[i] != (i == 2U ? 1U : 0U)) {
+			d->malformed_packets++;
+			d->bytes_ignored += s->fill;
+			stream_reset(s);
+			return 0;
+		}
+	}
+	if (s->fill >= 4U && !stream_id_ok(s == &ts->video, s->data[3])) {
+		d->bytes_ignored += s->fill;
+		stream_reset(s);
+		return 0;
+	}
+	if (s->fill >= 6U) {
+		s->total = be16(s->data + 4U) != 0U ? 6U + be16(s->data + 4U) : 0U;
+		s->known = 1U;
+	}
+	return 1;
+}
+
 /* One TS payload of a followed PID. Returns 0 when the queue is full and
  * nothing of this packet was taken yet. */
 static int stream_packet(struct SDKDVDPSDemux *d, struct SDKDVDTSDemux *ts,
@@ -97,8 +126,13 @@ static int stream_packet(struct SDKDVDPSDemux *d, struct SDKDVDTSDemux *ts,
 		return 0;
 	if (pusi) {
 		if (s->collecting) {
-			if (s->total == 0U &&
-			    !(s->continued && s->fill == TS_PES_HEADER_BYTES)) {
+			if (!s->known) {
+				ts->truncated_pes++;
+				d->malformed_packets++;
+				stream_reset(s);
+			} else if (s->total == 0U &&
+			           !(s->continued &&
+			             s->fill == TS_PES_HEADER_BYTES)) {
 				/* An unbounded PES ends where the next one
 				 * starts. */
 				s->complete = 1U;
@@ -113,20 +147,10 @@ static int stream_packet(struct SDKDVDPSDemux *d, struct SDKDVDTSDemux *ts,
 				stream_reset(s);
 			}
 		}
-		if (length < 6U || payload[0] != 0U || payload[1] != 0U ||
-		    payload[2] != 1U) {
-			d->malformed_packets++;
-			d->bytes_ignored += length;
-			return 1;
-		}
-		if (!stream_id_ok(s == &ts->video, payload[3])) {
-			d->bytes_ignored += length;
-			return 1;
-		}
 		s->fill = 0U;
 		s->continued = 0U;
-		s->total = be16(payload + 4U) != 0U
-			? 6U + be16(payload + 4U) : 0U;
+		s->total = 0U;
+		s->known = 0U;
 		s->collecting = 1U;
 	} else if (!s->collecting) {
 		d->bytes_ignored += length;
@@ -143,8 +167,14 @@ static int stream_packet(struct SDKDVDPSDemux *d, struct SDKDVDTSDemux *ts,
 	}
 	memcpy(s->data + s->fill, payload, length);
 	s->fill += length;
-	if (s->total != 0U && s->fill >= s->total)
-		s->complete = 1U;
+	if (!s->known && !header_check(d, ts, s))
+		return 1;
+	if (s->total != 0U) {
+		if (s->fill > s->total)
+			s->fill = s->total;
+		if (s->fill >= s->total)
+			s->complete = 1U;
+	}
 	return 1;
 }
 
@@ -157,6 +187,13 @@ static int stream_end(struct SDKDVDPSDemux *d, struct SDKDVDTSDemux *ts,
 		return 0;
 	if (!s->collecting)
 		return 1;
+	if (!s->known) {
+		/* The header never got its six bytes. */
+		ts->truncated_pes++;
+		d->malformed_packets++;
+		stream_reset(s);
+		return 1;
+	}
 	if (s->total != 0U) {
 		ts->truncated_pes++;
 		d->malformed_packets++;

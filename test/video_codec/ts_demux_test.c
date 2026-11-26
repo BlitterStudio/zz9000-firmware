@@ -601,9 +601,12 @@ static void fill_es(uint8_t *p, uint32_t n, uint32_t seed)
 		p[i] = (uint8_t)(seed + i * 7U + 3U);
 }
 
-/* A PES of one stream, as TS packets. bounded sets PES_packet_length. */
-static void tsb_pes(struct tsb *b, uint32_t pid, uint8_t sid, uint64_t pts,
-                    const uint8_t *es, uint32_t es_len, int bounded)
+/* A PES of one stream, as TS packets. bounded sets PES_packet_length. The
+ * first packet carries first_len bytes of the PES (at most 184), which cuts
+ * the header when it is short. */
+static void tsb_pes_split(struct tsb *b, uint32_t pid, uint8_t sid,
+                          uint64_t pts, const uint8_t *es, uint32_t es_len,
+                          int bounded, uint32_t first_len)
 {
 	uint32_t header = pts != NO_TS ? 14U : 9U;
 	uint32_t total = header + es_len;
@@ -629,13 +632,20 @@ static void tsb_pes(struct tsb *b, uint32_t pid, uint8_t sid, uint64_t pts,
 		pts5(pes + 9, 2U, pts);
 	memcpy(pes + header, es, es_len);
 	while (sent < total) {
-		uint32_t n = total - sent < 184U ? total - sent : 184U;
+		uint32_t limit = first ? first_len : 184U;
+		uint32_t n = total - sent < limit ? total - sent : limit;
 
 		tsb_packet(b, pid, first, pes + sent, n);
 		first = 0;
 		sent += n;
 	}
 	free(pes);
+}
+
+static void tsb_pes(struct tsb *b, uint32_t pid, uint8_t sid, uint64_t pts,
+                    const uint8_t *es, uint32_t es_len, int bounded)
+{
+	tsb_pes_split(b, pid, sid, pts, es, es_len, bounded, 184U);
 }
 
 static void tsb_remove(struct tsb *b, uint32_t index)
@@ -1366,6 +1376,199 @@ static int test_foreign_payloads(void)
 	return 0;
 }
 
+/* A PES header cut over two packets by an adaptation field (the first packet
+ * carries only `first` bytes of the PES) must give the output of the same
+ * PES in one piece. */
+struct split_ctx {
+	struct expect e;
+	int video;
+	uint64_t pts0;
+	uint64_t pts1;
+};
+
+static int check_split(const struct out *o, void *vctx)
+{
+	const struct split_ctx *c = (const struct split_ctx *)vctx;
+	const uint64_t *pts = c->video ? o->vpts : o->apts;
+	uint32_t n = c->video ? o->nv : o->na;
+
+	if (check_es(o, vctx) != 0)
+		return 1;
+	CHECK(n == 2U);
+	CHECK(pts[0] == c->pts0 && pts[1] == c->pts1);
+	CHECK(o->malformed == 0U && o->truncated_pes == 0U);
+	return 0;
+}
+
+static int test_split_header(void)
+{
+	uint8_t es[2][700];
+	uint8_t both[1400];
+	uint32_t first;
+	uint32_t kind;
+
+	fill_es(es[0], sizeof(es[0]), 11U);
+	fill_es(es[1], sizeof(es[1]), 12U);
+	memcpy(both, es[0], sizeof(es[0]));
+	memcpy(both + sizeof(es[0]), es[1], sizeof(es[1]));
+	for (kind = 0U; kind < 4U; kind++) {
+		int video = (kind & 1U) == 0U;
+		int bounded = (kind & 2U) != 0U;
+
+		for (first = 1U; first <= 16U; first++) {
+			struct tsb b;
+			struct split_ctx c;
+			uint32_t pid = video ? V_PID : A_PID;
+			uint8_t sid = video ? 0xe0U : 0xc0U;
+
+			tsb_init(&b, 188U);
+			tsb_psi(&b);
+			tsb_pes_split(&b, pid, sid, 100U, es[0], sizeof(es[0]),
+			              bounded, first);
+			tsb_pes(&b, pid, sid, 200U, es[1], sizeof(es[1]), bounded);
+			c.video = video;
+			c.pts0 = 100U;
+			c.pts1 = 200U;
+			c.e.video = video ? both : 0;
+			c.e.video_len = video ? sizeof(both) : 0U;
+			c.e.audio = video ? 0 : both;
+			c.e.audio_len = video ? 0U : sizeof(both);
+			if (each_config(b.data, b.len, check_split, &c) != 0) {
+				fprintf(stderr, "  %s %s, first packet %u bytes\n",
+				        video ? "video" : "audio",
+				        bounded ? "bounded" : "unbounded", first);
+				return 1;
+			}
+			/* Split a PES that has no timestamp too, and the
+			 * second one, behind a PES that is not split. */
+			tsb_free(&b);
+			tsb_init(&b, 188U);
+			tsb_psi(&b);
+			tsb_pes(&b, pid, sid, 100U, es[0], sizeof(es[0]), bounded);
+			tsb_pes_split(&b, pid, sid, 200U, es[1], sizeof(es[1]),
+			              bounded, first);
+			if (each_config(b.data, b.len, check_split, &c) != 0) {
+				fprintf(stderr, "  %s %s, second split %u\n",
+				        video ? "video" : "audio",
+				        bounded ? "bounded" : "unbounded", first);
+				return 1;
+			}
+			tsb_free(&b);
+		}
+	}
+	return 0;
+}
+
+/* A header that is split and then wrong, or never completed. */
+static int test_split_header_damage(void)
+{
+	uint8_t a[600];
+	uint8_t v[600];
+	uint32_t first;
+	struct tsb b;
+	struct expect e;
+	struct out o;
+	uint32_t at;
+
+	fill_es(a, sizeof(a), 1U);
+	fill_es(v, sizeof(v), 2U);
+	e.video = v;
+	e.video_len = sizeof(v);
+	e.audio = 0;
+	e.audio_len = 0U;
+
+	/* A bad start code byte, in the first packet or the second: that PES is
+	 * dropped as malformed and the next one is intact. */
+	for (first = 3U; first <= 5U; first++) {
+		uint32_t bad;
+
+		for (bad = 0U; bad < 3U; bad++) {
+			tsb_init(&b, 188U);
+			tsb_psi(&b);
+			at = tsb_count(&b);
+			tsb_pes_split(&b, V_PID, 0xe0U, 1U, a, sizeof(a), 1, first);
+			if (bad < first)
+				tsb_at(&b, at)[188U - first + bad] ^= 0x10U;
+			else
+				tsb_at(&b, at + 1U)[188U - 184U + bad - first] ^= 0x10U;
+			tsb_pes(&b, V_PID, 0xe0U, 2U, v, sizeof(v), 1);
+			run(b.data, b.len, 188U, ALL_POPS, 1, 0, &o);
+			if (check_es(&o, &e) != 0 || o.nv != 1U || o.vpts[0] != 2U ||
+			    o.malformed == 0U) {
+				fprintf(stderr, "  bad start code byte %u, first %u\n", bad,
+				        first);
+				out_free(&o);
+				return 1;
+			}
+			out_free(&o);
+			tsb_free(&b);
+		}
+	}
+
+	/* A stream id of the wrong kind, seen once split: skipped silently. */
+	for (first = 1U; first <= 6U; first++) {
+		tsb_init(&b, 188U);
+		tsb_psi(&b);
+		tsb_pes_split(&b, V_PID, 0xc0U, 1U, a, sizeof(a), 1, first);
+		tsb_pes(&b, V_PID, 0xe0U, 2U, v, sizeof(v), 1);
+		run(b.data, b.len, 188U, ALL_POPS, 1, 0, &o);
+		if (check_es(&o, &e) != 0 || o.nv != 1U || o.vpts[0] != 2U) {
+			fprintf(stderr, "  wrong stream id, first %u\n", first);
+			out_free(&o);
+			return 1;
+		}
+		out_free(&o);
+		tsb_free(&b);
+	}
+
+	/* A header cut off by the end of input, or by the next PES. */
+	for (first = 1U; first <= 5U; first++) {
+		int bounded;
+		uint8_t cc0;
+
+		for (bounded = 0; bounded < 2; bounded++) {
+			tsb_init(&b, 188U);
+			tsb_psi(&b);
+			tsb_pes(&b, V_PID, 0xe0U, 1U, v, sizeof(v), bounded);
+			at = tsb_count(&b);
+			cc0 = b.cc[V_PID];
+			tsb_pes_split(&b, V_PID, 0xe0U, 2U, a, sizeof(a), bounded,
+			              first);
+			b.len = (at + 1U) * b.stride;
+			b.cc[V_PID] = (uint8_t)(cc0 + 1U);
+			run(b.data, b.len, 188U, ALL_POPS, 1, 0, &o);
+			if (check_es(&o, &e) != 0 || o.nv != 1U || o.vpts[0] != 1U ||
+			    o.truncated_pes != 1U || o.malformed == 0U) {
+				fprintf(stderr, "  cut at end, first %u bounded %d\n", first,
+				        bounded);
+				out_free(&o);
+				return 1;
+			}
+			out_free(&o);
+
+			/* The same cut, then a whole PES. */
+			tsb_pes(&b, V_PID, 0xe0U, 3U, v, sizeof(v), bounded);
+			run(b.data, b.len, 188U, ALL_POPS, 1, 0, &o);
+			e.video = cat(v, sizeof(v), v, sizeof(v));
+			e.video_len = 2U * sizeof(v);
+			if (check_es(&o, &e) != 0 || o.nv != 2U || o.vpts[1] != 3U ||
+			    o.truncated_pes != 1U) {
+				fprintf(stderr, "  cut then PES, first %u bounded %d\n",
+				        first, bounded);
+				out_free(&o);
+				free((void *)e.video);
+				return 1;
+			}
+			out_free(&o);
+			free((void *)e.video);
+			e.video = v;
+			e.video_len = sizeof(v);
+			tsb_free(&b);
+		}
+	}
+	return 0;
+}
+
 /* The PS demux is unchanged for Program Streams: the TS hook is off. */
 static int test_program_stream_untouched(void)
 {
@@ -1401,6 +1604,8 @@ int main(void)
 		{"audio drop policy", test_audio_drop_policy},
 		{"M2TS", test_m2ts},
 		{"foreign payloads", test_foreign_payloads},
+		{"PES header split over packets", test_split_header},
+		{"PES header damaged or cut", test_split_header_damage},
 		{"Program Stream path", test_program_stream_untouched},
 	};
 	unsigned i;
