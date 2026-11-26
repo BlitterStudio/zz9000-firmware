@@ -906,9 +906,18 @@ typedef char SDKAudioControlStateSaveStatus_must_be_at_offset_44[
  * rejects any nonzero flags word with SDK_STATUS_BAD_REQUEST. */
 #define SDK_AUDIO_RING_ACQUIRE_FLAG_SOURCE_RATE (1U << 0)
 #define SDK_AUDIO_RING_ACQUIRE_FLAG_SOURCE_S16BE (1U << 1)
+/* IDLE_PAUSED: the heartbeat timeout does not run while the producer
+ * line carries PAUSED. For a client that cannot publish while the host
+ * operating system is active (a WHDLoad audio plugin), which pauses its
+ * lease before the host leaves it. The lease still ends on release, on
+ * a cursor fault, on an Amiga reset, and 2000 ms after the producer
+ * clears PAUSED without a heartbeat. Valid with or without SOURCE_RATE;
+ * firmware without it answers BAD_REQUEST. */
+#define SDK_AUDIO_RING_ACQUIRE_FLAG_IDLE_PAUSED (1U << 2)
 #define SDK_AUDIO_RING_ACQUIRE_FLAG_KNOWN \
 	(SDK_AUDIO_RING_ACQUIRE_FLAG_SOURCE_RATE | \
-	 SDK_AUDIO_RING_ACQUIRE_FLAG_SOURCE_S16BE)
+	 SDK_AUDIO_RING_ACQUIRE_FLAG_SOURCE_S16BE | \
+	 SDK_AUDIO_RING_ACQUIRE_FLAG_IDLE_PAUSED)
 
 /* Highest leaseable direct-ring slot index. Slot 0 is the firmware
  * pump and is never granted; the acquire result's slot_count reports

@@ -1540,6 +1540,15 @@ Values `0x050f` through `0x0511` belonged to the withdrawn copy-submit experimen
 
 Each grant reports board-visible ring and control offsets, capacity, 3,840-byte/20-ms period geometry, sample contract, applied gain, and bus slot count. The control block has two ownership-separated 64-byte lines. The producer line publishes generation, write cursor, heartbeat, and flags. The firmware line publishes generation, consumed cursor, and status. Both lines use big-endian 32-bit fields and even/odd seqlocks.
 
+`ZZ9K_AUDIO_RING_ACQUIRE_FLAG_IDLE_PAUSED` (bit 2, alone or with the source-rate
+flag) asks the firmware not to run its 2,000 ms heartbeat timeout while the
+producer line carries `PAUSED`. It is for a client that cannot publish while the
+host operating system is active, such as a WHDLoad audio plugin that pauses its
+lease before the host leaves it. The timeout applies again from the next tick
+after the producer clears `PAUSED`. A paused lease of a client that died holds
+its slot until the next Amiga reset. No service flag advertises it: firmware
+without it answers `BAD_REQUEST`.
+
 Rate-bearing leases (AHI migration) extend the acquire append-only: the
 request may carry `ZZ9K_AUDIO_RING_ACQUIRE_FLAG_SOURCE_RATE` with a
 `source_rate_hz` word carved from the former reserved area, and the

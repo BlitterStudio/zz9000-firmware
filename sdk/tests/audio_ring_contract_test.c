@@ -60,10 +60,32 @@ static int test_builders(void)
   if (zz9k_audio_build_ring_acquire_desc(&acquire, 1U, ZZ9K_AUDIO_METER_IDENTITY_SDK_STREAM, 256U, 0U, 0U)) {
     return 6;
   }
-  /* Unknown acquire flags are rejected (bit 0 is the known
-   * SOURCE_RATE request flag; bit 1+ are undefined). */
-  if (zz9k_audio_build_ring_acquire_desc(&acquire, 1U, ZZ9K_AUDIO_METER_IDENTITY_SDK_STREAM, 128U, 1U << 1, 0U)) {
+  /* Unknown acquire flags are rejected (bit 0 is SOURCE_RATE, bit 2
+   * IDLE_PAUSED; bits 1 and 3+ are undefined). */
+  if (zz9k_audio_build_ring_acquire_desc(&acquire, 1U, ZZ9K_AUDIO_METER_IDENTITY_SDK_STREAM, 128U, 1U << 1, 0U) ||
+      zz9k_audio_build_ring_acquire_desc(&acquire, 1U, ZZ9K_AUDIO_METER_IDENTITY_SDK_STREAM, 128U, 1U << 3, 0U)) {
     return 7;
+  }
+  /* IDLE_PAUSED alone (bypass lease), and with SOURCE_RATE; the request
+   * encoder carries the flag to the wire. */
+  if (!zz9k_audio_build_ring_acquire_desc(&acquire, 1U, ZZ9K_AUDIO_METER_IDENTITY_MEDIA, 128U, ZZ9K_AUDIO_RING_ACQUIRE_FLAG_IDLE_PAUSED, 0U) ||
+      acquire.flags != ZZ9K_AUDIO_RING_ACQUIRE_FLAG_IDLE_PAUSED ||
+      !zz9k_audio_build_ring_acquire_desc(&acquire, 1U, ZZ9K_AUDIO_METER_IDENTITY_MEDIA, 128U, ZZ9K_AUDIO_RING_ACQUIRE_FLAG_SOURCE_RATE | ZZ9K_AUDIO_RING_ACQUIRE_FLAG_IDLE_PAUSED, 44100U) ||
+      acquire.flags != (ZZ9K_AUDIO_RING_ACQUIRE_FLAG_SOURCE_RATE | ZZ9K_AUDIO_RING_ACQUIRE_FLAG_IDLE_PAUSED)) {
+    return 7;
+  }
+  {
+    ZZ9KRequest request;
+
+    if (zz9k_request_audio_ring_acquire(&request, &acquire) != ZZ9K_STATUS_OK ||
+        zz9k_get_be32(((ZZ9KAudioRingAcquirePayload *)request.entry.payload.inline_data)->flags) !=
+            (ZZ9K_AUDIO_RING_ACQUIRE_FLAG_SOURCE_RATE | ZZ9K_AUDIO_RING_ACQUIRE_FLAG_IDLE_PAUSED)) {
+      return 7;
+    }
+    acquire.flags = 1U << 3;
+    if (zz9k_request_audio_ring_acquire(&request, &acquire) == ZZ9K_STATUS_OK) {
+      return 7;
+    }
   }
   /* Rate-bearing acquires: flag + a vocabulary rate is accepted;
    * off-vocabulary rates and a rate without the flag are rejected. */

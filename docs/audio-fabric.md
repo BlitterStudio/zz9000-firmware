@@ -212,7 +212,8 @@ generation, and begins in `LEASED`. The slot becomes `ACTIVE` after the first
 valid producer-line publication. A release stops the contribution, rebuilds
 queued periods from the remaining producers, and advances the generation. A
 release with a stale generation is idempotent. Firmware revokes a lease after
-a 2,000 ms heartbeat timeout.
+a 2,000 ms heartbeat timeout, except for a paused lease with the idle flag
+(see Source formats, conversion, and admission).
 
 `SDK_OP_AUDIO_FABRIC_STATE_GET` reports the slot state, identity, generation,
 written and consumed byte cursors, heartbeat age, underruns, 16.16 peak, and
@@ -252,6 +253,19 @@ A zero-flags acquire is a 48 kHz stereo S16LE bypass lease. A client can set
 mailbox currently accepts 8000, 12000, 24000, 32000, 44100, or 48000 Hz.
 `SDK_AUDIO_RING_ACQUIRE_FLAG_SOURCE_S16BE` is valid only with the source-rate
 flag.
+
+`SDK_AUDIO_RING_ACQUIRE_FLAG_IDLE_PAUSED` (bit 2, with or without the source-rate
+flag) is for a client that cannot publish while the host operating system is
+active, such as a WHDLoad audio plugin. While the producer line carries
+`PAUSED`, the heartbeat timeout does not run, whether the token changes or not,
+and a line that stays unreadable while the last valid line was paused does not
+age either. When the producer clears `PAUSED`, the 2,000 ms timeout applies
+again from the next tick. Such a lease ends on release, on a cursor fault, on
+an Amiga reset and on the timeout after an unpaused stretch. It does not end
+because a paused client died, so a paused lease of a dead client holds its slot
+until the next Amiga reset. Firmware without the flag answers `BAD_REQUEST`,
+which is the client's signal to do without it. The flag is not advertised in a
+service flag. SDK clients name it `ZZ9K_AUDIO_RING_ACQUIRE_FLAG_IDLE_PAUSED`.
 
 A direct-ring lease at 48 kHz feeds the compositor directly. A lease at any
 other accepted rate is converted into 48 kHz periods by

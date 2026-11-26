@@ -957,6 +957,72 @@ static void scenario_cursor_fault(void)
 		grant.generation);
 }
 
+/* ---- E2. IDLE_PAUSED: no heartbeat timeout while PAUSED ---- */
+
+static void scenario_idle_paused(void)
+{
+	struct audio_fabric_ring_grant grant;
+	struct audio_fabric_slot_state st;
+	struct SDKAudioRingFirmwareLine fw;
+	uint32_t tick;
+	uint32_t token;
+
+	/* Without the flag a paused line with a constant token expires. */
+	fabric_reset_state();
+	check(acquire_lease(AUDIO_FABRIC_SLOT_MAILBOX, 128U, &grant) ==
+	      AUDIO_FABRIC_LEASE_OK, "idle paused: plain acquire", "");
+	g_producer[AUDIO_FABRIC_SLOT_MAILBOX].generation = grant.generation;
+	producer_publish(AUDIO_FABRIC_SLOT_MAILBOX, 0U,
+		SDK_AUDIO_RING_PRODUCER_FLAG_PAUSED);
+	for (tick = 0U; tick < 8U; tick++)
+		fabric_pass();
+	firmware_snapshot(AUDIO_FABRIC_SLOT_MAILBOX, &fw);
+	check(be32(fw.status) == SDK_AUDIO_RING_STATUS_REVOKED_HEARTBEAT,
+	      "idle paused: a plain paused lease still expires", "");
+
+	/* With the flag a paused line is never aged. */
+	check(acquire_lease(AUDIO_FABRIC_SLOT_MAILBOX, 128U, &grant) ==
+	      AUDIO_FABRIC_LEASE_OK, "idle paused: acquire", "");
+	audio_fabric_lease_idle_paused(AUDIO_FABRIC_SLOT_MAILBOX, 1);
+	g_producer[AUDIO_FABRIC_SLOT_MAILBOX].generation = grant.generation;
+	producer_publish(AUDIO_FABRIC_SLOT_MAILBOX, 0U,
+		SDK_AUDIO_RING_PRODUCER_FLAG_PAUSED);
+	for (tick = 0U; tick < 60U; tick++)
+		fabric_pass();
+	st = lease_state(AUDIO_FABRIC_SLOT_MAILBOX);
+	check(st.state == AUDIO_FABRIC_SLOT_STATE_ACTIVE &&
+	      st.heartbeat_ms == 0U,
+	      "idle paused: a paused lease survives 20 timeouts",
+	      fmt("state=%u age=%u", st.state, st.heartbeat_ms));
+
+	/* A torn line while paused does not age it either. */
+	producer_publish_stuck_odd(AUDIO_FABRIC_SLOT_MAILBOX);
+	for (tick = 0U; tick < 20U; tick++)
+		fabric_pass();
+	st = lease_state(AUDIO_FABRIC_SLOT_MAILBOX);
+	check(st.state == AUDIO_FABRIC_SLOT_STATE_ACTIVE,
+	      "idle paused: a stuck line of a paused lease does not expire",
+	      fmt("state=%u", st.state));
+
+	/* Unpaused with a refreshing token: normal. Then the token stops and
+	 * the timeout runs from the unpause. */
+	token = g_producer[AUDIO_FABRIC_SLOT_MAILBOX].token;
+	producer_publish(AUDIO_FABRIC_SLOT_MAILBOX, 0U, 0U);
+	for (tick = 0U; tick < 2U; tick++) {
+		producer_publish(AUDIO_FABRIC_SLOT_MAILBOX, 0U, 0U);
+		fabric_pass();
+	}
+	st = lease_state(AUDIO_FABRIC_SLOT_MAILBOX);
+	check(st.state == AUDIO_FABRIC_SLOT_STATE_ACTIVE &&
+	      g_producer[AUDIO_FABRIC_SLOT_MAILBOX].token > token,
+	      "idle paused: unpaused with a heartbeat stays live", "");
+	for (tick = 0U; tick < 8U; tick++)
+		fabric_pass();
+	firmware_snapshot(AUDIO_FABRIC_SLOT_MAILBOX, &fw);
+	check(be32(fw.status) == SDK_AUDIO_RING_STATUS_REVOKED_HEARTBEAT,
+	      "idle paused: unpaused without a heartbeat expires", "");
+}
+
 /* ---- E. heartbeat expiry, refresh, and PAUSED ---- */
 
 static void scenario_heartbeat(void)
@@ -2226,6 +2292,7 @@ int main(void)
 	scenario_grace();
 	scenario_cursor_fault();
 	scenario_heartbeat();
+	scenario_idle_paused();
 	scenario_prime_preserves_lease_age();
 	scenario_dead_line();
 	scenario_rebuild();

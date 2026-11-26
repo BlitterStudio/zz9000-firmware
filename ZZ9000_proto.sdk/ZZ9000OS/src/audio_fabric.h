@@ -316,6 +316,9 @@ int audio_fabric_ring_acquire(uint32_t slot, uint32_t identity,
 	uint32_t gain, uint32_t source_rate,
 	struct audio_fabric_ring_grant *grant);
 void audio_fabric_lease_source_be(uint32_t slot, int be);
+/* IDLE_PAUSED lease (SDK_AUDIO_RING_ACQUIRE_FLAG_IDLE_PAUSED): the
+ * heartbeat timeout is suspended while the producer line is PAUSED. */
+void audio_fabric_lease_idle_paused(uint32_t slot, int on);
 
 /*
  * Main-loop fill for converting leases (the #100 discipline applied to

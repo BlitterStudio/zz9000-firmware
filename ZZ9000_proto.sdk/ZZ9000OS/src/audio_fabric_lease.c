@@ -425,6 +425,12 @@ static void fabric_ring_revoke(uint32_t slot, uint32_t status)
 static void fabric_ring_age_or_revoke(uint32_t slot,
 	struct audio_fabric_lease *l)
 {
+	/* An IDLE_PAUSED lease whose last valid line was PAUSED does not
+	 * age: its producer cannot publish while the host is away. */
+	if (l->idle_paused && l->paused) {
+		l->heartbeat_ms = 0U;
+		return;
+	}
 	fabric_ring_heartbeat_age(l);
 	if (l->heartbeat_ms >= FABRIC_RING_HEARTBEAT_TIMEOUT_NOW)
 		fabric_ring_revoke(slot,
@@ -497,7 +503,9 @@ void fabric_lease_isr_tick(void)
 				SDK_AUDIO_RING_STATUS_FAULT_CURSOR);
 			continue;
 		}
-		if (view.heartbeat != l->heartbeat_token) {
+		if (view.heartbeat != l->heartbeat_token ||
+		    (l->idle_paused &&
+		     (view.flags & SDK_AUDIO_RING_PRODUCER_FLAG_PAUSED) != 0U)) {
 			l->heartbeat_token = view.heartbeat;
 			l->heartbeat_ms = 0U;
 		} else {
@@ -1041,6 +1049,15 @@ static void fabric_lease_finish_inflight(uint32_t periods)
 		g_poll_stolen[slot] = 1U;
 		fabric_lease_rebase_cursors(p);
 	}
+}
+
+void audio_fabric_lease_idle_paused(uint32_t slot, int on)
+{
+	struct audio_fabric_slot *s = fabric_slot(slot);
+
+	if (s == NULL)
+		return;
+	s->lease.idle_paused = on ? 1U : 0U;
 }
 
 void audio_fabric_lease_source_be(uint32_t slot, int be)
