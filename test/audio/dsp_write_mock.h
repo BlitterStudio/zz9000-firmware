@@ -21,7 +21,9 @@ enum {
 	WRITE_MIXER_P, /* per-leg mixer split (differential path) */
 	WRITE_MIXER_A,
 	WRITE_EQ_SUB, /* resumable safeload substep */
-	WRITE_LPF_SUB /* five staged coefficients, latch, verified readback */
+	WRITE_LPF_SUB, /* five staged coefficients, latch, verified readback */
+	WRITE_SEP,    /* audio_adau_set_separation(percent) */
+	WRITE_SEP_SUB /* four staged words, latch, verified readback */
 };
 
 #define WRITE_LOG_MAX 512

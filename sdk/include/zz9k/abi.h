@@ -1125,6 +1125,15 @@ typedef struct ZZ9KAudioStreamResultPayload {
 #define ZZ9K_AUDIO_SCENE_PARAM_CALIBRATION 17U /* per-card measured clean
                                                 * ceilings: Paula low 16,
                                                 * AX high 16; scene ignored */
+#define ZZ9K_AUDIO_SCENE_PARAM_SEPARATION 18U /* stereo separation, 0..100
+                                               * percent: 100 is full
+                                               * stereo, 0 is mono. The
+                                               * operator setting for the
+                                               * whole card output (Paula
+                                               * and AX); scene index is
+                                               * ignored */
+
+#define ZZ9K_AUDIO_SEPARATION_MAX 100U
 
 #define ZZ9K_AUDIO_CEILING_MIN 1U
 #define ZZ9K_AUDIO_CEILING_MAX 4095U
@@ -1181,9 +1190,12 @@ typedef struct ZZ9KAudioStreamResultPayload {
 #define ZZ9K_AUDIO_SCENE_SAVE_QUEUED   3U /* started; watch state save_status */
 #define ZZ9K_AUDIO_SCENE_SAVE_BUSY     4U /* refused: a save is running */
 
-/* ZZ9K_OP_AUDIO_CONTROL_STATE_GET result flag: the current trim was
- * bounded by scene policy. */
+/* ZZ9K_OP_AUDIO_CONTROL_STATE_GET result flags: the current trim was
+ * bounded by scene policy, and the separation word is valid (firmware
+ * that predates stereo separation reports zero there with the flag
+ * clear). */
 #define ZZ9K_AUDIO_CONTROL_FLAG_TRIM_BOUNDED (1U << 0)
+#define ZZ9K_AUDIO_CONTROL_FLAG_SEPARATION   (1U << 1)
 
 typedef struct ZZ9KAudioSceneSelectPayload {
   uint8_t scene[4];
@@ -1270,8 +1282,10 @@ typedef struct ZZ9KAudioControlStateGetPayload {
  * balance words. ceiling is the enforced boundary in AX-equivalent
  * mixer units. ceiling_paula and ceiling_ax are the persisted per-card
  * clean ceilings; firmware derives Paula weight as ceiling_ax /
- * ceiling_paula and boundary as 3/4 of ceiling_ax. save_status stays
- * the append-only tail word and reports the save machine outcome. */
+ * ceiling_paula and boundary as 3/4 of ceiling_ax. separation is the
+ * stereo separation percent (0..100), valid when
+ * ZZ9K_AUDIO_CONTROL_FLAG_SEPARATION is set. save_status stays the
+ * append-only tail word and reports the save machine outcome. */
 typedef struct ZZ9KAudioControlStateResultPayload {
   uint8_t active_scene[4];
   uint8_t scene_count[4];
@@ -1281,7 +1295,8 @@ typedef struct ZZ9KAudioControlStateResultPayload {
   uint8_t flags[4];
   uint8_t ceiling_paula[4];
   uint8_t ceiling_ax[4];
-  uint8_t reserved[12];
+  uint8_t separation[4];
+  uint8_t reserved[8];
   uint8_t save_status[4];
 } ZZ9KAudioControlStateResultPayload;
 

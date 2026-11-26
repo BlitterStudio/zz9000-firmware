@@ -75,8 +75,10 @@ static uint16_t ctrl_scene_write(const uint8_t *params,
 	/* The stage call takes a slot index, so the full 32-bit scene
 	 * must be range-checked here for every scene-scoped param: a
 	 * truncating value (256 wraps to slot 0) would silently stage
-	 * into the wrong draft. BASELINE ignores the scene entirely. */
+	 * into the wrong draft. BASELINE and SEPARATION ignore the scene
+	 * entirely. */
 	if (param != SDK_AUDIO_SCENE_PARAM_BASELINE &&
+			param != SDK_AUDIO_SCENE_PARAM_SEPARATION &&
 			scene >= SDK_AUDIO_SCENE_COUNT)
 		return SDK_STATUS_BAD_REQUEST;
 	if ((flags & SDK_AUDIO_SCENE_WRITE_FLAG_COMMIT) != 0U &&
@@ -265,10 +267,12 @@ static uint16_t ctrl_state_get(const uint8_t *params,
 	sdk_put_be32(out->trim, SDK_AUDIO_BALANCE_PACK(state.trim_paula,
 		state.trim_ax));
 	sdk_put_be32(out->ceiling, state.ceiling);
-	sdk_put_be32(out->flags, state.trim_bounded ?
-		SDK_AUDIO_CONTROL_FLAG_TRIM_BOUNDED : 0U);
+	sdk_put_be32(out->flags, (state.trim_bounded ?
+		SDK_AUDIO_CONTROL_FLAG_TRIM_BOUNDED : 0U) |
+		SDK_AUDIO_CONTROL_FLAG_SEPARATION);
 	sdk_put_be32(out->ceiling_paula, state.ceiling_paula);
 	sdk_put_be32(out->ceiling_ax, state.ceiling_ax);
+	sdk_put_be32(out->separation, state.separation);
 	sdk_put_be32(out->save_status, state.save_status);
 	*result_len = (uint16_t)sizeof(*out);
 	return SDK_STATUS_OK;

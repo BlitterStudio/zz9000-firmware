@@ -935,6 +935,9 @@ static int audio_adau_load(int program_dsp) {
 				AUDIO_SCENE_DEFAULT_BASELINE_PAULA,
 				AUDIO_SCENE_DEFAULT_BASELINE_AX);
 		if (status == 0)
+			status = audio_adau_set_separation(
+				(int)AUDIO_SCENE_DEFAULT_SEPARATION);
+		if (status == 0)
 			status = audio_adau_limiter_apply_boot_threshold();
 		if (status != 0) {
 			printf("[adau] verified normal DSP load failed; "
@@ -1660,6 +1663,91 @@ int audio_adau_safe_prefactor(int pre, int substep)
 		return audio_adau_safeload_latch_result(
 			adau_write16(0x34, 0x081C, 0x003C));
 	return -1;
+}
+
+/*
+ * Stereo separation crossfeed (issue #255): the SepMixL/SepMixR 2x2
+ * matrix ahead of the master filter. Parameter order is the compiled
+ * contiguous group: own L, cross L, own R, cross R. The DSP image
+ * ships cross = -30 dB (the SigmaStudio knob floor), so the load
+ * path writes the exact value for the configured separation.
+ */
+static const uint16_t separation_addresses[4] = {
+	MOD_SEPMIXL_ALG0_STAGE0_VOLONE_ADDR,
+	MOD_SEPMIXL_ALG0_STAGE0_VOLTWO_ADDR,
+	MOD_SEPMIXR_ALG0_STAGE0_VOLONE_ADDR,
+	MOD_SEPMIXR_ALG0_STAGE0_VOLTWO_ADDR
+};
+
+static void audio_adau_separation_words(int percent,
+	uint8_t words[4][ADAU_PARAMETER_WORD_BYTES])
+{
+	unsigned p = (percent < 0) ? 0U : (unsigned)percent;
+	uint32_t own = audio_separation_own_q23(p);
+	uint32_t cross = audio_separation_cross_q23(p);
+
+	audio_q23_to_param_bytes(own, words[0]);
+	audio_q23_to_param_bytes(cross, words[1]);
+	audio_q23_to_param_bytes(own, words[2]);
+	audio_q23_to_param_bytes(cross, words[3]);
+}
+
+int audio_adau_set_separation(int percent)
+{
+	uint8_t words[4][ADAU_PARAMETER_WORD_BYTES];
+	int i;
+
+	printf("[sep] separation: %d%%\n", percent);
+	audio_adau_separation_words(percent, words);
+	for (i = 0; i < 4; i++) {
+		if (audio_adau_write_parameter(separation_addresses[i],
+				words[i]) != 0)
+			return -1;
+	}
+	return 0;
+}
+
+/* Live separation edit: stage all four words, latch once at a sample
+ * boundary so L' and R' never see a half-updated matrix, then verify.
+ * Substeps 0..3 stage word + address, 4 latches, 5..8 read back; one
+ * per service-loop poll. Returns 0 to continue, 1 when complete, -1
+ * on failure. */
+int audio_adau_separation_substep(int percent, int substep)
+{
+	static uint8_t expected[4][ADAU_PARAMETER_WORD_BYTES];
+	static int valid;
+	uint8_t buf[5];
+	uint8_t readback[ADAU_PARAMETER_WORD_BYTES];
+
+	if (substep < 0 || substep > 8)
+		return -1;
+	if (substep == 0) {
+		audio_adau_separation_words(percent, expected);
+		valid = 1;
+	} else if (!valid) {
+		return -1;
+	}
+	if (substep < 4) {
+		buf[0] = 0;
+		memcpy(&buf[1], expected[substep], ADAU_PARAMETER_WORD_BYTES);
+		if (adau_write40(0x34, 0x0810 + substep, buf) != 0 ||
+				adau_write16(0x34, 0x0815 + substep,
+					separation_addresses[substep]) != 0)
+			return -1;
+		return 0;
+	}
+	if (substep == 4)
+		return (adau_write16(0x34, 0x081C, 0x003C) != 0) ? -1 : 0;
+	if (adau_read32(0x34, separation_addresses[substep - 5],
+			readback) != 0 ||
+			!audio_adau_readback_matches(expected[substep - 5],
+				readback, ADAU_PARAMETER_WORD_BYTES))
+		return -1;
+	if (substep == 8) {
+		valid = 0;
+		return 1;
+	}
+	return 0;
 }
 
 double eq_alpha(double fs, double f0);

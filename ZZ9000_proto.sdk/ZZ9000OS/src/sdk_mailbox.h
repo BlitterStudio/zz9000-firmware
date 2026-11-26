@@ -650,6 +650,15 @@ typedef char SDKMediaSessionStatusResultPayload_must_be_48_bytes[
 #define SDK_AUDIO_SCENE_PARAM_CALIBRATION 17U /* per-card measured clean
                                                * ceilings: Paula low 16,
                                                * AX high 16; scene ignored */
+#define SDK_AUDIO_SCENE_PARAM_SEPARATION  18U /* stereo separation, 0..100
+                                               * percent: 100 is full
+                                               * stereo, 0 is mono. The
+                                               * operator setting for the
+                                               * whole card output (Paula
+                                               * and AX); scene index is
+                                               * ignored */
+
+#define SDK_AUDIO_SEPARATION_MAX 100U
 
 #define SDK_AUDIO_CEILING_MIN 1U
 #define SDK_AUDIO_CEILING_MAX 4095U
@@ -701,9 +710,12 @@ typedef char SDKMediaSessionStatusResultPayload_must_be_48_bytes[
 #define SDK_AUDIO_SCENE_SAVE_QUEUED   3U /* started; watch state save_status */
 #define SDK_AUDIO_SCENE_SAVE_BUSY     4U /* refused: a save is running */
 
-/* SDK_OP_AUDIO_CONTROL_STATE_GET result flag: the current trim was
- * bounded by scene policy. */
+/* SDK_OP_AUDIO_CONTROL_STATE_GET result flags: the current trim was
+ * bounded by scene policy, and the separation word is valid (firmware
+ * that predates stereo separation reports zero there with the flag
+ * clear). */
 #define SDK_AUDIO_CONTROL_FLAG_TRIM_BOUNDED (1U << 0)
+#define SDK_AUDIO_CONTROL_FLAG_SEPARATION   (1U << 1)
 
 struct SDKAudioSceneSelectPayload {
 	uint8_t scene[4];
@@ -783,7 +795,9 @@ struct SDKAudioControlStateGetPayload {
 /* active_scene is the current index; baseline and trim are packed
  * balance words. ceiling is the enforced boundary in AX-equivalent
  * mixer units. ceiling_paula and ceiling_ax are persisted measured
- * clean ceilings; save_status remains the append-only tail word. */
+ * clean ceilings. separation is the stereo separation percent
+ * (0..100), valid when SDK_AUDIO_CONTROL_FLAG_SEPARATION is set;
+ * save_status remains the append-only tail word. */
 struct SDKAudioControlStateResultPayload {
 	uint8_t active_scene[4];
 	uint8_t scene_count[4];
@@ -793,7 +807,8 @@ struct SDKAudioControlStateResultPayload {
 	uint8_t flags[4];
 	uint8_t ceiling_paula[4];
 	uint8_t ceiling_ax[4];
-	uint8_t reserved[12];
+	uint8_t separation[4];
+	uint8_t reserved[8];
 	uint8_t save_status[4];
 };
 

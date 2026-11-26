@@ -167,6 +167,20 @@ int audio_adau_set_mixer_leg(int leg, int value)
 	return fail_next_write ? -1 : 0;
 }
 
+int audio_adau_set_separation(int percent)
+{
+	record_write(WRITE_SEP, percent, 0);
+	return fail_next_write ? -1 : 0;
+}
+
+int audio_adau_separation_substep(int percent, int substep)
+{
+	record_write(WRITE_SEP_SUB, percent, substep);
+	if (fail_next_write)
+		return -1;
+	return substep == 8 ? 1 : 0;
+}
+
 /* ---- assertions (audio_convert_test convention) ---- */
 
 static int failures;
@@ -329,15 +343,20 @@ static void test_accepted_paths_route_through_scene(void)
 		a == 128 && b == 64;
 	check(ok, "commit stages mixer legs (AP_DSP_SET_VOLUMES)",
 		fmt("kind=%d v1=%d v2=%d", kind, a, b));
+	/* Stereo separation crossfeed (SepMix group): after the mixer. */
+	ok = log_at(14, &kind, &a, &b) && kind == WRITE_SEP &&
+		a == AUDIO_SCENE_DEFAULT_SEPARATION;
+	check(ok, "commit writes the stereo separation after the mixer",
+		fmt("kind=%d percent=%d", kind, a));
 	/* AP_DSP_SET_STEREO_VOLUME (22): the fade's restore */
-	ok = log_at(14, &kind, &a, &b) && kind == WRITE_VOLPAN &&
+	ok = log_at(15, &kind, &a, &b) && kind == WRITE_VOLPAN &&
 		a == 90 && b == 30;
 	check(ok, "commit restores output volume/pan last "
 		"(AP_DSP_SET_STEREO_VOLUME)",
 		fmt("kind=%d vol=%d pan=%d", kind, a, b));
-	check(write_count == 15,
-		"commit is exactly 15 ordered writes "
-		"(fade, params, restore)",
+	check(write_count == 16,
+		"commit is exactly 16 ordered writes "
+		"(fade, params, separation, restore)",
 		fmt("writes=%d", write_count));
 	check(audio_scene_gain_reduction_events() == 0,
 		"within-boundary apply emits no event", NULL);
@@ -385,8 +404,8 @@ static void test_accepted_paths_route_through_scene(void)
 	clear_writes();
 	check(audio_scene_select(4) == 0, "retry accepted", NULL);
 	pump_scene();
-	check(write_count == 15,
-		"retry applies the full 15-write sequence",
+	check(write_count == 16,
+		"retry applies the full 16-write sequence",
 		fmt("writes=%d", write_count));
 }
 
@@ -850,7 +869,7 @@ static void test_boot_apply_order(void)
 	check(audio_scene_apply_after_dsp_init() == 0,
 		"apply after DSP init succeeds", NULL);
 
-	check(write_count == 17, "init defaults plus one scene commit",
+	check(write_count == 18, "init defaults plus one scene commit",
 		fmt("writes=%d", write_count));
 	ok = log_at(0, &kind, &a, &b) && kind == WRITE_LPF && a == 23900 &&
 		log_at(1, &kind, &a, &b) && kind == WRITE_MIXER &&
@@ -872,9 +891,11 @@ static void test_boot_apply_order(void)
 		a == AUDIO_SCENE_DEFAULT_BASELINE_PAULA &&
 		b == AUDIO_SCENE_DEFAULT_BASELINE_AX;
 	ok = ok && log_at(base + 14, &kind, &a, &b) &&
+		kind == WRITE_SEP && a == AUDIO_SCENE_DEFAULT_SEPARATION;
+	ok = ok && log_at(base + 15, &kind, &a, &b) &&
 		kind == WRITE_VOLPAN && a == 100 && b == 50;
 	check(ok, "scene commit: fade, LPF, EQ 0..9, prefactor, mixer, "
-		"restore", NULL);
+		"separation, restore", NULL);
 	check(audio_scene_gain_reduction_events() == 0,
 		"telemetry counters reset with DSP re-init", NULL);
 	check(audio_scene_authority_active() == 1 &&
@@ -900,7 +921,7 @@ static void test_boot_apply_order(void)
 		AUDIO_SCENE_DEFAULT_BASELINE_AX);
 	check(audio_scene_apply_after_dsp_init() == 0,
 		"warm-reset re-apply succeeds", NULL);
-	base = write_count - 15;
+	base = write_count - 16;
 	ok = log_at(base, &kind, &a, &b) && kind == WRITE_VOLPAN &&
 		a == 0 && b == 50;
 	ok = ok && log_at(base + 1, &kind, &a, &b) &&
@@ -915,6 +936,8 @@ static void test_boot_apply_order(void)
 		a == AUDIO_SCENE_DEFAULT_BASELINE_PAULA &&
 		b == AUDIO_SCENE_DEFAULT_BASELINE_AX;
 	ok = ok && log_at(base + 14, &kind, &a, &b) &&
+		kind == WRITE_SEP && a == AUDIO_SCENE_DEFAULT_SEPARATION;
+	ok = ok && log_at(base + 15, &kind, &a, &b) &&
 		kind == WRITE_VOLPAN && a == 80 && b == 50;
 	check(ok, "warm reset re-applies active scene with neutral trim",
 		fmt("base=%d writes=%d", base, write_count));
@@ -1021,7 +1044,7 @@ static void test_runtime_dsp_reload_keeps_trims(void)
 		audio_scene_reapply_after_dsp_reload() == 0,
 		"reapply after runtime DSP reload succeeds", NULL);
 	base = 2;
-	ok = write_count == base + 15 &&
+	ok = write_count == base + 16 &&
 		log_at(base, &kind, &a, &b) && kind == WRITE_VOLPAN && a == 0;
 	ok = ok && log_at(base + 1, &kind, &a, &b) && kind == WRITE_LPF;
 	for (i = 0; ok && i < AUDIO_SCENE_EQ_BANDS; i++)
@@ -1030,7 +1053,9 @@ static void test_runtime_dsp_reload_keeps_trims(void)
 	ok = ok && log_at(base + 12, &kind, &a, &b) && kind == WRITE_PREF;
 	ok = ok && log_at(base + 13, &kind, &a, &b) &&
 		kind == WRITE_MIXER && a == 108 && b == 108;
-	ok = ok && log_at(base + 14, &kind, &a, &b) && kind == WRITE_VOLPAN;
+	ok = ok && log_at(base + 14, &kind, &a, &b) && kind == WRITE_SEP &&
+		a == AUDIO_SCENE_DEFAULT_SEPARATION;
+	ok = ok && log_at(base + 15, &kind, &a, &b) && kind == WRITE_VOLPAN;
 	check(ok, "reload replays the full scene with the owner trim kept",
 		fmt("writes=%d", write_count));
 	audio_scene_trim_release(AUDIO_SCENE_OWNER_SDK);
@@ -1290,7 +1315,7 @@ static void test_dispatch_does_not_block(void)
 		"select issued zero DSP writes before any poll",
 		fmt("writes=%d", write_count));
 	pump_scene();
-	check(write_count == 15,
+	check(write_count == 16,
 		"poll drains the machine into one full commit sequence",
 		fmt("writes=%d", write_count));
 
@@ -1303,7 +1328,7 @@ static void test_dispatch_does_not_block(void)
 		"scene write issued zero DSP writes before any poll",
 		fmt("writes=%d", write_count));
 	pump_scene();
-	check(write_count == 15,
+	check(write_count == 16,
 		"poll drains the write commit",
 		fmt("writes=%d", write_count));
 
@@ -1755,6 +1780,98 @@ static void test_fast_commit_failure_keeps_diff(void)
 }
 
 /*
+ * Stereo separation (issue #255): an operator setting like the
+ * baseline. A staged commit runs the differential machine and writes
+ * only the four-word crossfeed group (nine safeload substeps); a
+ * full commit (boot, reload) writes the live value directly after the
+ * mixer; a failed machine restores the live value and keeps the
+ * staged one for the retry.
+ */
+static void test_separation(void)
+{
+	struct audio_scene_control_state state;
+	int kind = 0, a = 0, b = 0;
+	int i;
+	int ok;
+
+	audio_scene_init();
+	install_legacy_mixer();
+	check(audio_scene_separation() == AUDIO_SCENE_DEFAULT_SEPARATION &&
+		AUDIO_SCENE_DEFAULT_SEPARATION == 100,
+		"separation defaults to full stereo",
+		fmt("sep=%u", audio_scene_separation()));
+
+	clear_writes();
+	check(audio_scene_stage_param(5, SDK_AUDIO_SCENE_PARAM_SEPARATION,
+		70) == 0, "stage separation", NULL);
+	check(audio_scene_separation() == 100,
+		"staged separation is not live before the commit", NULL);
+	check(audio_scene_commit_staged(0) == 0, "commit separation", NULL);
+	pump_scene();
+	ok = write_count == 9;
+	for (i = 0; ok && i < 9; i++)
+		ok = log_at(i, &kind, &a, &b) && kind == WRITE_SEP_SUB &&
+			a == 70 && b == i;
+	check(ok, "separation commit is one nine-substep safeload group",
+		fmt("writes=%d", write_count));
+	check(audio_scene_separation() == 70, "separation commit lands",
+		fmt("sep=%u", audio_scene_separation()));
+	audio_scene_control_state(&state);
+	check(state.separation == 70, "control state reports separation",
+		fmt("sep=%u", state.separation));
+
+	clear_writes();
+	check(audio_scene_stage_param(0, SDK_AUDIO_SCENE_PARAM_SEPARATION,
+		70) == 0 && audio_scene_commit_staged(0) == 0,
+		"restage the applied separation", NULL);
+	pump_scene();
+	check(write_count == 0, "unchanged separation issues no DSP write",
+		fmt("writes=%d", write_count));
+
+	check(audio_scene_stage_param(0, SDK_AUDIO_SCENE_PARAM_SEPARATION,
+		101) == -1, "separation above 100 rejected", NULL);
+	check(audio_scene_set_separation(101) == -1 &&
+		audio_scene_separation() == 70,
+		"immediate setter rejects above 100", NULL);
+
+	clear_writes();
+	check(audio_scene_set_separation(0) == 0, "set separation 0", NULL);
+	pump_scene();
+	check(write_count == 9 && audio_scene_separation() == 0 &&
+		last_write(WRITE_SEP_SUB, &a, &b) && a == 0 && b == 8,
+		"mono setting writes the group",
+		fmt("writes=%d sep=%u", write_count, audio_scene_separation()));
+
+	clear_writes();
+	check(audio_scene_quiescent() &&
+		audio_scene_reapply_after_dsp_reload() == 0,
+		"reapply after DSP reload", NULL);
+	ok = last_write(WRITE_SEP, &a, &b) && a == 0 &&
+		count_writes(WRITE_SEP) == 1 && count_writes(WRITE_SEP_SUB) == 0;
+	check(ok, "reload writes the configured separation directly",
+		fmt("sep writes=%d", count_writes(WRITE_SEP)));
+
+	check(audio_scene_stage_param(0, SDK_AUDIO_SCENE_PARAM_SEPARATION,
+		30) == 0, "stage 30 before a failing commit", NULL);
+	check(!audio_scene_quiescent(),
+		"a staged separation keeps the module non-quiescent", NULL);
+	fail_next_write = 1;
+	check(audio_scene_commit_staged(0) == 0, "failing commit dispatches",
+		NULL);
+	pump_scene();
+	check(audio_scene_separation() == 0,
+		"failed machine restores the live separation",
+		fmt("sep=%u", audio_scene_separation()));
+	fail_next_write = 0;
+	clear_writes();
+	check(audio_scene_commit_staged(0) == 0, "retry accepted", NULL);
+	pump_scene();
+	check(audio_scene_separation() == 30 && write_count == 9,
+		"retry lands the staged separation",
+		fmt("sep=%u writes=%d", audio_scene_separation(), write_count));
+}
+
+/*
  * Scene names (SCENE_WRITE param NAME): the label stages as two-char
  * chunks, never joins the DSP write set, and its accumulator restarts
  * per rename.
@@ -1914,6 +2031,7 @@ int main(void)
 	test_fast_commit_diff();
 	test_fast_commit_failure_keeps_diff();
 	test_name_staging();
+	test_separation();
 
 	if (failures == 0) {
 		printf("audio_scene_test: all tests passed\n");

@@ -10,7 +10,7 @@
  * compiled signal graph changes; this is a bench identity, not the
  * firmware or coordinated release version.
  */
-#define ZZ_AUDIO_CAPTURE_CANDIDATE_BUILD_ID 0xa205U
+#define ZZ_AUDIO_CAPTURE_CANDIDATE_BUILD_ID 0xa206U
 #define ZZ_AUDIO_CODEC_SERIAL_TDM8_SLOT01   0x0c22U
 #define ZZ_AUDIO_CODEC_MP_CONTROL           0x444444U
 #define ZZ_AUDIO_CODEC_CORE_LOADING         0x0018U
@@ -129,5 +129,13 @@ int audio_adau_safe_param_substep(uint16_t address,
 int audio_adau_safe_mixer_leg(int leg, int value, int substep);
 int audio_adau_safe_vol_pan_side(int side, int vol, int pan, int substep);
 int audio_adau_safe_prefactor(int pre, int substep);
+
+/* percent range: 0 = mono .. 100 = full stereo (identity). The four
+ * crossfeed words sit in one contiguous parameter group: the direct
+ * setter is for the faded full commit, the substep form stages all
+ * four into the safeload slots, latches once and verifies (9 steps),
+ * returning 1 when complete like the EQ and LPF sequences. */
+int audio_adau_set_separation(int percent);
+int audio_adau_separation_substep(int percent, int substep);
 
 #endif

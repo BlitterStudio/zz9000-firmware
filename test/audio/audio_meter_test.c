@@ -85,6 +85,13 @@ int audio_adau_set_mixer_leg(int leg, int value)
 	(void)leg; (void)value; return 0;
 }
 
+int audio_adau_set_separation(int percent) { (void)percent; return 0; }
+int audio_adau_separation_substep(int percent, int substep)
+{
+	(void)percent;
+	return substep == 8 ? 1 : 0;
+}
+
 /* ---- assertions (suite convention) ---- */
 
 static int failures;

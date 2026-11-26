@@ -205,6 +205,9 @@ typedef char audio_control_paula_ceiling_is_append_only[
 typedef char audio_control_ax_ceiling_is_append_only[
   (offsetof(ZZ9KAudioControlStateResultPayload, ceiling_ax) == 28U) ? 1 : -1
 ];
+typedef char audio_control_separation_is_append_only[
+  (offsetof(ZZ9KAudioControlStateResultPayload, separation) == 32U) ? 1 : -1
+];
 
 typedef char audio_ring_acquire_payload_is_48_bytes[
   (sizeof(ZZ9KAudioRingAcquirePayload) == 48U) ? 1 : -1
@@ -509,6 +512,10 @@ int main(void)
   if (ZZ9K_AUDIO_CALIBRATION_PACK(48U, 80U) != 0x00500030U) return 120;
   if (ZZ9K_AUDIO_CALIBRATION_PAULA(0x00500030U) != 48U) return 121;
   if (ZZ9K_AUDIO_CALIBRATION_AX(0x00500030U) != 80U) return 122;
+  if (ZZ9K_AUDIO_SCENE_PARAM_SEPARATION != 18U) return 162;
+  if (ZZ9K_AUDIO_SEPARATION_MAX != 100U) return 163;
+  if (ZZ9K_AUDIO_CONTROL_FLAG_TRIM_BOUNDED != 1U ||
+      ZZ9K_AUDIO_CONTROL_FLAG_SEPARATION != 2U) return 164;
   if (ZZ9K_AUDIO_STREAM_STATE_STREAMING == ZZ9K_AUDIO_STREAM_STATE_DONE) {
     return 46;
   }

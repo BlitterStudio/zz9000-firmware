@@ -80,6 +80,9 @@ static uint8_t baseline_paula = AUDIO_SCENE_DEFAULT_BASELINE_PAULA;
 static uint8_t baseline_ax = AUDIO_SCENE_DEFAULT_BASELINE_AX;
 static uint16_t ceiling_paula = AUDIO_SCENE_DEFAULT_CEILING_PAULA;
 static uint16_t ceiling_ax = AUDIO_SCENE_DEFAULT_CEILING_AX;
+/* Stereo separation percent: an operator setting like the baseline,
+ * not part of a scene; it applies to the whole card output. */
+static uint8_t separation = AUDIO_SCENE_DEFAULT_SEPARATION;
 
 struct trim_state {
 	int16_t paula;
@@ -108,6 +111,8 @@ static int baseline_staged;
 static uint16_t staged_ceiling_paula;
 static uint16_t staged_ceiling_ax;
 static int calibration_staged;
+static uint8_t staged_separation;
+static int separation_staged;
 
 /* ---- incremental commit machine (P1: the dispatch path never
  * blocks on I2C) ---- */
@@ -146,6 +151,7 @@ enum commit_phase {
 	COMMIT_EQ,           /* eq_band in flight, 0..9 */
 	COMMIT_PREF,
 	COMMIT_MIXER,        /* snapshot mixer legs */
+	COMMIT_SEPARATION,   /* stereo separation crossfeed */
 	COMMIT_RESTORE,      /* resolved output volume back up */
 	COMMIT_ABORT_RESTORE, /* best-effort restore after a failed step */
 	COMMIT_DONE           /* terminal: finish (and chain a pending) */
@@ -188,6 +194,7 @@ static struct audio_scene_def last_applied_scene;
 static int last_applied_vol;  /* resolved (possibly reduced) volume */
 static int last_applied_pan;
 static int last_applied_valid;
+static uint8_t last_applied_separation;
 
 /* One differential todo entry: a DSP setter call with its arguments. */
 enum fast_op {
@@ -197,7 +204,8 @@ enum fast_op {
 	FAST_MIXER_P, /* audio_adau_set_mixer_leg(0, a) - Paula */
 	FAST_MIXER_A, /* audio_adau_set_mixer_leg(1, a) - AX */
 	FAST_VOLPAN_L, /* audio_adau_set_vol_pan_side(0, a, b) */
-	FAST_VOLPAN_R  /* audio_adau_set_vol_pan_side(1, a, b) */
+	FAST_VOLPAN_R, /* audio_adau_set_vol_pan_side(1, a, b) */
+	FAST_SEPARATION /* audio_adau_separation_substep(a, sub) */
 };
 
 struct fast_step {
@@ -227,6 +235,8 @@ struct staged_rollback {
 	int calibration_saved;
 	uint16_t ceiling_paula;
 	uint16_t ceiling_ax;
+	int separation_saved;
+	uint8_t separation;
 };
 
 /*
@@ -278,6 +288,10 @@ static void rollback_merge(struct staged_rollback *old,
 		old->ceiling_paula = newer->ceiling_paula;
 		old->ceiling_ax = newer->ceiling_ax;
 	}
+	if (!old->separation_saved && newer->separation_saved) {
+		old->separation_saved = 1;
+		old->separation = newer->separation;
+	}
 }
 
 
@@ -303,6 +317,10 @@ static void rollback_restore(struct staged_rollback *rb)
 		ceiling_paula = rb->ceiling_paula;
 		ceiling_ax = rb->ceiling_ax;
 		calibration_staged = 1;
+	}
+	if (rb->separation_saved) {
+		separation = rb->separation;
+		separation_staged = 1; /* staged value returns for the retry */
 	}
 	rb->valid = 0;
 }
@@ -571,6 +589,7 @@ struct commit_machine {
 	struct audio_scene_def scene;  /* snapshot: tables may change */
 	struct volume_resolution vol;  /* resolved at machine start */
 	struct mixer_stage stage;      /* composed at machine start */
+	uint8_t separation;            /* stereo separation at machine start */
 	int failed;
 	int fast;          /* differential mode: todo list, no fade */
 	struct fast_step todo[224]; /* worst: full diff + 99-step ramp */
@@ -582,16 +601,18 @@ struct commit_machine {
 static struct commit_machine commit;
 
 /* Record the state a successful machine leaves on the DSP: the scene
- * definition, its resolved output volume/pan, and the mixer legs --
- * the baseline the next differential commit diffs against. */
+ * definition, its resolved output volume/pan, the mixer legs and the
+ * stereo separation -- the baseline the next differential commit
+ * diffs against. */
 static void fast_record_applied(const struct audio_scene_def *scene,
 	const struct volume_resolution *vol,
-	const struct mixer_stage *stage)
+	const struct mixer_stage *stage, uint8_t applied_separation)
 {
 	last_applied_scene = *scene;
 	last_applied_vol = vol->applied_volume;
 	last_applied_pan = scene->pan;
 	last_mixer_stage = *stage;
+	last_applied_separation = applied_separation;
 	last_applied_valid = 1;
 }
 
@@ -641,6 +662,11 @@ static void fast_todo_build(void)
 	if (all || commit.stage.ax != last_mixer_stage.ax) {
 		todo[n].op = FAST_MIXER_A;
 		todo[n].a = commit.stage.ax;
+		n++;
+	}
+	if (all || commit.separation != last_applied_separation) {
+		todo[n].op = FAST_SEPARATION;
+		todo[n].a = commit.separation;
 		n++;
 	}
 	if (all || commit.vol.applied_volume != last_applied_vol ||
@@ -725,6 +751,7 @@ static void commit_begin(uint8_t index, int fast)
 			commit.vol.applied_level);
 	compute_mixer_stage(commit.vol.chain_linear * commit.vol.linear,
 		&commit.stage);
+	commit.separation = separation;
 	if (commit.stage.bounded)
 		emit_gain_reduction(commit.stage.requested,
 			commit.stage.applied);
@@ -778,7 +805,8 @@ static void commit_finish(void)
 	 * diff against the state before the failure. The machine's own
 	 * rollback record settles with it; a queued record belongs to
 	 * the follow-up machine alone. */
-	fast_record_applied(&commit.scene, &commit.vol, &commit.stage);
+	fast_record_applied(&commit.scene, &commit.vol, &commit.stage,
+		commit.separation);
 	rollbacks[RB_RUNNING].valid = 0; /* its staged edits are applied */
 	if (pending_valid &&
 		(pending_target != commit.scene_index || pending_dirty)) {
@@ -876,6 +904,14 @@ static void commit_step(void)
 			rc = (r == 1) ? 0 : -1;
 			break;
 		}
+		case FAST_SEPARATION: {
+			int r = audio_adau_separation_substep(step->a,
+				commit.todo[commit.todo_next].sub++);
+			if (r == 0)
+				return;
+			rc = (r == 1) ? 0 : -1;
+			break;
+		}
 		default: {
 			int r = audio_adau_safe_vol_pan_side(1, step->a,
 				step->b,
@@ -928,6 +964,10 @@ static void commit_step(void)
 	case COMMIT_MIXER:
 		rc = audio_adau_set_mixer_vol(commit.stage.paula,
 			commit.stage.ax);
+		commit.phase = COMMIT_SEPARATION;
+		break;
+	case COMMIT_SEPARATION:
+		rc = audio_adau_set_separation(commit.separation);
 		commit.phase = COMMIT_RESTORE;
 		break;
 	case COMMIT_RESTORE:
@@ -1554,6 +1594,8 @@ void audio_scene_init(void)
 	memset(staging, 0, sizeof(staging));
 	baseline_staged = 0;
 	calibration_staged = 0;
+	separation = AUDIO_SCENE_DEFAULT_SEPARATION;
+	separation_staged = 0;
 	commit_in_progress = 0;
 	commit_stepping = 0;
 	memset(&commit, 0, sizeof(commit));
@@ -1577,7 +1619,7 @@ void audio_scene_init(void)
 		resolve_output_volume(&scenes[active_scene_index], &vol);
 		compute_mixer_stage(vol.chain_linear * vol.linear, &stage);
 		fast_record_applied(&scenes[active_scene_index], &vol,
-			&stage);
+			&stage, separation);
 	}
 	gain_reduction_count = 0;
 	have_last_gain_reduction = 0;
@@ -1616,6 +1658,7 @@ int audio_scene_apply_after_dsp_init(void)
 	memset(staging, 0, sizeof(staging));
 	baseline_staged = 0;
 	calibration_staged = 0;
+	separation_staged = 0;
 	meter_reset_all();
 	/* The reset path has no client waiting on the reply, so the
 	 * machine runs synchronously to its terminal state here. */
@@ -1629,7 +1672,7 @@ int audio_scene_quiescent(void)
 	return module_initialized && !limiter_bench.active &&
 		!commit_in_progress && !pending_valid &&
 		save.phase == SAVE_IDLE && !baseline_staged &&
-		!calibration_staged;
+		!calibration_staged && !separation_staged;
 }
 
 int audio_scene_reapply_after_dsp_reload(void)
@@ -1771,6 +1814,29 @@ uint8_t audio_scene_baseline_ax(void)
 	return baseline_ax;
 }
 
+int audio_scene_set_separation(uint8_t percent)
+{
+	if (!module_initialized || percent > SDK_AUDIO_SEPARATION_MAX)
+		return -1;
+	separation = percent;
+	/* A live edit: the differential machine writes the crossfeed
+	 * group only. */
+	if (commit_in_progress) {
+		pending_valid = 1;
+		pending_target = active_scene_index;
+		pending_dirty = 1;
+		pending_fast = 1;
+		return 0;
+	}
+	commit_begin(active_scene_index, 1);
+	return 0;
+}
+
+uint8_t audio_scene_separation(void)
+{
+	return separation;
+}
+
 int audio_scene_set_calibration(uint16_t new_ceiling_paula,
 	uint16_t new_ceiling_ax)
 {
@@ -1839,6 +1905,15 @@ int audio_scene_stage_param(uint8_t index, uint32_t param,
 		staged_ceiling_paula = (uint16_t)paula;
 		staged_ceiling_ax = (uint16_t)ax;
 		calibration_staged = 1;
+		return 0;
+	}
+	if (param == SDK_AUDIO_SCENE_PARAM_SEPARATION) {
+		/* Operator setting for the whole card output: a global, so
+		 * the scene index is ignored; it joins the next commit. */
+		if (value > SDK_AUDIO_SEPARATION_MAX)
+			return -1;
+		staged_separation = (uint8_t)value;
+		separation_staged = 1;
 		return 0;
 	}
 	if (index >= AUDIO_SCENE_COUNT)
@@ -1977,6 +2052,13 @@ int audio_scene_commit_staged(uint8_t index)
 		calibration_staged = 0;
 		apply = 1;
 	}
+	if (separation_staged) {
+		capture.separation_saved = 1;
+		capture.separation = separation;
+		separation = staged_separation;
+		separation_staged = 0;
+		apply = 1;
+	}
 	if (staging[index].has_draft) {
 		/* Stage-time validation keeps every draft a valid scene. */
 		capture.scene_saved[index] = 1;
@@ -2028,6 +2110,7 @@ void audio_scene_control_state(struct audio_scene_control_state *out)
 	out->ceiling = (uint32_t)audio_scene_enforced_boundary();
 	out->ceiling_paula = ceiling_paula;
 	out->ceiling_ax = ceiling_ax;
+	out->separation = separation;
 	out->save_status = (uint32_t)audio_scene_save_status();
 }
 
@@ -2057,6 +2140,9 @@ static int audio_scene_emit_keys(char *buf, unsigned size, int off)
 	if (off < 0) return -1;
 	off = appendf(buf, size, off, "audio_baseline = %u\n",
 		((unsigned)baseline_paula << 8) | (unsigned)baseline_ax);
+	if (off < 0) return -1;
+	off = appendf(buf, size, off, "audio_separation = %u\n",
+		(unsigned)separation);
 	if (off < 0) return -1;
 	if (c->audio_limiter_present) {
 		off = appendf(buf, size, off, "audio_limiter = %u\n",
@@ -2248,6 +2334,8 @@ void audio_scene_load_config(void)
 	else {
 		audio_scene_baseline_apply_parity_default();
 	}
+	if (c->audio_separation_present)
+		separation = c->audio_separation;
 }
 
 

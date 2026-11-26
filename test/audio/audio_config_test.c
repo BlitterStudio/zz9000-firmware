@@ -94,6 +94,13 @@ int audio_adau_set_mixer_leg(int leg, int value)
 	(void)leg; (void)value; return 0;
 }
 
+int audio_adau_set_separation(int percent) { (void)percent; return 0; }
+int audio_adau_separation_substep(int percent, int substep)
+{
+	(void)percent;
+	return substep == 8 ? 1 : 0;
+}
+
 /* ---- assertions (suite convention) ---- */
 
 static int failures;
@@ -444,6 +451,7 @@ static void test_save_roundtrip(void)
 	check(audio_scene_set_calibration(512, 1024) == 0,
 		"calibration set", NULL);
 	check(audio_scene_set_baseline(140, 70) == 0, "baseline set", NULL);
+	check(audio_scene_set_separation(70) == 0, "separation set", NULL);
 
 	check(save_scene_sync(0) == AUDIO_SCENE_SAVE_OK, "save succeeds",
 		NULL);
@@ -462,10 +470,20 @@ static void test_save_roundtrip(void)
 		"save includes calibration keys", NULL);
 	check(strstr(saved, "audio_limiter = ") == NULL,
 		"save omits an absent limiter key", NULL);
+	check(strstr(saved, "audio_separation = 70\n") != NULL,
+		"save includes the separation key", NULL);
 	/* The saved text must reparse into the same state. */
 	zz_config_reset();
-	check(zz_config_parse(saved, (unsigned)len) == 145,
+	check(zz_config_parse(saved, (unsigned)len) == 146,
 		"every key line accepted on reparse", NULL);
+	check(zz_config_get()->audio_separation_present &&
+		zz_config_get()->audio_separation == 70,
+		"separation reparses", NULL);
+	audio_scene_init();
+	audio_scene_load_config();
+	check(audio_scene_separation() == 70,
+		"saved separation loads back into the scene state",
+		fmt("sep=%u", audio_scene_separation()));
 	audio_scene_init();
 	audio_scene_load_config();
 
@@ -727,7 +745,7 @@ static void test_save_budget(void)
 
 	zz_config_reset();
 	check(saved != NULL &&
-		zz_config_parse(saved, (unsigned)len) == 145,
+		zz_config_parse(saved, (unsigned)len) == 146,
 		"widest file reparses with every key accepted", NULL);
 }
 

@@ -17,8 +17,18 @@ this 48 kHz domain is described in
 
 The production graph routes physical left RCA / ADC0 to `Output5` / `DIG0`
 and physical right RCA / ADC1 to `Output6` / `DIG1`. It combines ADC/Paula
-stereo and FPGA playback in `St Mixer1`, then applies low-pass filtering,
-prefactor, equalizer, volume/pan, the limiter, and `DAC0` / `DAC1`.
+stereo and FPGA playback in `St Mixer1`, then applies the stereo separation
+crossfeed (`SepMixL` / `SepMixR`), low-pass filtering, prefactor, equalizer,
+volume/pan, the limiter, and `DAC0` / `DAC1`.
+
+The crossfeed is a 2x2 matrix, `L' = own*L + cross*R` and `R' = own*R +
+cross*L` with `own = (1+s)/2` and `cross = (1-s)/2` for a separation `s` of 0
+to 1. The gains sum to one, so the matrix adds no peak and needs no headroom.
+The image ships with `own` at 0 dB and `cross` at the SigmaStudio knob floor of
+-30 dB; firmware writes the exact words (parameters 4 to 7) at every load,
+reload and edit. `ZZ9K_AUDIO_SCENE_PARAM_SEPARATION` and the `audio_separation`
+key in `ZZ9000.CFG` set it. Regenerating the image after this stage shifted
+every later parameter address by four.
 
 The capture taps precede the mixer and master scene chain. Recording therefore
 receives the physical inputs without FPGA playback feeding back into capture.

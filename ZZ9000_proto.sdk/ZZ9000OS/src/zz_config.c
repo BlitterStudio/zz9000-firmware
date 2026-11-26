@@ -476,6 +476,13 @@ static int apply_key(const char *key, const char *value) {
 		cfg.audio_baseline_present = 1;
 		return 0;
 	}
+	if (token_eq(key, "audio_separation")) {
+		long v = parse_uint(value);
+		if (v < 0 || v > ZZ_CFG_AUDIO_SEPARATION_MAX) return -1;
+		cfg.audio_separation = (uint8_t)v;
+		cfg.audio_separation_present = 1;
+		return 0;
+	}
 	if (token_eq(key, "audio_limiter")) {
 		long v = parse_uint(value);
 		if (v < ZZ_CFG_AUDIO_LIMITER_MIN ||
