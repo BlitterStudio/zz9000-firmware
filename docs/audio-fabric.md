@@ -391,8 +391,17 @@ lock. MP3 keeps all its state in the stream session and shares nothing.
 
 The resampler accepts 8000, 11025, 12000, 16000, 22050, 24000, 32000,
 44100, 48000, 88200 and 96000 Hz. Compressed streams at 176400 and
-192000 Hz are reduced by two before resampling. PCM FIFO allocations
-are made on first use and freed outside the ISR.
+192000 Hz are reduced by two before resampling.
+
+A codec lease's decoder memory is allocated on first use and freed outside
+the ISR. The FIFO block, every libFLAC allocation and every Tremor arena
+region belong to one card-pool owner, `SDK_AUDIO_LEASE_DECODE_OWNER`
+(MEDIA instance `0xfffffd`, documented with the other MEDIA owners in
+`sdk_compression.h`). A core-1 reset reclaims the shared core-1 decode heap
+(`SDK_DECODE_POOL_OWNER`) and the app decoder owners, so it leaves a running
+lease and its decoded audio untouched. The lease's memory is released when
+the lease ends, on release, revocation and an Amiga reset, and the owner
+is not used by any app serial, video session or module id.
 
 ## Instrument build
 

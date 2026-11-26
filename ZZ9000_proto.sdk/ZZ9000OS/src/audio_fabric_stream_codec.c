@@ -4,6 +4,7 @@
 #include "audio_fabric.h"
 #include "audio_fabric_codec.h"
 #include "sdk_audio_stream.h"
+#include "card_pool.h"
 #include "sdk_compression.h"
 #include "xil_cache.h"
 
@@ -29,6 +30,20 @@ static struct lease_decoder *decoder(uint32_t slot)
 	return &decoders[slot - AUDIO_FABRIC_SLOT_MAILBOX];
 }
 
+/* The FIFO block and every backend allocation (libFLAC through the decode
+ * heap wrapper, Tremor's arena regions) belong to this owner, never to the
+ * core-1 shared decode heap that a core-1 reset reclaims. */
+#define LEASE_OWNER SDK_AUDIO_LEASE_DECODE_OWNER
+
+static void storage_free(struct lease_decoder *d)
+{
+	if (d->storage != NULL)
+		(void)card_pool_free(&card_pool, (uint32_t)(uintptr_t)d->storage,
+		                     LEASE_OWNER);
+	d->storage = NULL;
+	d->capacity = 0U;
+}
+
 static void release_decoder(struct SDKAudioStream *s)
 {
 	if (s->codec == SDK_AUDIO_CODEC_FLAC)
@@ -43,10 +58,7 @@ static void codec_end(uint32_t slot)
 	struct lease_decoder *d = decoder(slot);
 
 	release_decoder(&d->stream);
-	if (d->storage != NULL)
-		sdk_decode_heap_free(d->storage);
-	d->storage = NULL;
-	d->capacity = 0U;
+	storage_free(d);
 }
 
 static void codec_begin(uint32_t slot, uint32_t codec, uint32_t param)
@@ -62,9 +74,9 @@ static void codec_begin(uint32_t slot, uint32_t codec, uint32_t param)
 	release_decoder(s);
 	/* Keep the FIFO allocation across a restart of the same geometry. */
 	if (d->capacity != capacity) {
-		if (d->storage != NULL)
-			sdk_decode_heap_free(d->storage);
-		d->storage = sdk_decode_heap_alloc(capacity);
+		storage_free(d);
+		d->storage = (uint8_t *)(uintptr_t)card_pool_alloc(
+			&card_pool, capacity, LEASE_OWNER);
 		d->capacity = d->storage != NULL ? capacity : 0U;
 	}
 	memset(s, 0, sizeof(*s));
@@ -85,12 +97,15 @@ static void codec_begin(uint32_t slot, uint32_t codec, uint32_t param)
 		audio_stream_set_format(s, param != 0U ? param : 44100U, 2U);
 	} else {
 		(void)audio_reduce_request(&s->reduce, 96000U, 0U);
-		if (codec == SDK_AUDIO_CODEC_FLAC)
+		if (codec == SDK_AUDIO_CODEC_FLAC) {
 			sdk_flac_init(&s->flac, s->sample_format);
-		else if (codec == SDK_AUDIO_CODEC_VORBIS)
+			s->flac.pool_owner = LEASE_OWNER;
+		} else if (codec == SDK_AUDIO_CODEC_VORBIS) {
 			sdk_vorbis_init(&s->vorbis, s->sample_format);
-		else
+			s->vorbis.heap.pool_owner = LEASE_OWNER;
+		} else {
 			mp3dec_init(&s->decoder);
+		}
 		s->backend_starved = codec != SDK_AUDIO_CODEC_MP3;
 	}
 }

@@ -221,6 +221,7 @@ C_SRCS = \
 	$(SRC_DIR)/audio_fabric.c \
 	$(SRC_DIR)/audio_fabric_lease.c \
 	$(SRC_DIR)/audio_fabric_stream_codec.c \
+	$(SRC_DIR)/sdk_decode_owners.c \
 	$(SRC_DIR)/audio_voice.c \
 	$(SRC_DIR)/audio_voice_session.c \
 	$(SRC_DIR)/audio_capture.c \
