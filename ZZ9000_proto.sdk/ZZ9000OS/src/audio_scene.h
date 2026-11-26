@@ -27,6 +27,11 @@
 #define AUDIO_SCENE_DEFAULT_BASELINE_PAULA 36U
 #define AUDIO_SCENE_DEFAULT_BASELINE_AX    72U
 
+/* Stereo separation: 100 is full stereo (the DSP crossfeed is the
+ * identity), 0 mixes both channels to mono. Applies to everything the
+ * card outputs, Paula and AX alike. */
+#define AUDIO_SCENE_DEFAULT_SEPARATION 100U
+
 /* Fixed scene slots; the name is a user label carried alongside the
  * master-chain assignment (it never reaches the DSP). */
 #define AUDIO_SCENE_COUNT 8
@@ -152,6 +157,14 @@ uint8_t audio_scene_baseline_ax(void);
  * capped by the AX clean ceiling. */
 void audio_scene_baseline_apply_parity_default(void);
 
+/* Stereo separation, 0..100 percent (operator setting, not part of a
+ * scene). The immediate variant joins the differential commit path
+ * like the baseline; the mailbox path stages it through
+ * audio_scene_stage_param(SDK_AUDIO_SCENE_PARAM_SEPARATION) and
+ * commits. The getter returns the live (committed) value. */
+int audio_scene_set_separation(uint8_t percent);
+uint8_t audio_scene_separation(void);
+
 /* Per-card measured clean ceilings. Values 1..4095 apply immediately
  * through the same differential commit path as the baseline. */
 int audio_scene_set_calibration(uint16_t ceiling_paula,
@@ -255,6 +268,7 @@ struct audio_scene_control_state {
 	uint32_t ceiling;       /* enforced boundary, AX-equivalent units */
 	uint32_t ceiling_paula; /* persisted measured clean ceiling */
 	uint32_t ceiling_ax;    /* persisted measured clean ceiling */
+	uint8_t separation;     /* stereo separation percent, 0..100 */
 	uint32_t save_status;   /* AUDIO_SCENE_SAVE_QUEUED while a save
 	                         * runs, else the last settled outcome */
 };

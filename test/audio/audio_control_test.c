@@ -184,6 +184,20 @@ int audio_adau_set_mixer_leg(int leg, int value)
 	return 0;
 }
 
+int audio_adau_set_separation(int percent)
+{
+	record_write(WRITE_SEP, percent, 0);
+	return fail_next_write ? -1 : 0;
+}
+
+int audio_adau_separation_substep(int percent, int substep)
+{
+	record_write(WRITE_SEP_SUB, percent, substep);
+	if (fail_next_write)
+		return -1;
+	return substep == 8 ? 1 : 0;
+}
+
 /* ---- assertions (suite convention) ---- */
 
 static int failures;
@@ -268,10 +282,14 @@ static void check_commit_sequence(const char *name, int base, int lpf,
 	check(ok, "commit stages mixer legs",
 		fmt("%s[%d]: kind=%d v1=%d v2=%d", name, base + 13, kind,
 			a, b));
-	ok = log_at(base + 14, &kind, &a, &b) && kind == WRITE_VOLPAN &&
+	ok = log_at(base + 14, &kind, &a, &b) && kind == WRITE_SEP &&
+		a == 100;
+	check(ok, "commit writes the separation after the mixer",
+		fmt("%s[%d]: kind=%d percent=%d", name, base + 14, kind, a));
+	ok = log_at(base + 15, &kind, &a, &b) && kind == WRITE_VOLPAN &&
 		a == vol && b == pan;
 	check(ok, "commit restores output volume last",
-		fmt("%s[%d]: kind=%d vol=%d pan=%d", name, base + 14, kind,
+		fmt("%s[%d]: kind=%d vol=%d pan=%d", name, base + 15, kind,
 			a, b));
 }
 
@@ -315,7 +333,7 @@ static void test_select_state_roundtrip(void)
 		fmt("baseline=0x%lx",
 			(unsigned long)w32(&result_buf[8])));
 	check(w32(&result_buf[12]) == SDK_AUDIO_BALANCE_PACK(36, 72) &&
-		w32(&result_buf[20]) == 0,
+		w32(&result_buf[20]) == SDK_AUDIO_CONTROL_FLAG_SEPARATION,
 		"state get reports the boot mixer applied, unbounded",
 		fmt("trim=0x%lx flags=0x%lx",
 			(unsigned long)w32(&result_buf[12]),
@@ -437,7 +455,7 @@ static void test_commit_ordering(void)
 	check(run_op(SDK_OP_AUDIO_SCENE_SELECT, &sel, sizeof(sel)) ==
 		SDK_STATUS_OK, "select scene 3", NULL);
 	pump_scene();
-	check(write_count == 15,
+	check(write_count == 16,
 		"one commit sequence per select",
 		fmt("writes=%d", write_count));
 	check_commit_sequence("scene 3", 0, 18000, eq3, 50, 75, 50, 36,
@@ -469,15 +487,15 @@ static void test_rapid_switches_serialize(void)
 	/* Both dispatches returned without I2C; draining the machine
 	 * applies A completely first, then B (coalesced onto A's
 	 * completion): two full sequences, A's restore (index 14)
-	 * before B's fade (index 15). */
+	 * before B's fade (index 16). */
 	pump_scene();
 
-	check(write_count == 30,
+	check(write_count == 32,
 		"two rapid switches produce two complete sequences",
 		fmt("writes=%d", write_count));
 	check_commit_sequence("switch A", 0, 16000, eq2, 50, 75, 50, 36,
 		72);
-	check_commit_sequence("switch B", 15, 12000, eq5, 50, 90, 50, 36,
+	check_commit_sequence("switch B", 16, 12000, eq5, 50, 90, 50, 36,
 		72);
 }
 
@@ -508,13 +526,13 @@ static void test_nested_commit_coalesces(void)
 	check(nested_write_count == 8,
 		"nested attempt happened inside the EQ group",
 		fmt("writes at nested call=%d", nested_write_count));
-	check(write_count == 30,
+	check(write_count == 32,
 		"outer machine completes, then the coalesced machine applies",
 		fmt("writes=%d", write_count));
 	check_commit_sequence("outer", 0, 18000,
 		(const uint8_t[]){ 50, 50, 50, 50, 50, 50, 55, 55, 50, 50 },
 		50, 75, 50, 36, 72);
-	check_commit_sequence("coalesced", 15, 23900, eq_unity, 60, 70,
+	check_commit_sequence("coalesced", 16, 23900, eq_unity, 60, 70,
 		50, 36, 72);
 	check(audio_scene_active_index() == 4,
 		"coalesced selection becomes the active scene", NULL);
@@ -583,9 +601,11 @@ static void test_trim_submit_result(void)
 	flags = w32(&result_buf[20]);
 	baseline = w32(&result_buf[8]);
 	trim = w32(&result_buf[12]);
-	check(flags == SDK_AUDIO_CONTROL_FLAG_TRIM_BOUNDED &&
-		trim == SDK_AUDIO_BALANCE_PACK(128, 128),
-		"state get reports bounded applied trim",
+	check(flags == (SDK_AUDIO_CONTROL_FLAG_TRIM_BOUNDED |
+			SDK_AUDIO_CONTROL_FLAG_SEPARATION) &&
+		trim == SDK_AUDIO_BALANCE_PACK(128, 128) &&
+		w32(&result_buf[32]) == 100,
+		"state get reports bounded applied trim and separation",
 		fmt("flags=0x%lx trim=0x%lx", (unsigned long)flags,
 			(unsigned long)trim));
 	check(baseline == SDK_AUDIO_BALANCE_PACK(128, 128) &&
@@ -721,7 +741,7 @@ static void test_trim_neutral_releases_held_trim(void)
 	status = run_op(SDK_OP_AUDIO_CONTROL_STATE_GET, &get, sizeof(get));
 	check(status == SDK_STATUS_OK, "state get after release", NULL);
 	check(w32(&result_buf[12]) == SDK_AUDIO_BALANCE_PACK(36, 72) &&
-		w32(&result_buf[20]) == 0,
+		w32(&result_buf[20]) == SDK_AUDIO_CONTROL_FLAG_SEPARATION,
 		"control state reports the baseline applied, unbounded",
 		fmt("trim=0x%lx flags=0x%lx",
 			(unsigned long)w32(&result_buf[12]),
@@ -800,7 +820,8 @@ static void test_trim_neutral_release_write_failure(void)
 	flags = w32(&result_buf[20]);
 	trim = w32(&result_buf[12]);
 	baseline = w32(&result_buf[8]);
-	check(trim == SDK_AUDIO_BALANCE_PACK(20, 40) && flags == 0,
+	check(trim == SDK_AUDIO_BALANCE_PACK(20, 40) &&
+		flags == SDK_AUDIO_CONTROL_FLAG_SEPARATION,
 		"control state keeps the held trim, unbounded",
 		fmt("trim=0x%lx flags=0x%lx", (unsigned long)trim,
 			(unsigned long)flags));
@@ -833,7 +854,7 @@ static void test_trim_neutral_release_write_failure(void)
 		sizeof(get));
 	check(status == SDK_STATUS_OK, "state get after retry", NULL);
 	check(w32(&result_buf[12]) == SDK_AUDIO_BALANCE_PACK(36, 72) &&
-		w32(&result_buf[20]) == 0,
+		w32(&result_buf[20]) == SDK_AUDIO_CONTROL_FLAG_SEPARATION,
 		"control state reports the baseline after the retry",
 		fmt("trim=0x%lx flags=0x%lx",
 			(unsigned long)w32(&result_buf[12]),
@@ -1221,6 +1242,49 @@ static void test_baseline_write_path(void)
 		"commit requires a valid scene slot", NULL);
 }
 
+static void test_separation_write_path(void)
+{
+	struct SDKAudioSceneWritePayload wr;
+	struct SDKAudioControlStateGetPayload get;
+
+	audio_scene_init();
+	clear_writes();
+	memset(&wr, 0, sizeof(wr));
+	memset(&get, 0, sizeof(get));
+
+	/* Scene index is ignored for SEPARATION, even out of range at
+	 * stage time; a commit still needs a valid slot. */
+	put32(wr.scene, 200);
+	put32(wr.param, SDK_AUDIO_SCENE_PARAM_SEPARATION);
+	put32(wr.value, 54);
+	check(run_op(SDK_OP_AUDIO_SCENE_WRITE, &wr, sizeof(wr)) ==
+		SDK_STATUS_OK, "separation stage ignores the scene index",
+		NULL);
+	put32(wr.scene, 5);
+	put32(wr.flags, SDK_AUDIO_SCENE_WRITE_FLAG_COMMIT);
+	check(run_op(SDK_OP_AUDIO_SCENE_WRITE, &wr, sizeof(wr)) ==
+		SDK_STATUS_OK, "separation commit", NULL);
+	pump_scene();
+	check(count_writes(WRITE_SEP_SUB) == 9,
+		"separation commit writes the crossfeed group",
+		fmt("writes=%d", count_writes(WRITE_SEP_SUB)));
+
+	/* The state reply carries the live value and the valid flag:
+	 * ZZTop seeds its slider from it. */
+	check(run_op(SDK_OP_AUDIO_CONTROL_STATE_GET, &get, sizeof(get)) ==
+		SDK_STATUS_OK, "state get after separation", NULL);
+	check((w32(&result_buf[20]) & SDK_AUDIO_CONTROL_FLAG_SEPARATION) != 0 &&
+		w32(&result_buf[32]) == 54,
+		"state get reports the live separation",
+		fmt("flags=0x%lx sep=%lu", (unsigned long)w32(&result_buf[20]),
+			(unsigned long)w32(&result_buf[32])));
+
+	put32(wr.value, 101);
+	put32(wr.flags, 0);
+	check(run_op(SDK_OP_AUDIO_SCENE_WRITE, &wr, sizeof(wr)) ==
+		SDK_STATUS_BAD_REQUEST, "separation above 100 refused", NULL);
+}
+
 static void test_calibration_write_path(void)
 {
 	struct SDKAudioSceneWritePayload wr;
@@ -1383,6 +1447,7 @@ int main(void)
 	test_baseline_write_persists_through_queued_save();
 	test_scene_rename_persists_through_queued_save();
 	test_baseline_write_path();
+	test_separation_write_path();
 	test_calibration_write_path();
 	test_unsupported_and_validation();
 

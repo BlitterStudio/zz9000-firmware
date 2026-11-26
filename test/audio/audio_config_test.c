@@ -94,6 +94,13 @@ int audio_adau_set_mixer_leg(int leg, int value)
 	(void)leg; (void)value; return 0;
 }
 
+int audio_adau_set_separation(int percent) { (void)percent; return 0; }
+int audio_adau_separation_substep(int percent, int substep)
+{
+	(void)percent;
+	return substep == 8 ? 1 : 0;
+}
+
 /* ---- assertions (suite convention) ---- */
 
 static int failures;
@@ -444,6 +451,7 @@ static void test_save_roundtrip(void)
 	check(audio_scene_set_calibration(512, 1024) == 0,
 		"calibration set", NULL);
 	check(audio_scene_set_baseline(140, 70) == 0, "baseline set", NULL);
+	check(audio_scene_set_separation(70) == 0, "separation set", NULL);
 
 	check(save_scene_sync(0) == AUDIO_SCENE_SAVE_OK, "save succeeds",
 		NULL);
@@ -462,10 +470,20 @@ static void test_save_roundtrip(void)
 		"save includes calibration keys", NULL);
 	check(strstr(saved, "audio_limiter = ") == NULL,
 		"save omits an absent limiter key", NULL);
+	check(strstr(saved, "audio_separation = 70\n") != NULL,
+		"save includes the separation key", NULL);
 	/* The saved text must reparse into the same state. */
 	zz_config_reset();
-	check(zz_config_parse(saved, (unsigned)len) == 145,
+	check(zz_config_parse(saved, (unsigned)len) == 146,
 		"every key line accepted on reparse", NULL);
+	check(zz_config_get()->audio_separation_present &&
+		zz_config_get()->audio_separation == 70,
+		"separation reparses", NULL);
+	audio_scene_init();
+	audio_scene_load_config();
+	check(audio_scene_separation() == 70,
+		"saved separation loads back into the scene state",
+		fmt("sep=%u", audio_scene_separation()));
 	audio_scene_init();
 	audio_scene_load_config();
 
@@ -511,6 +529,45 @@ static void test_save_roundtrip(void)
 }
 
 /* ---- live CFG splice: preserve non-audio text, replace audio keys ---- */
+
+/* A live CFG that already holds audio_separation must have it replaced,
+ * not kept beside the new line: every save used to append another copy. */
+static void test_repeated_saves_keep_one_separation_key(void)
+{
+	static const char live[] =
+		"audio_separation = 40\r\n"
+		"Audio_Separation = 55\r\n"
+		"unknown_key = keep\r\n"
+		"# audio_separation = 99\r\n";
+	const char *saved;
+	int first_len = 0;
+	int i;
+
+	mock_fs_reset();
+	mock_fs_set_file("0:/ZZ9000.CFG", live);
+	audio_scene_init();
+	check(audio_scene_set_separation(70) == 0, "separation set", NULL);
+	for (i = 0; i < 4; i++) {
+		check(save_scene_sync(0) == AUDIO_SCENE_SAVE_OK,
+			"repeated save succeeds", fmt("save %d", i));
+		saved = mock_fs_file("0:/ZZ9000.CFG");
+		if (!saved)
+			return;
+		if (i == 0)
+			first_len = mock_fs_file_len("0:/ZZ9000.CFG");
+		check(count_substring(saved, "eparation = ") == 2 &&
+			count_substring(saved, "audio_separation = 70\n") == 1,
+			"exactly one live separation key per save",
+			fmt("save %d: live=%u", i,
+				count_substring(saved, "audio_separation = ")));
+	}
+	check(mock_fs_file_len("0:/ZZ9000.CFG") == first_len,
+		"repeated saves do not grow the file",
+		fmt("first=%d now=%d", first_len,
+			mock_fs_file_len("0:/ZZ9000.CFG")));
+	check(strstr(saved, "unknown_key = keep") != NULL,
+		"foreign keys survive", NULL);
+}
 
 static void test_save_splices_live_config(void)
 {
@@ -727,7 +784,7 @@ static void test_save_budget(void)
 
 	zz_config_reset();
 	check(saved != NULL &&
-		zz_config_parse(saved, (unsigned)len) == 145,
+		zz_config_parse(saved, (unsigned)len) == 146,
 		"widest file reparses with every key accepted", NULL);
 }
 
@@ -1154,6 +1211,7 @@ int main(void)
 	test_absent_and_corrupt_degrade();
 	test_save_roundtrip();
 	test_save_splices_live_config();
+	test_repeated_saves_keep_one_separation_key();
 	test_save_live_file_limit();
 	test_save_no_file_uses_legacy_fallback();
 	test_save_regenerates_every_profile_name();

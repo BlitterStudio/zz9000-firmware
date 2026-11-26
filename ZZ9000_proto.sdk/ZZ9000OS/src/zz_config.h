@@ -211,9 +211,12 @@ struct zz_config {
 #define ZZ_CFG_AUDIO_LIMITER_MAX 100
 #define ZZ_CFG_AUDIO_CEILING_MIN 1
 #define ZZ_CFG_AUDIO_CEILING_MAX 4095
+#define ZZ_CFG_AUDIO_SEPARATION_MAX 100
 	uint16_t audio_active;          /* 0..7 */
 	uint8_t audio_baseline_present;
 	uint16_t audio_baseline;        /* paula<<8 | ax, legs 0..255 */
+	uint8_t audio_separation_present;
+	uint8_t audio_separation;       /* stereo separation percent, 0..100 */
 	uint8_t audio_limiter_present;
 	uint8_t audio_limiter;          /* limiter threshold, 1..100 hundredths FS */
 	uint8_t audio_ceiling_paula_present;
