@@ -72,7 +72,8 @@ static uint32_t surface_checksum(const ZZ9KSurface *surface,
 static uint32_t load_file(const char *path, ZZ9KSharedBuffer *buffer,
                           uint8_t *header, uint32_t header_bytes)
 {
-  uint8_t chunk[PNG_READ_CHUNK_BYTES];
+  /* Static: an Amiga Shell starts programs with a 4 KiB stack. */
+  static uint8_t chunk[PNG_READ_CHUNK_BYTES];
   FILE *file = fopen(path, "rb");
   uint32_t total = 0U;
   size_t got;
