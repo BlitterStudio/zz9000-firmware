@@ -1208,6 +1208,12 @@ static struct SDKSurface surfaces[SDK_MAX_SURFACES];
 static struct SDKSharedBuffer *media_pcm_ring;
 static uint32_t media_pcm_ring_session;
 static uint32_t media_pcm_ring_request_id;
+/* Shared-buffer output of the active media session: the picture slots and
+ * the host palette stay pinned until the output is rebound or the session
+ * closes. */
+static struct SDKSharedBuffer *media_out_buffer;
+static struct SDKSharedBuffer *media_out_palette;
+static uint32_t media_out_session;
 
 /*
  * The audio-stream table lives in the SCU-coherent scheduler region
@@ -2097,6 +2103,17 @@ static void release_media_pcm_ring(uint32_t session)
 		media_pcm_ring_session = 0U;
 		media_pcm_ring_request_id = 0U;
 	}
+}
+
+static void release_media_output_buffers(uint32_t session)
+{
+	if (media_out_session == 0U || media_out_session != session)
+		return;
+	shared_buffer_unpin(media_out_buffer);
+	shared_buffer_unpin(media_out_palette);
+	media_out_buffer = 0;
+	media_out_palette = 0;
+	media_out_session = 0U;
 }
 
 static struct SDKSurface *find_surface(uint32_t handle)
@@ -5487,6 +5504,7 @@ static int client_media_sessions_released(uint16_t client_id)
 			return 0;
 		sdk_media_session_close_retired(close_session);
 		release_media_pcm_ring(close_session);
+		release_media_output_buffers(close_session);
 		return 1;
 	}
 	memset(&close_params, 0, sizeof(close_params));
@@ -5948,6 +5966,102 @@ static uint16_t handle_media_session_present_or_discard(
 		status = sdk_media_session_present(session, flags, &result);
 	else
 		status = sdk_media_session_discard(session, flags, &result);
+	return complete_media_session_main_result(req, comp, status, &result);
+}
+
+/* Binds the shared-buffer output of a media session: the picture slots and,
+ * for PALETTE_HOST, the palette the card reads. Core 0 inline: it only
+ * validates and records, the conversion runs on core 1 at PRESENT. */
+static uint16_t handle_media_session_output_config(
+	volatile struct SDKMailboxEntry *req,
+	volatile struct SDKMailboxEntry *comp,
+	uint16_t payload_len)
+{
+	volatile struct SDKMediaSessionOutputPayload *payload;
+	struct SDKMediaOutputBinding binding;
+	struct SDKMediaOutputLayout layout;
+	struct SDKMediaSessionMainResult result;
+	struct SDKSharedBuffer *buffer;
+	struct SDKSharedBuffer *palette = 0;
+	uint32_t session;
+	uint32_t palette_handle;
+	uint32_t palette_offset;
+	uint16_t status;
+	int shared;
+
+	if (payload_len != sizeof(*payload))
+		return complete_status(req, comp, SDK_STATUS_BAD_REQUEST);
+	payload = (volatile struct SDKMediaSessionOutputPayload *)req->payload;
+	if (!bytes_are_zero(payload->reserved, sizeof(payload->reserved)))
+		return complete_status(req, comp, SDK_STATUS_BAD_REQUEST);
+	session = get_be32(payload->session);
+	shared = sdk_media_session_output_shared(session);
+	if (shared < 0)
+		return complete_status(req, comp, SDK_STATUS_BAD_HANDLE);
+	if (!shared)
+		return complete_status(req, comp, SDK_STATUS_UNSUPPORTED);
+
+	memset(&binding, 0, sizeof(binding));
+	binding.config.buffer_offset = get_be32(payload->buffer_offset);
+	binding.config.slot_stride = get_be32(payload->slot_stride);
+	binding.config.width = get_be32(payload->width);
+	binding.config.height = get_be32(payload->height);
+	binding.config.format = get_be32(payload->format);
+	binding.config.pitch = get_be32(payload->pitch);
+	binding.config.flags = get_be32(payload->flags);
+	palette_handle = get_be32(payload->palette_handle);
+	palette_offset = get_be32(payload->palette_offset);
+	status = sdk_media_output_check(&binding.config, &layout);
+	if (status != SDK_STATUS_OK)
+		return complete_status(req, comp, status);
+	if ((binding.config.flags & SDK_MEDIA_OUTPUT_PALETTE_HOST) != 0U) {
+		if (palette_handle == 0U)
+			return complete_status(req, comp, SDK_STATUS_BAD_REQUEST);
+		palette = find_shared_buffer(palette_handle);
+		if (!palette)
+			return complete_status(req, comp, SDK_STATUS_BAD_HANDLE);
+		if (!buffer_range_valid(palette, palette_offset,
+		                        SDK_MEDIA_OUTPUT_PALETTE_BYTES) ||
+		    (palette_offset & 3U) != 0U)
+			return complete_status(req, comp, SDK_STATUS_BAD_REQUEST);
+		binding.palette_addr = palette->address + palette_offset;
+	} else if (palette_handle != 0U || palette_offset != 0U) {
+		return complete_status(req, comp, SDK_STATUS_BAD_REQUEST);
+	}
+	buffer = find_shared_buffer(get_be32(payload->buffer_handle));
+	if (!buffer)
+		return complete_status(req, comp, SDK_STATUS_BAD_HANDLE);
+	/* The client reads the slots, so they must be CPU-visible: any
+	 * non-card-only buffer on Zorro III (the shared heap is mapped), a
+	 * host-window buffer on Zorro II. */
+	if ((buffer->flags & (SDK_ALLOC_CARD_ONLY | SDK_ALLOC_MEDIA)) != 0U ||
+	    (!sdk_aperture_runtime_is_zorro3() &&
+	     (buffer->flags & SDK_ALLOC_HOST_WINDOW) == 0U))
+		return complete_status(req, comp, SDK_STATUS_BAD_REQUEST);
+	if (!buffer_range_valid(buffer, binding.config.buffer_offset,
+	                        layout.span_bytes))
+		return complete_status(req, comp, SDK_STATUS_BAD_REQUEST);
+	binding.buffer_addr = buffer->address;
+	binding.buffer_length = buffer->length;
+
+	/* Count the pins first so a failed bind leaves the old one intact. */
+	if (!shared_buffer_pin(buffer))
+		return complete_status(req, comp, SDK_STATUS_BUSY);
+	if (palette && !shared_buffer_pin(palette)) {
+		shared_buffer_unpin(buffer);
+		return complete_status(req, comp, SDK_STATUS_BUSY);
+	}
+	status = sdk_media_session_output_config(session, &binding, &result);
+	if (status != SDK_STATUS_OK) {
+		shared_buffer_unpin(buffer);
+		shared_buffer_unpin(palette);
+		return complete_media_session_main_result(
+			req, comp, status, &result);
+	}
+	release_media_output_buffers(media_out_session);
+	media_out_buffer = buffer;
+	media_out_palette = palette;
+	media_out_session = session;
 	return complete_media_session_main_result(req, comp, status, &result);
 }
 
@@ -6892,6 +7006,18 @@ uint16_t sdk_mailbox_run_offload_task(const taskq_desc_t *d,
 		    (const struct overlay_compose_params *)d->op_params;
 		*result_len = 0U;
 		return overlay_run_compose(p);
+	}
+	case TASKQ_OP_MEDIA_OUTPUT: {
+		const struct SDKMediaOutputJob *p =
+		    (const struct SDKMediaOutputJob *)d->op_params;
+		uint32_t elapsed_us = 0U;
+		uint16_t s = sdk_media_session_run_output(p, &elapsed_us);
+
+		/* Retires on core 0: session, then conversion time. */
+		put_be32(&result_payload[0], p->session);
+		put_be32(&result_payload[4], elapsed_us);
+		*result_len = 8U;
+		return s;
 	}
 	case TASKQ_OP_FWUP: {
 		/* Core 1 owns FatFs and the SD card until this retires
@@ -9096,6 +9222,8 @@ static uint16_t handle_request(volatile struct SDKMailboxEntry *req,
 	case SDK_OP_MEDIA_SESSION_DISCARD:
 		return handle_media_session_present_or_discard(
 			req, comp, payload_len, opcode);
+	case SDK_OP_MEDIA_SESSION_OUTPUT_CONFIG:
+		return handle_media_session_output_config(req, comp, payload_len);
 	case SDK_OP_MEDIA_SESSION_STATUS:
 		return handle_media_session_status(req, comp, payload_len);
 	case SDK_OP_MEDIA_SESSION_AUDIO_READ:
@@ -9323,6 +9451,9 @@ void sdk_mailbox_init(void)
 	media_pcm_ring = 0;
 	media_pcm_ring_session = 0U;
 	media_pcm_ring_request_id = 0U;
+	media_out_buffer = 0;
+	media_out_palette = 0;
+	media_out_session = 0U;
 	memset(image_begin_pending, 0, sizeof(image_begin_pending));
 	memset(shared_buffers, 0, sizeof(shared_buffers));
 	memset(surfaces, 0, sizeof(surfaces));
@@ -9575,6 +9706,13 @@ static void internal_zzm_load_finished(int ok)
 static void internal_media_close_retired(uint32_t session)
 {
 	sdk_media_session_close_retired(session);
+	release_media_output_buffers(session);
+}
+
+static void internal_media_output_retired(int ok, uint32_t session,
+	                                      uint32_t elapsed_us)
+{
+	sdk_media_session_output_retired(session, ok, elapsed_us);
 }
 
 static void internal_pcm_ring_release(uint32_t session)
@@ -9604,6 +9742,7 @@ static void internal_ax_refill_done(void)
 
 static const struct sdk_internal_completion_hooks g_internal_completion = {
 	.overlay_compose_retired = internal_compose_retired,
+	.media_output_retired = internal_media_output_retired,
 	.fw_update_retire = internal_fw_update_retire,
 	.fw_update_retire_failed = internal_fw_update_retire_failed,
 	.zzm_load_finished = internal_zzm_load_finished,
@@ -9743,6 +9882,7 @@ int sdk_mailbox_post_deferred(int slot, uint32_t request_id,
 
 		sdk_media_session_close_retired(session);
 		release_media_pcm_ring(session);
+		release_media_output_buffers(session);
 	}
 
 	requests_completed++;

@@ -239,6 +239,39 @@ static int test_zero_ack_before_lazy_decoder(void)
 	return 0;
 }
 
+/* The shared-buffer output opens like any other session; only the two known
+ * output formats are accepted. */
+static int test_output_formats(void)
+{
+	struct SDKVideoStreamBegin begin;
+	struct SDKVideoStreamResult result;
+
+	memset(&begin, 0, sizeof(begin));
+	begin.codec = SDK_VIDEO_CODEC_MPEG1;
+	begin.container = SDK_VIDEO_CONTAINER_MPEG_PS;
+	begin.width = 320U;
+	begin.height = 240U;
+	sdk_video_stream_init();
+
+	begin.output_format = SDK_VIDEO_OUTPUT_SHARED_BUFFER;
+	if (sdk_video_stream_begin(&begin, &result) != SDK_STATUS_OK)
+		return 1;
+	if (sdk_video_stream_close(result.session, &result) != SDK_STATUS_OK)
+		return 2;
+	begin.output_format = SDK_VIDEO_OUTPUT_DIRECT_OVERLAY;
+	if (sdk_video_stream_begin(&begin, &result) != SDK_STATUS_OK)
+		return 3;
+	if (sdk_video_stream_close(result.session, &result) != SDK_STATUS_OK)
+		return 4;
+	begin.output_format = 0U;
+	if (sdk_video_stream_begin(&begin, &result) != SDK_STATUS_BAD_REQUEST)
+		return 5;
+	begin.output_format = 3U;
+	if (sdk_video_stream_begin(&begin, &result) != SDK_STATUS_BAD_REQUEST)
+		return 6;
+	return 0;
+}
+
 static int test_webm_stream_envelopes(void)
 {
 	struct SDKVideoStreamBegin begin;
@@ -603,6 +636,8 @@ int main(void)
 
 	rc = test_zero_ack_before_lazy_decoder();
 	if (rc != 0) return rc;
+	rc = test_output_formats();
+	if (rc != 0) return 100 + rc;
 	rc = test_webm_stream_envelopes();
 	if (rc != 0) return rc;
 	rc = test_generic_caps_without_geometry_op();

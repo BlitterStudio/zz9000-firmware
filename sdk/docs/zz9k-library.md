@@ -465,7 +465,7 @@ All multi-byte mailbox fields use the byte order defined by `zz9k/abi.h`. The se
 | Crypto | `0x0800` HASH, `0x0801` STREAM, `0x0802` AEAD, `0x0803` KX, `0x0804` VERIFY |
 | Diagnostics | `0x0900` DIAG_READ, `0x0901` DIAG_TIMING, `0x0902` DIAG_SCHED, `0x0903` DIAG_MEMORY |
 | Module | `0x0a00` MODULE_STATUS |
-| Video | `0x0b00`–`0x0b03` reserved (retired video-session ops, answered `ZZ9K_STATUS_UNSUPPORTED`); `0x0b04`–`0x0b0d` media-session begin/write/decode/audio-read/present/discard/status/audio-bind/audio-unbind/close |
+| Video | `0x0b00`–`0x0b03` reserved (retired video-session ops, answered `ZZ9K_STATUS_UNSUPPORTED`); `0x0b04`–`0x0b0e` media-session begin/write/decode/audio-read/present/discard/status/audio-bind/audio-unbind/close/output-config |
 
 The voice engine opcodes `0x0518` through `0x051b` dispatch in firmware on both buses. The audio service descriptor covers them (28 opcodes through `0x051b`) and sets `ZZ9K_SERVICE_FLAG_AUDIO_VOICE` and `ZZ9K_SERVICE_FLAG_AUDIO_VOICE_STEREO` on Zorro III. The flags are not set on Zorro II yet, because the engine has not been tested on a Zorro II machine. See [zz9k-voice.md](zz9k-voice.md).
 
@@ -1051,8 +1051,12 @@ The video service is codec- and container-neutral and decodes through media
 sessions (`ZZ9K_OP_MEDIA_SESSION_*`). A session is created with separate
 `video_codec`, `container`, and `output_format` fields plus an audio codec
 (`ZZ9KMediaSessionBeginDesc`). Firmware advertises the combinations it decodes
-with `ZZ9K_SERVICE_FLAG_VIDEO_*` bits. Direct P96 overlay output is the only
-output format.
+with `ZZ9K_SERVICE_FLAG_VIDEO_*` bits. `output_format` is
+`ZZ9K_VIDEO_OUTPUT_DIRECT_OVERLAY` (the P96 overlay) or
+`ZZ9K_VIDEO_OUTPUT_SHARED_BUFFER`, which writes scaled pictures into a buffer
+the client reads. The shared-buffer output, its opcode
+`ZZ9K_OP_MEDIA_SESSION_OUTPUT_CONFIG`, status page 6 and the `zz9k-mediaout`
+tool are described in [zz9k-media-output.md](zz9k-media-output.md).
 
 The video-session opcodes `0x0b00` to `0x0b03` (begin, write, decode, close)
 are retired. The numbers stay reserved: firmware answers them with

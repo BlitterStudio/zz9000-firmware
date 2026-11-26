@@ -3184,6 +3184,24 @@ int zz9k_media_session_write(ZZ9KContext *ctx,
       ctx, &request, ZZ9K_OP_MEDIA_SESSION_WRITE, result);
 }
 
+int zz9k_media_session_output(ZZ9KContext *ctx,
+                              const ZZ9KMediaSessionOutputDesc *desc,
+                              ZZ9KMediaSessionMainResult *result)
+{
+  ZZ9KRequest request;
+  int status;
+
+  if (!ctx || !desc || !result) {
+    return ZZ9K_STATUS_BAD_REQUEST;
+  }
+  status = zz9k_request_media_session_output(&request, desc);
+  if (status != ZZ9K_STATUS_OK) {
+    return status;
+  }
+  return zz9k_media_session_main_call(
+      ctx, &request, ZZ9K_OP_MEDIA_SESSION_OUTPUT_CONFIG, result);
+}
+
 static int zz9k_media_session_simple_main(
     ZZ9KContext *ctx, uint16_t opcode, uint32_t session, uint32_t flags,
     ZZ9KMediaSessionMainResult *result)

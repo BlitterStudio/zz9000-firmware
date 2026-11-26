@@ -755,7 +755,8 @@ static inline int zz9k_media_main_opcode_known(uint16_t opcode)
          opcode == ZZ9K_OP_MEDIA_SESSION_DECODE ||
          opcode == ZZ9K_OP_MEDIA_SESSION_PRESENT ||
          opcode == ZZ9K_OP_MEDIA_SESSION_DISCARD ||
-         opcode == ZZ9K_OP_MEDIA_SESSION_CLOSE;
+         opcode == ZZ9K_OP_MEDIA_SESSION_CLOSE ||
+         opcode == ZZ9K_OP_MEDIA_SESSION_OUTPUT_CONFIG;
 }
 
 static inline uint32_t zz9k_media_session_known_result_flags(void)
@@ -774,7 +775,9 @@ static inline uint32_t zz9k_media_session_known_result_flags(void)
          ZZ9K_MEDIA_SESSION_RESULT_AUDIO_BOUND |
          ZZ9K_MEDIA_SESSION_RESULT_AUDIO_PLAYING |
          ZZ9K_MEDIA_SESSION_RESULT_AUDIO_DRAINED |
-         ZZ9K_MEDIA_SESSION_RESULT_AUDIO_UNDERRUN;
+         ZZ9K_MEDIA_SESSION_RESULT_AUDIO_UNDERRUN |
+         ZZ9K_MEDIA_SESSION_RESULT_OUTPUT_SLOT1 |
+         ZZ9K_MEDIA_SESSION_RESULT_OUTPUT_PENDING;
 }
 
 /* The presentation page reuses the `flags` word for a different namespace
@@ -796,6 +799,12 @@ static inline uint32_t zz9k_media_status_known_flags(uint32_t page)
   }
   if (page == ZZ9K_MEDIA_STATUS_PROFILE) {
     return ZZ9K_MEDIA_PROFILE_FLAG_NEON_PACK;
+  }
+  if (page == ZZ9K_MEDIA_STATUS_OUTPUT) {
+    return ZZ9K_MEDIA_OUTPUT_STATUS_CONFIGURED |
+           ZZ9K_MEDIA_OUTPUT_STATUS_COMPLETE |
+           ZZ9K_MEDIA_OUTPUT_STATUS_SLOT1 |
+           ZZ9K_MEDIA_OUTPUT_STATUS_PENDING;
   }
   return zz9k_media_session_known_result_flags();
 }
@@ -913,7 +922,7 @@ static inline int zz9k_reply_media_session_status(
   if (result->session == 0U ||
       result->state < ZZ9K_MEDIA_SESSION_STATE_NEED_INPUT ||
       result->state > ZZ9K_MEDIA_SESSION_STATE_ERROR ||
-      result->page > ZZ9K_MEDIA_STATUS_PROFILE ||
+      result->page > ZZ9K_MEDIA_STATUS_OUTPUT ||
       (result->flags & ~zz9k_media_status_known_flags(result->page)) !=
           0U) {
     memset(result, 0, sizeof(*result));

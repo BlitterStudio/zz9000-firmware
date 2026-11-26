@@ -165,6 +165,25 @@ void overlay_video_session_closed(uint32_t session)
 		overlay_close_calls++;
 }
 
+/* The shared-buffer paths are covered by media_shared_output_test.c; the
+ * overlay lifecycle here never reaches them. */
+int sdk_mailbox_enqueue_internal(uint32_t opcode, const void *params,
+	                             uint32_t params_len)
+{
+	(void)opcode;
+	(void)params;
+	(void)params_len;
+	return 0;
+}
+
+int sdk_video_stream_get_direct_frame(uint32_t session,
+	                                  struct SDKVideoDecodedFrame *frame)
+{
+	(void)session;
+	(void)frame;
+	return 0;
+}
+
 static struct overlay_path_info mock_path;
 static uint32_t mock_path_query_session;
 
@@ -424,7 +443,7 @@ static int test_errors_and_reclaim(void)
 	if (sdk_media_session_begin(&begin, &result) != SDK_STATUS_OK)
 		return 2;
 	if (sdk_media_session_status(mock_session,
-	                             SDK_MEDIA_STATUS_PROFILE + 1U,
+	                             SDK_MEDIA_STATUS_OUTPUT + 1U,
 	                             0U, &status) != SDK_STATUS_BAD_REQUEST ||
 	    sdk_media_session_status(mock_session, SDK_MEDIA_STATUS_TIMING,
 	                             1U, &status) != SDK_STATUS_BAD_REQUEST)
@@ -565,9 +584,9 @@ static int test_presentation_status_page(void)
 	    (status.flags & SDK_MEDIA_PRESENT_ACTIVE) == 0U)
 		return 11;
 
-	/* The page bound moved by exactly one: 5 is still rejected, and a
-	 * non-zero flags word remains rejected on the new page. */
-	if (sdk_media_session_status(mock_session, 6U, 0U, &status) !=
+	/* The page bound is the output page: 7 is rejected, and a non-zero
+	 * flags word remains rejected on the presentation page. */
+	if (sdk_media_session_status(mock_session, 7U, 0U, &status) !=
 	        SDK_STATUS_BAD_REQUEST)
 		return 12;
 	if (sdk_media_session_status(mock_session,

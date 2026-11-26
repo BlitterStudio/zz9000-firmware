@@ -22,6 +22,7 @@ and programs that use the card.
 | [zz9k-picture-datatype.md](../sdk/docs/zz9k-picture-datatype.md) | `zz9k-picture.datatype` for JPEG, PNG, and WebP. |
 | [zz9k-sound-datatype.md](../sdk/docs/zz9k-sound-datatype.md) | `zz9k-sound.datatype` for MP3, FLAC, and Ogg Vorbis. |
 | [zz9k-voice.md](../sdk/docs/zz9k-voice.md) | The ZZ9000AX voice engine: up to 32 sample voices at 48 kHz driven by timestamped commands through the Voice API, with `zz9k-voiceplay`; the AHI hardware-mixing modes use it. |
+| [zz9k-media-output.md](../sdk/docs/zz9k-media-output.md) | Media sessions that write scaled INDEX8, planar, RGB565 or RGB555 pictures into a shared buffer, with `zz9k-mediaout`. |
 | [zzplay.md](../sdk/docs/zzplay.md) | The ZZPlay media player. |
 | [zz9k-68k-offload.md](../sdk/docs/zz9k-68k-offload.md) | The experimental 68k runner and offload model. |
 | [zz9k-modules.md](../sdk/docs/zz9k-modules.md) | Service manifests and the service registry helpers. |

@@ -473,6 +473,31 @@ target_include_directories(media_session_abi_test
 
 add_test(NAME media_session_abi_test COMMAND media_session_abi_test)
 
+add_executable(media_output_abi_test
+  tests/media_output_abi_test.c
+)
+
+target_include_directories(media_output_abi_test
+  PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/host/include
+)
+
+add_test(NAME media_output_abi_test COMMAND media_output_abi_test)
+
+add_executable(mediaout_logic_test
+  tests/mediaout_logic_test.c
+)
+
+target_include_directories(mediaout_logic_test
+  PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/host/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/tools
+)
+
+add_test(NAME mediaout_logic_test COMMAND mediaout_logic_test)
+
 add_library(zzplay_core STATIC
   tools/zzplay/zzplay-ahiprefs.c
   tools/zzplay/zzplay-audio.c
@@ -1912,6 +1937,17 @@ add_executable(zz9k_fbtest
 )
 
 target_link_libraries(zz9k_fbtest PRIVATE zz9k_host zz9k_fb_common)
+
+add_executable(zz9k_mediaout
+  tools/zz9k-mediaout.c
+)
+
+target_include_directories(zz9k_mediaout
+  PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/tools
+)
+
+target_link_libraries(zz9k_mediaout PRIVATE zz9k_host)
 
 add_executable(zz9k_scaletest
   tools/zz9k-scaletest.c
