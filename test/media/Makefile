@@ -6,7 +6,10 @@ WEBM_MODULE_SRC := $(FIRMWARE_SRC)/../modules/webm
 .PHONY: test clean
 
 test: build/media_session_test build/video_stream_test \
-	build/media_overlay_source_test build/overlay_present_test
+	build/media_overlay_source_test build/overlay_present_test \
+	build/media_output_test build/media_shared_output_test
+	build/media_output_test
+	build/media_shared_output_test
 	build/media_session_test
 	build/video_stream_test
 	build/media_overlay_source_test \
@@ -17,6 +20,8 @@ test: build/media_session_test build/video_stream_test \
 build/media_session_test: media_session_test.c \
 	$(FIRMWARE_SRC)/sdk_media_session.c \
 	$(FIRMWARE_SRC)/sdk_media_session.h \
+	$(FIRMWARE_SRC)/sdk_media_output.c \
+	$(FIRMWARE_SRC)/sdk_media_output.h \
 	$(FIRMWARE_SRC)/sdk_mailbox.h \
 	$(FIRMWARE_SRC)/overlay_path.h \
 	$(FIRMWARE_SRC)/sdk_media_profile.h \
@@ -27,6 +32,35 @@ build/media_session_test: media_session_test.c \
 	mkdir -p build
 	$(CC) $(CFLAGS) -DSDK_MEDIA_HOST_TEST=1 -I$(FIRMWARE_SRC) -o $@ \
 		media_session_test.c $(FIRMWARE_SRC)/sdk_media_session.c \
+		$(FIRMWARE_SRC)/sdk_media_output.c \
+		$(FIRMWARE_SRC)/sdk_media_profile.c \
+		$(FIRMWARE_SRC)/sdk_video_yuy2.c
+
+# The converter is pure computation; the test builds it on its own and, with
+# --bench, prints the cost per picture on the host.
+build/media_output_test: media_output_test.c \
+	$(FIRMWARE_SRC)/sdk_media_output.c $(FIRMWARE_SRC)/sdk_media_output.h \
+	$(FIRMWARE_SRC)/sdk_mailbox.h
+	mkdir -p build
+	$(CC) $(CFLAGS) -Wno-pointer-to-int-cast -Wno-int-to-pointer-cast \
+		-I$(FIRMWARE_SRC) -o $@ media_output_test.c \
+		$(FIRMWARE_SRC)/sdk_media_output.c
+
+build/media_shared_output_test: media_shared_output_test.c \
+	$(FIRMWARE_SRC)/sdk_media_session.c \
+	$(FIRMWARE_SRC)/sdk_media_session.h \
+	$(FIRMWARE_SRC)/sdk_media_output.c \
+	$(FIRMWARE_SRC)/sdk_media_output.h \
+	$(FIRMWARE_SRC)/sdk_mailbox.h \
+	$(FIRMWARE_SRC)/overlay_path.h \
+	$(FIRMWARE_SRC)/sdk_media_profile.c \
+	$(FIRMWARE_SRC)/sdk_video_yuy2.c \
+	$(FIRMWARE_SRC)/sdk_video_stream.h
+	mkdir -p build
+	$(CC) $(CFLAGS) -Wno-pointer-to-int-cast -Wno-int-to-pointer-cast \
+		-DSDK_MEDIA_HOST_TEST=1 -I$(FIRMWARE_SRC) -o $@ \
+		media_shared_output_test.c $(FIRMWARE_SRC)/sdk_media_session.c \
+		$(FIRMWARE_SRC)/sdk_media_output.c \
 		$(FIRMWARE_SRC)/sdk_media_profile.c \
 		$(FIRMWARE_SRC)/sdk_video_yuy2.c
 

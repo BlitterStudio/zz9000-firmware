@@ -21,6 +21,8 @@
 
 struct sdk_internal_completion_hooks {
 	void (*overlay_compose_retired)(int ok);
+	void (*media_output_retired)(int ok, uint32_t session,
+	                             uint32_t elapsed_us);
 	void (*fw_update_retire)(uint16_t code);
 	void (*fw_update_retire_failed)(void);
 	void (*zzm_load_finished)(int ok);
@@ -44,12 +46,32 @@ static inline uint32_t sdk_internal_payload_session(const uint8_t *payload,
 	       ((uint32_t)payload[2] << 8) | payload[3];
 }
 
+/* Big-endian word at `offset`, zero when the payload is too short. */
+static inline uint32_t sdk_internal_payload_word(const uint8_t *payload,
+                                                 uint16_t payload_len,
+                                                 uint16_t offset)
+{
+	if (payload == 0 || payload_len < (uint16_t)(offset + 4U))
+		return 0U;
+	return ((uint32_t)payload[offset] << 24) |
+	       ((uint32_t)payload[offset + 1U] << 16) |
+	       ((uint32_t)payload[offset + 2U] << 8) | payload[offset + 3U];
+}
+
 static inline void sdk_internal_completion_dispatch(
 	const struct sdk_internal_completion_hooks *hooks, uint16_t opcode,
 	uint16_t status, const uint8_t *payload, uint16_t payload_len)
 {
 	if (opcode == (uint16_t)TASKQ_OP_VIDEO_COMPOSE) {
 		hooks->overlay_compose_retired(status == SDK_STATUS_OK);
+	} else if (opcode == (uint16_t)TASKQ_OP_MEDIA_OUTPUT) {
+		/* Result payload: session, conversion time in microseconds. A
+		 * failed task may carry neither; session 0 then means the active
+		 * session. */
+		hooks->media_output_retired(
+		    status == SDK_STATUS_OK,
+		    sdk_internal_payload_session(payload, payload_len),
+		    sdk_internal_payload_word(payload, payload_len, 4U));
 	} else if (opcode == (uint16_t)TASKQ_OP_FWUP) {
 		if (status == SDK_STATUS_OK && payload != 0 && payload_len >= 2U)
 			hooks->fw_update_retire(

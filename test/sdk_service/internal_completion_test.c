@@ -30,6 +30,10 @@ static int failures;
 struct record {
 	int compose;
 	int compose_ok;
+	int output_retired;
+	int output_ok;
+	uint32_t output_session;
+	uint32_t output_us;
 	int fw_retire;
 	uint16_t fw_code;
 	int fw_failed;
@@ -44,6 +48,13 @@ struct record {
 static struct record rec;
 
 static void on_compose(int ok) { rec.compose++; rec.compose_ok = ok; }
+static void on_output(int ok, uint32_t session, uint32_t us)
+{
+	rec.output_retired++;
+	rec.output_ok = ok;
+	rec.output_session = session;
+	rec.output_us = us;
+}
 static void on_fw_retire(uint16_t code) { rec.fw_retire++; rec.fw_code = code; }
 static void on_fw_failed(void) { rec.fw_failed++; }
 static void on_zzm_load(int ok) { (void)ok; rec.zzm_load++; }
@@ -53,6 +64,7 @@ static void on_ax_refill(void) { rec.ax_refill++; }
 
 static const struct sdk_internal_completion_hooks hooks = {
 	.overlay_compose_retired = on_compose,
+	.media_output_retired = on_output,
 	.fw_update_retire = on_fw_retire,
 	.fw_update_retire_failed = on_fw_failed,
 	.zzm_load_finished = on_zzm_load,
@@ -130,6 +142,32 @@ static void test_ax_refill_clears_its_marker(void)
 	CHECK(rec.pcm_released == 0);
 }
 
+/* A shared-buffer conversion retires its own marker, never the overlay's
+ * compose marker or the AX refill marker. */
+static void test_media_output_retires_its_own_marker(void)
+{
+	uint8_t payload[8];
+
+	memset(payload, 0, sizeof(payload));
+	payload[3] = 7U;                 /* session */
+	payload[6] = 0x12U;              /* 0x1234 microseconds */
+	payload[7] = 0x34U;
+	dispatch((uint16_t)TASKQ_OP_MEDIA_OUTPUT, SDK_STATUS_OK, payload, 8);
+	CHECK(rec.output_retired == 1 && rec.output_ok == 1);
+	CHECK(rec.output_session == 7U && rec.output_us == 0x1234U);
+	CHECK(rec.compose == 0 && rec.ax_refill == 0 && rec.media_retired == 0);
+
+	/* a failed task retires too, so the in-flight marker cannot stick */
+	dispatch((uint16_t)TASKQ_OP_MEDIA_OUTPUT, SDK_STATUS_BAD_REQUEST, 0, 0);
+	CHECK(rec.output_retired == 1 && rec.output_ok == 0);
+	CHECK(rec.output_session == 0U && rec.output_us == 0U);
+	CHECK(rec.compose == 0 && rec.ax_refill == 0);
+
+	/* a payload without the time still names its session */
+	dispatch((uint16_t)TASKQ_OP_MEDIA_OUTPUT, SDK_STATUS_OK, payload, 4);
+	CHECK(rec.output_session == 7U && rec.output_us == 0U);
+}
+
 static void test_other_internal_producers_keep_their_routes(void)
 {
 	uint8_t code[2] = { 0x12, 0x34 };
@@ -151,6 +189,7 @@ int main(void)
 	test_short_payload_identifies_no_session();
 	test_close_opcodes_leave_refill_marker_alone();
 	test_ax_refill_clears_its_marker();
+	test_media_output_retires_its_own_marker();
 	test_other_internal_producers_keep_their_routes();
 	if (failures != 0) {
 		printf("internal_completion_test: %d failure(s) of %d checks\n",

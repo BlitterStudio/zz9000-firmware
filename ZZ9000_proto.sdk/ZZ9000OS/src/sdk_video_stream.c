@@ -279,7 +279,8 @@ static uint16_t sdk_video_stream_begin_locked(
 	uint32_t module_id = 0U;
 	if (!begin || !result ||
 	    begin->flags != 0U ||
-	    begin->output_format != SDK_VIDEO_OUTPUT_DIRECT_OVERLAY ||
+	    (begin->output_format != SDK_VIDEO_OUTPUT_DIRECT_OVERLAY &&
+	     begin->output_format != SDK_VIDEO_OUTPUT_SHARED_BUFFER) ||
 	    begin->width == 0U || begin->height == 0U)
 		return SDK_STATUS_BAD_REQUEST;
 	if (begin->container == SDK_VIDEO_CONTAINER_WEBM &&

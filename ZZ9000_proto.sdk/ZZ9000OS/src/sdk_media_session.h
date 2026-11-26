@@ -10,6 +10,7 @@
 #include <stdint.h>
 
 #include "sdk_mailbox.h"
+#include "sdk_media_output.h"
 
 struct SDKMediaSessionBegin {
 	uint32_t video_codec;
@@ -65,6 +66,14 @@ struct SDKMediaSessionAudioResult {
 	uint64_t pcm_acknowledged;
 	uint64_t audio_pts;
 	uint32_t flags;
+};
+
+/* A validated OUTPUT_CONFIG with the buffers resolved to card addresses. */
+struct SDKMediaOutputBinding {
+	struct SDKMediaOutputConfig config;
+	uint32_t buffer_addr;   /* ARM address of the picture buffer */
+	uint32_t buffer_length;
+	uint32_t palette_addr;  /* ARM address of the host palette, else 0 */
 };
 
 struct SDKMediaAudioSource {
@@ -130,5 +139,23 @@ void sdk_media_session_audio_underrun(uint32_t session);
 uint16_t sdk_media_session_close(
 	uint32_t session, uint32_t flags,
 	struct SDKMediaSessionMainResult *result);
+
+/* Shared-buffer output (SDK_VIDEO_OUTPUT_SHARED_BUFFER). Returns 1 when the
+ * active session outputs to a shared buffer, 0 when it uses the overlay and
+ * -1 when `session` is not the active session. */
+int sdk_media_session_output_shared(uint32_t session);
+/* Binds or rebinds the output. BUSY while a picture is being written. After
+ * a rebind the next picture goes to slot 0 and no picture is complete. */
+uint16_t sdk_media_session_output_config(
+	uint32_t session, const struct SDKMediaOutputBinding *binding,
+	struct SDKMediaSessionMainResult *result);
+/* Core 0, from the retirement of a conversion task. `session` 0 means the
+ * active session. */
+void sdk_media_session_output_retired(uint32_t session, int ok,
+	                                  uint32_t elapsed_us);
+/* Core-1 task body of TASKQ_OP_MEDIA_OUTPUT: converts the held picture of
+ * job->session into its slot and flushes the slot to DDR. */
+uint16_t sdk_media_session_run_output(const struct SDKMediaOutputJob *job,
+	                                  uint32_t *elapsed_us);
 
 #endif /* SDK_MEDIA_SESSION_H */

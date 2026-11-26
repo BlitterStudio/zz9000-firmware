@@ -476,6 +476,11 @@ struct SDKModuleStatusPayload {
 #define SDK_OP_MEDIA_SESSION_AUDIO_BIND 0x0b0bU
 #define SDK_OP_MEDIA_SESSION_AUDIO_UNBIND 0x0b0cU
 #define SDK_OP_MEDIA_SESSION_CLOSE     0x0b0dU
+/* Binds a shared-buffer output (SDK_VIDEO_OUTPUT_SHARED_BUFFER) to a media
+ * session. The video service advertises it with opcode_count >=
+ * SDK_VIDEO_OPCODE_COUNT_SHARED_OUTPUT. */
+#define SDK_OP_MEDIA_SESSION_OUTPUT_CONFIG 0x0b0eU
+#define SDK_VIDEO_OPCODE_COUNT_SHARED_OUTPUT 15U
 
 #define SDK_OP_APP_QUERY               0x0c00U
 #define SDK_OP_APP_CLAIM               0x0c01U
@@ -559,6 +564,21 @@ struct SDKMediaSessionAudioResultPayload {
 	uint8_t flags[4];
 };
 
+struct SDKMediaSessionOutputPayload {
+	uint8_t session[4];
+	uint8_t buffer_handle[4];
+	uint8_t buffer_offset[4];
+	uint8_t slot_stride[4];
+	uint8_t width[4];
+	uint8_t height[4];
+	uint8_t format[4];
+	uint8_t pitch[4];
+	uint8_t flags[4];
+	uint8_t palette_handle[4];
+	uint8_t palette_offset[4];
+	uint8_t reserved[4];
+};
+
 struct SDKMediaSessionStatusResultPayload {
 	uint8_t session[4];
 	uint8_t state[4];
@@ -586,6 +606,8 @@ typedef char SDKMediaSessionMainResultPayload_must_be_48_bytes[
 	(sizeof(struct SDKMediaSessionMainResultPayload) == 48U) ? 1 : -1];
 typedef char SDKMediaSessionAudioResultPayload_must_be_48_bytes[
 	(sizeof(struct SDKMediaSessionAudioResultPayload) == 48U) ? 1 : -1];
+typedef char SDKMediaSessionOutputPayload_must_be_48_bytes[
+	(sizeof(struct SDKMediaSessionOutputPayload) == 48U) ? 1 : -1];
 typedef char SDKMediaSessionStatusResultPayload_must_be_48_bytes[
 	(sizeof(struct SDKMediaSessionStatusResultPayload) == 48U) ? 1 : -1];
 
@@ -1246,6 +1268,7 @@ static inline void sdk_audio_meter_result_pack(
 #define SDK_VIDEO_CONTAINER_WEBM       2U
 #define SDK_VIDEO_CONTAINER_MPEG_TS    3U
 #define SDK_VIDEO_OUTPUT_DIRECT_OVERLAY 1U
+#define SDK_VIDEO_OUTPUT_SHARED_BUFFER 2U
 #define SDK_VIDEO_SESSION_WRITE_EOF    (1U << 0)
 #define SDK_VIDEO_SESSION_STATE_NEED_INPUT  1U
 #define SDK_VIDEO_SESSION_STATE_READY       2U
@@ -1288,6 +1311,9 @@ static inline void sdk_audio_meter_result_pack(
 #define SDK_MEDIA_SESSION_RESULT_AUDIO_PLAYING (1U << 12)
 #define SDK_MEDIA_SESSION_RESULT_AUDIO_DRAINED (1U << 13)
 #define SDK_MEDIA_SESSION_RESULT_AUDIO_UNDERRUN (1U << 14)
+/* PRESENT replies of a shared-buffer session. */
+#define SDK_MEDIA_SESSION_RESULT_OUTPUT_SLOT1 (1U << 15)
+#define SDK_MEDIA_SESSION_RESULT_OUTPUT_PENDING (1U << 16)
 #define SDK_MEDIA_STATUS_TIMING 0U
 #define SDK_MEDIA_STATUS_AUDIO 1U
 #define SDK_MEDIA_STATUS_COUNTERS 2U
@@ -1304,6 +1330,25 @@ static inline void sdk_audio_meter_result_pack(
 /* Set in the profile page's flags when the NEON YUY2 pack is the live
  * kernel, so a before/after comparison names what it measured. */
 #define SDK_MEDIA_PROFILE_FLAG_NEON_PACK (1U << 0)
+
+/* Shared-buffer output state. An overlay session answers this page with
+ * every field zero. value[0] counts pictures written, value[1] pictures
+ * presented, value[2] is the conversion time of the newest written picture
+ * in microseconds and value[3] is the mask of SDK_MEDIA_OUTPUT_* flags the
+ * firmware accepts. */
+#define SDK_MEDIA_STATUS_OUTPUT 6U
+#define SDK_MEDIA_OUTPUT_STATUS_CONFIGURED (1U << 0)
+#define SDK_MEDIA_OUTPUT_STATUS_COMPLETE (1U << 1)
+#define SDK_MEDIA_OUTPUT_STATUS_SLOT1 (1U << 2)
+#define SDK_MEDIA_OUTPUT_STATUS_PENDING (1U << 3)
+
+/* SDKMediaSessionOutputPayload.flags. */
+#define SDK_MEDIA_OUTPUT_DEPTH_MASK 0x0fU
+#define SDK_MEDIA_OUTPUT_PLANAR_INTERLEAVED (1U << 4)
+#define SDK_MEDIA_OUTPUT_DITHER_ORDERED (1U << 5)
+#define SDK_MEDIA_OUTPUT_DITHER_DIFFUSION (1U << 6)
+#define SDK_MEDIA_OUTPUT_PALETTE_HOST (1U << 7)
+#define SDK_MEDIA_OUTPUT_SCALE_NEAREST (1U << 8)
 
 /* SDK_MEDIA_STATUS_PRESENTATION flag bits (status result `flags`). */
 #define SDK_MEDIA_PRESENT_CONFIGURED (1U << 0)

@@ -175,7 +175,7 @@ static const struct SDKServiceDescriptor sdk_services[] = {
 			SDK_SERVICE_FLAG_VIDEO_MEDIA_VORBIS |
 			SDK_SERVICE_FLAG_VIDEO_MPEG2,
 		.opcode_base = SDK_SERVICE_VIDEO,
-		.opcode_count = 14,
+		.opcode_count = SDK_VIDEO_OPCODE_COUNT_SHARED_OUTPUT,
 		.name = "video"
 	},
 	{

@@ -344,6 +344,7 @@ C_SRCS = \
 	$(SRC_DIR)/sdk_video_mpeg2_glue.c \
 	$(SRC_DIR)/sdk_media_profile.c \
 	$(SRC_DIR)/sdk_media_session.c \
+	$(SRC_DIR)/sdk_media_output.c \
 	$(SRC_DIR)/sdk_video_webm_module.c \
 	$(SRC_DIR)/sdk_video_yuy2.c \
 	$(SRC_DIR)/sdk_jpeg.c \

@@ -58,6 +58,32 @@ struct SDKMediaSessionState {
 	uint8_t present_pending;
 	uint8_t audio_bound;
 	uint8_t audio_paused;
+	/* SDK_VIDEO_OUTPUT_SHARED_BUFFER session. Kept after close so
+	 * close_retired knows the overlay was never involved. */
+	uint8_t shared;
+	/* Shared-buffer output. Core 0 owns it; core 1 only sees the job. */
+	struct {
+		uint32_t slot0_addr;
+		uint32_t slot_stride;
+		uint32_t palette_addr;
+		uint32_t pitch;
+		uint32_t picture_bytes;
+		uint32_t written;
+		uint32_t presented;
+		uint32_t last_us;
+		uint16_t width;
+		uint16_t height;
+		uint16_t flags;
+		uint8_t format;
+		uint8_t depth;
+		uint8_t slots;
+		uint8_t configured;
+		uint8_t in_flight;
+		uint8_t complete;
+		uint8_t newest_slot;
+		uint8_t next_slot;
+		uint8_t pending_slot;
+	} output;
 	struct SDKMediaSessionMainResult last_close;
 };
 
@@ -402,6 +428,8 @@ void sdk_media_session_poison_core1(void)
 	media.state = SDK_MEDIA_SESSION_STATE_ERROR;
 	media.held = 0U;
 	media.present_pending = 0U;
+	/* A faulted core 1 never retires a queued conversion. */
+	media.output.in_flight = 0U;
 }
 
 void sdk_media_session_present_queued(uint32_t session)
@@ -418,7 +446,9 @@ void sdk_media_session_present_queued(uint32_t session)
 void sdk_media_session_close_retired(uint32_t session)
 {
 	if (media.just_closed_session == session && !media.close_retired) {
-		overlay_video_session_closed(session);
+		/* A shared-buffer session never touched the overlay. */
+		if (!media.shared)
+			overlay_video_session_closed(session);
 		media.close_retired = 1U;
 	}
 }
@@ -499,6 +529,7 @@ uint16_t sdk_media_session_begin_owned(
 	media.owner_id = owner_id;
 	media.state = mapped_state(video_result.state);
 	media.audio_codec = begin->audio_codec;
+	media.shared = begin->output_format == SDK_VIDEO_OUTPUT_SHARED_BUFFER;
 	media.pcm_ring = begin->pcm_ring;
 	media.pcm_ring_capacity = begin->pcm_ring_capacity;
 	media.video_pts = SDK_MEDIA_NO_PTS;
@@ -614,6 +645,51 @@ uint16_t sdk_media_session_decode(
 	return SDK_STATUS_OK;
 }
 
+/* PRESENT of a shared-buffer session: queue the conversion of the held
+ * picture on core 1 and report the slot it goes to. The task is queued
+ * ahead of any later DECODE, so the decoder-owned planes are read before
+ * they can be reused and the frame is released at once. */
+static uint16_t present_shared(struct SDKMediaSessionMainResult *result)
+{
+	struct SDKMediaOutputJob job;
+	uint32_t slot;
+
+	if (!media.output.configured)
+		return SDK_STATUS_BAD_REQUEST;
+	if (media.output.in_flight)
+		return SDK_STATUS_BUSY;
+	slot = media.output.next_slot;
+	memset(&job, 0, sizeof(job));
+	job.session = media.session;
+	job.dst_addr = media.output.slot0_addr +
+		(slot != 0U ? media.output.slot_stride : 0U);
+	job.palette_addr = media.output.palette_addr;
+	job.pitch = media.output.pitch;
+	job.width = media.output.width;
+	job.height = media.output.height;
+	job.flags = media.output.flags;
+	job.format = media.output.format;
+	job.depth = media.output.depth;
+	job.slot = (uint8_t)slot;
+	if (!sdk_mailbox_enqueue_internal(TASKQ_OP_MEDIA_OUTPUT, &job,
+	                                  sizeof(job)))
+		return SDK_STATUS_BUSY;
+	media.output.in_flight = 1U;
+	media.output.pending_slot = (uint8_t)slot;
+	media.output.next_slot =
+		media.output.slots == 2U ? (uint8_t)(slot ^ 1U) : 0U;
+	media.output.presented++;
+	media.presented_frames++;
+	media.held = 0U;
+	media.state = SDK_MEDIA_SESSION_STATE_READY;
+	fill_main(media.output.picture_bytes,
+	          SDK_MEDIA_SESSION_RESULT_PRESENTED |
+	          SDK_MEDIA_SESSION_RESULT_OUTPUT_PENDING |
+	          (slot != 0U ? SDK_MEDIA_SESSION_RESULT_OUTPUT_SLOT1 : 0U),
+	          result);
+	return SDK_STATUS_OK;
+}
+
 uint16_t sdk_media_session_present(
 	uint32_t session, uint32_t flags,
 	struct SDKMediaSessionMainResult *result)
@@ -628,6 +704,8 @@ uint16_t sdk_media_session_present(
 		return SDK_STATUS_BAD_REQUEST;
 	if (media.present_pending)
 		return SDK_STATUS_BUSY;
+	if (media.shared)
+		return present_shared(result);
 	{
 		/* Core-0 cost of handing a decoded frame to the overlay. This
 		 * excludes the compose itself, which core 1 times separately as
@@ -675,7 +753,7 @@ uint16_t sdk_media_session_status(
 	struct SDKMediaSessionStatusResult *result)
 {
 	if (!result || session == 0U || flags != 0U ||
-	    page > SDK_MEDIA_STATUS_PROFILE)
+	    page > SDK_MEDIA_STATUS_OUTPUT)
 		return SDK_STATUS_BAD_REQUEST;
 	if (!active_session(session))
 		return SDK_STATUS_BAD_HANDLE;
@@ -739,6 +817,23 @@ uint16_t sdk_media_session_status(
 			SDK_MEDIA_PACK_PAIR(path.dst_x, path.dst_y);
 		result->value[3] =
 			SDK_MEDIA_PACK_PAIR(path.screen_w, path.screen_h);
+	} else if (page == SDK_MEDIA_STATUS_OUTPUT) {
+		/* An overlay session answers with everything zero. */
+		if (media.shared) {
+			result->flags =
+				(media.output.configured
+					? SDK_MEDIA_OUTPUT_STATUS_CONFIGURED : 0U) |
+				(media.output.complete
+					? SDK_MEDIA_OUTPUT_STATUS_COMPLETE : 0U) |
+				(media.output.complete && media.output.newest_slot != 0U
+					? SDK_MEDIA_OUTPUT_STATUS_SLOT1 : 0U) |
+				(media.output.in_flight
+					? SDK_MEDIA_OUTPUT_STATUS_PENDING : 0U);
+			result->value[0] = media.output.written;
+			result->value[1] = media.output.presented;
+			result->value[2] = media.output.last_us;
+			result->value[3] = SDK_MEDIA_OUTPUT_FLAGS_SUPPORTED;
+		}
 	} else {
 		uint32_t frame_bytes = audio_frame_bytes();
 		uint64_t retired_bytes;
@@ -915,7 +1010,7 @@ uint16_t sdk_media_session_close(
 		return SDK_STATUS_BAD_HANDLE;
 	if (media.audio_bound)
 		return SDK_STATUS_BUSY;
-	if (media.present_pending)
+	if (media.present_pending || media.output.in_flight)
 		return SDK_STATUS_BUSY;
 	status = sdk_video_stream_close(session, &video_result);
 	if (status != SDK_STATUS_OK)
@@ -960,4 +1055,109 @@ int sdk_media_session_owned_by(uint32_t session, uint16_t owner_id)
 {
 	return media.active && media.session == session &&
 	       media.owner_id == owner_id;
+}
+
+int sdk_media_session_output_shared(uint32_t session)
+{
+	if (!active_session(session))
+		return -1;
+	return media.shared ? 1 : 0;
+}
+
+uint16_t sdk_media_session_output_config(
+	uint32_t session, const struct SDKMediaOutputBinding *binding,
+	struct SDKMediaSessionMainResult *result)
+{
+	struct SDKMediaOutputLayout layout;
+	uint16_t status;
+
+	if (!binding || !result || session == 0U)
+		return SDK_STATUS_BAD_REQUEST;
+	if (!active_session(session))
+		return SDK_STATUS_BAD_HANDLE;
+	if (!media.shared)
+		return SDK_STATUS_UNSUPPORTED;
+	if (media.state == SDK_MEDIA_SESSION_STATE_ERROR)
+		return SDK_STATUS_IO_ERROR;
+	if (media.output.in_flight)
+		return SDK_STATUS_BUSY;
+	status = sdk_media_output_check(&binding->config, &layout);
+	if (status != SDK_STATUS_OK)
+		return status;
+	if (binding->buffer_addr == 0U ||
+	    binding->config.buffer_offset > binding->buffer_length ||
+	    layout.span_bytes >
+	        binding->buffer_length - binding->config.buffer_offset ||
+	    ((binding->config.flags & SDK_MEDIA_OUTPUT_PALETTE_HOST) != 0U) !=
+	        (binding->palette_addr != 0U))
+		return SDK_STATUS_BAD_REQUEST;
+
+	media.output.slot0_addr =
+		binding->buffer_addr + binding->config.buffer_offset;
+	media.output.slot_stride = binding->config.slot_stride;
+	media.output.palette_addr = binding->palette_addr;
+	media.output.pitch = binding->config.pitch;
+	media.output.picture_bytes = layout.picture_bytes;
+	media.output.width = (uint16_t)binding->config.width;
+	media.output.height = (uint16_t)binding->config.height;
+	media.output.flags = (uint16_t)binding->config.flags;
+	media.output.format = (uint8_t)binding->config.format;
+	media.output.depth = (uint8_t)layout.depth;
+	media.output.slots = (uint8_t)layout.slots;
+	media.output.configured = 1U;
+	/* The slots hold pictures of the old layout until a new one lands. */
+	media.output.complete = 0U;
+	media.output.newest_slot = 0U;
+	media.output.next_slot = 0U;
+	fill_main(layout.picture_bytes, 0U, result);
+	return SDK_STATUS_OK;
+}
+
+void sdk_media_session_output_retired(uint32_t session, int ok,
+	                                  uint32_t elapsed_us)
+{
+	if (!media.active || !media.output.in_flight ||
+	    (session != 0U && session != media.session))
+		return;
+	media.output.in_flight = 0U;
+	if (!ok) {
+		media.state = SDK_MEDIA_SESSION_STATE_ERROR;
+		return;
+	}
+	media.output.complete = 1U;
+	media.output.newest_slot = media.output.pending_slot;
+	media.output.written++;
+	media.output.last_us = elapsed_us;
+}
+
+uint16_t sdk_media_session_run_output(const struct SDKMediaOutputJob *job,
+	                                  uint32_t *elapsed_us)
+{
+	struct SDKVideoDecodedFrame frame;
+	const uint8_t *palette = 0;
+	uint32_t start = sdk_media_profile_now_us();
+	uint16_t status;
+
+	*elapsed_us = 0U;
+	if (!sdk_video_stream_get_direct_frame(job->session, &frame))
+		return SDK_STATUS_BAD_HANDLE;
+	if (job->palette_addr != 0U) {
+		palette = (const uint8_t *)(uintptr_t)job->palette_addr;
+#ifndef SDK_MEDIA_HOST_TEST
+		/* The host wrote the palette; core 1 may hold an older copy. */
+		Xil_DCacheInvalidateRange((INTPTR)job->palette_addr,
+		                          SDK_MEDIA_OUTPUT_PALETTE_BYTES);
+#endif
+	}
+	status = sdk_media_output_convert(job, &frame, palette);
+	if (status != SDK_STATUS_OK)
+		return status;
+#ifndef SDK_MEDIA_HOST_TEST
+	/* L1 and L2: the host reads the slot through the Zorro bridge. */
+	Xil_DCacheFlushRange((INTPTR)job->dst_addr,
+	                     sdk_media_output_job_bytes(job));
+#endif
+	sdk_media_profile_record(SDK_MEDIA_PROFILE_YUY2_PACK, start);
+	*elapsed_us = sdk_media_profile_now_us() - start;
+	return SDK_STATUS_OK;
 }
