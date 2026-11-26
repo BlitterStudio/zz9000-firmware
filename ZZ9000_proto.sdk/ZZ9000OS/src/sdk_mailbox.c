@@ -4701,6 +4701,8 @@ static uint16_t handle_audio_ring_acquire(
 		return complete_status(req, comp, SDK_STATUS_BUSY);
 	if ((flags & SDK_AUDIO_RING_ACQUIRE_FLAG_SOURCE_S16BE) != 0U)
 		audio_fabric_lease_source_be(slot, 1);
+	if ((flags & SDK_AUDIO_RING_ACQUIRE_FLAG_IDLE_PAUSED) != 0U)
+		audio_fabric_lease_idle_paused(slot, 1);
 	write_completion(comp, req, SDK_STATUS_OK, sizeof(*result));
 	memset((void *)comp->payload, 0, sizeof(comp->payload));
 	result = (volatile struct SDKAudioRingAcquireResultPayload *)
