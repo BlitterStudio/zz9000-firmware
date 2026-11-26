@@ -101,6 +101,7 @@ typedef enum {
 #define ZZAPP_XPORT_F_QUARANTINED       (1u << 1) /* lease lost; shell held */
 #define ZZAPP_XPORT_F_RELEASE_REQUESTED (1u << 2) /* core 1's retire frees */
 #define ZZAPP_XPORT_F_CORRUPT           (1u << 3) /* a queue index was corrupt */
+#define ZZAPP_XPORT_F_PROFILE           (1u << 4) /* a profile ring is live */
 /*
  * A buffer that a request names stays allocated and unchanged until the client
  * has completed that request. A request the owner abandons (timeout, stop)
@@ -308,6 +309,49 @@ void zzapp_xport_cb_set_fault(zzapp_rec_t *rec, uint32_t fault_class,
  * state, so a client that sees the state sees the fault record. */
 void zzapp_xport_cb_set_state(zzapp_rec_t *rec, uint32_t state,
 			      uint32_t end_reason);
+/* The stack snapshot of a fault or a stall (AAR_CB_STACK_*): `bytes` (at most
+ * AAR_CB_STACK_MAX) copied raw to the data area, then the app address of the
+ * first byte, then the size, which is the last store and is what a reader
+ * reads first. Zero bytes publishes "no snapshot" (the size is cleared before
+ * anything else is touched, so a reader never pairs an old size with new
+ * bytes). The caller orders the state change after it. */
+void zzapp_xport_cb_set_stack(zzapp_rec_t *rec, uint32_t sp, const void *data,
+			      uint32_t bytes);
+
+/* ---- Profiler (AAR_CB_PROFILE_*) ------------------------------------------ */
+
+/* The most a client may ask for (AAR_PROFILE_HZ_MAX of the Amiga library). */
+#define ZZAPP_PROFILE_HZ_MAX       10000u
+/* Rings the firmware serves at once (a debugging aid: the table is static, so
+ * a record costs nothing when it does not profile). */
+#define ZZAPP_PROFILE_SLOTS        8u
+/* One ring: 1024 samples in one block step. */
+#define ZZAPP_PROFILE_RING_BYTES   ZZAPP_XPORT_BLOCK_STEP
+
+/*
+ * Allocate the sample ring of the record, publish its token, size, a zero
+ * head and a zero drop count, and only then the granted rate. The caller has
+ * chosen `granted_hz` and the scheduler ticks per sample, `interval`; nothing
+ * is allocated or advertised for a refusal. A ring left by an earlier load of
+ * the same claim is closed first. AAR_E_INVAL without a live pair or for a
+ * zero rate or interval; AAR_E_NOMEM when the shared limit or the heap
+ * refuses the ring; AAR_E_NORESOURCE when ZZAPP_PROFILE_SLOTS rings are live.
+ */
+int zzapp_xport_profile_open(zzapp_rec_t *rec, uint32_t granted_hz,
+			     uint32_t interval);
+/* Stop sampling, withdraw the grant (the rate word first), return the ring.
+ * 0, also without a ring; -1 when the allocator did not know the ring. The
+ * claim's release calls it. Idempotent. */
+int zzapp_xport_profile_close(zzapp_rec_t *rec);
+/*
+ * Core 1, IRQ safe: one scheduler tick that found the record's app on the
+ * core. Every `interval`-th call records a sample: the pc when `have_pc`, else
+ * the tick is counted in AAR_CB_PROFILE_DROPPED (the app was inside the
+ * runtime, so its pc is not the app's). The sample is stored, then a release
+ * barrier, then the head, one aligned 32-bit store. Does nothing for a record
+ * without a ring.
+ */
+void zzapp_xport_profile_sample(zzapp_rec_t *rec, int have_pc, uint32_t pc);
 
 /* ---- Requests (app side to client) -------------------------------------- */
 

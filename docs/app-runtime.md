@@ -1,6 +1,6 @@
 # ZZ9000 app runtime
 
-The ZZ9000 app kernel implements AAR API 0.5. The normative standard is
+The ZZ9000 app kernel implements AAR API 0.6. The normative standard is
 [aar spec/aar.md](https://github.com/BlitterStudio/aar/blob/main/spec/aar.md).
 The [app call reference](https://github.com/BlitterStudio/aar/blob/main/docs/aar-api.md)
 and [developer guide](https://github.com/BlitterStudio/aar/blob/main/docs/aar-developer-guide.md)
@@ -589,13 +589,14 @@ live record with the restart reason.
 
 ## App interface
 
-The firmware implements the AAR 0.5 app table (`aar_api`, `aar/app.h`), the GL
+The firmware implements the AAR 0.6 app table (`aar_api`, `aar/app.h`), the GL
 table (`aar_gl`, `aar/gl.h`) and the ZZ9000 extension table
 (`aar_ext_zz9000`, `aar/ext_zz9000.h`) on the process records and the
 transport described below. Calls are `aar_*`, constants `AAR_*`, status
 codes `AAR_E_*`. The firmware's hardware names (`ZZ_*` audio, Ethernet,
-RasterIX and MiniGL registers) are unchanged. `QUERY` reports 0.5 in its ABI
-major and minor words (`ZZAPP_ABI_MAJOR`, `ZZAPP_ABI_MINOR`).
+RasterIX and MiniGL registers) are unchanged. `QUERY` reports 0.6 in its ABI
+major and minor words (`ZZAPP_ABI_MAJOR`, `ZZAPP_ABI_MINOR`). The Amiga
+platform adapter rejects a different version before claiming a slot.
 
 **Groups.** `aar_api.groups` and `aar_info.groups` report the same mask:
 `AAR_GROUP_INPUT` and `AAR_GROUP_SERVICES` always, and `AAR_GROUP_DISPLAY`,
@@ -607,6 +608,28 @@ no slots. `audio_stats` is `NULL`. On the card route the runtime counts
 played underruns in the ring header (`AAR_AUDIO_RING_UNDERRUNS`, a
 little-endian word beside `read_frame`), where the app and the client read
 them; on the AHI route the client consumes the ring and the word stays 0.
+
+**Amiga services.** File mutations, volume queries, wall time, locale,
+environment and clipboard calls use the same parked request path as file
+reads. The launcher applies its configured root and access policy. An
+environment value larger than the transport buffer can be counted but not
+returned whole; clipboard transfers use successive chunks.
+
+**Display.** A WINDOW or SCALED grant names off-screen buffers. Firmware
+does not point scanout at them, and records presentation when the client
+acknowledges a completed flip. Direct scanout records it when the new
+address is latched. `aar_display_wait_vblank` waits for the ZZ9000 blank
+when the card scans out the app's display. For WINDOW or SCALED displays it
+asks the client and can return `AAR_E_NOSYS`. `aar_display_vsync` remains a
+pacing hint. Unbind GL before calling `aar_display_resize`: an active GL
+binding owns render targets sized for the old surface and returns
+`AAR_E_BUSY` on resize.
+
+**GL.** The optional MiniGL module exposes its supported GL 1.1 additions
+through the AAR table, including lighting, fog, matrix operations and
+texture copies. Unavailable operations are NULL, including stencil,
+display lists, clip planes and the attribute stack. Test the table slot
+before calling it.
 
 **Image rules.** The loader reads an ELF32 ARM `ET_DYN` image. `e_flags` must
 say EABI version 5 and hard float, and must not say soft float; any other
@@ -625,7 +648,7 @@ extracted, before any byte is copied. `e_entry` must be even and inside a
 40-byte descriptor of ten little-endian words), found in a `PT_NOTE` segment.
 A note that only a section header names is not found. The loader checks, in the
 descriptor's order: magic `0x4E524141` and version 1 (`AAR_E_INVAL`); profile
-A32 (`AAR_E_PROFILE`); `api_major` 0 and `api_minor` at most 5
+A32 (`AAR_E_PROFILE`); `api_major` 0 and `api_minor` 6
 (`AAR_E_INVAL`); `stack_bytes` 0 for the default 1 MiB, else 64 KiB to 1 MiB
 and a multiple of 16 (`AAR_E_INVAL`); the reserved word 0; every
 `groups_required` bit present in the runtime mask (`AAR_E_NOGROUP`); and
@@ -833,18 +856,50 @@ The control block separates platform and client writes:
   written first, then a barrier, then the end reason and the state, so a
   client that sees the state sees the record. The words are written under the
   services slot-state lock, so both cores may write them.
-- The client writes the three limit words (`AAR_CB_PRIVATE_MIB`,
-  `AAR_CB_SHARED_MIB`, `AAR_CB_WEIGHT`) before `LOAD_BEGIN`, the stop request
+- The client writes the four limit words (`AAR_CB_PRIVATE_MIB`,
+  `AAR_CB_SHARED_MIB`, `AAR_CB_WEIGHT`, `AAR_CB_PROFILE_HZ`) before `LOAD_BEGIN`, the stop request
   (`AAR_CB_STOP_REQUEST`), the lease counter (`AAR_CB_LEASE_COUNTER`) and the
   drop counters. The firmware reads them with a load and a barrier and never
   writes them: a lease loss latches the record's own stop and leaves the
   client's stop word alone.
 - A fault is the `AAR_FAULT_*` class of the runtime's fault code: data abort
   (alignment aborts as `ALIGN`), prefetch abort as `FETCH`, undefined
-  instruction as `ILLEGAL`, anything else (watchdog, forced stop, core
-  restart) as `OTHER`. `AAR_CB_FLAGS` carries `AAR_CBF_DISPLAY`, `AUDIO` and
+  instruction as `ILLEGAL`, anything else (forced stop, stuck API call, core
+  restart) as `OTHER`. A stall (`AAR_END_STALL`) records class `NONE` with
+  syndrome, `pstate` and address 0 and the `pc`, `sp` and `lr` where the
+  watchdog found the app: the scheduler tick that decided the stall fills them
+  from the interrupted user-mode frame (an app inside an API body has no user
+  frame, so they stay 0). A damaged stack canary, found by the system thread,
+  takes them from the frame the scheduler saved when the app last left the
+  core. `AAR_CB_FLAGS` carries `AAR_CBF_DISPLAY`, `AUDIO` and
   `GL` from the groups of the app's note, and `CONSOLE` once the console was
   used.
+- A fault or a stall also leaves a stack snapshot (`AAR_CB_STACK_*`): up to 512
+  bytes from the app's `sp` upward, copied as they lie in app memory, only
+  from inside the stack the loader mapped for the app (`stack_base` to
+  `stack_top`; a span that crosses a frame is copied frame by frame). An `sp`
+  outside it, or a stop with no `sp`, gives no snapshot, and the size word
+  reads 0. The size is cleared first and written last, with the fault record
+  complete and a barrier before the end reason and the state, so a client that
+  reads a non-zero size reads the bytes it names. Nothing in the app's address
+  space is read through a pointer the app controls; the firmware's own
+  `[app] fault stack` line prints from the snapshot.
+- The profiler is granted at load begin (`zzapp_loader_bound`) from
+  `AAR_CB_PROFILE_HZ`. The scheduler tick (`ZZAPP_TICK_US`, 200 Hz) is the
+  sampling clock, so the grant is the largest rate that divides 200 and does
+  not exceed the request: a sample every n-th tick of the app that the tick
+  interrupted, never more often than asked, and 1 Hz at the least. A request
+  of 0 or above `AAR_PROFILE_HZ_MAX` (10000) gets nothing. A grant allocates an
+  8 KiB ring of 1024 samples (one block step, counted in the shared limit),
+  writes its token, size, a zero head and zero drops, and the granted rate
+  last; a refused allocation, the shared limit or a full table
+  (`ZZAPP_PROFILE_SLOTS`, eight rings at once) leaves the rate word 0 and
+  allocates nothing. The sample is the pc of the interrupted frame, taken only
+  from a user-mode frame; a tick that found the app inside the runtime is
+  counted in `AAR_CB_PROFILE_DROPPED`. The sample is stored, a release barrier
+  runs, then the head is stored as one aligned 32-bit word. The ring stays
+  until the claim is released, so a client can read the last samples of an
+  app that has ended; a second load of the same claim closes it first.
 
 Display flip state, surface words and palette generations are private to the
 firmware. Client capabilities without a control block word

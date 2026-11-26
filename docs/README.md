@@ -33,7 +33,7 @@ and programs that use the card.
 
 | Document | Contents |
 | --- | --- |
-| [AAR standard](https://github.com/BlitterStudio/aar/blob/main/spec/aar.md) | The normative AAR API 0.5 specification, including apps, the Amiga client library and transport. |
+| [AAR standard](https://github.com/BlitterStudio/aar/blob/main/spec/aar.md) | The normative AAR API 0.6 specification, including apps, the Amiga client library and transport. |
 | [aar-run manual](https://github.com/BlitterStudio/aar/blob/main/client/run/README.md) | The reference launcher, shipped by the SDK as `Docs/aar-run.guide`. |
 | [aar-developer-guide.md](https://github.com/BlitterStudio/aar/blob/main/docs/aar-developer-guide.md) | Building (including freestanding apps), running, memory, scheduling, bit-identical maths, and porting apps. |
 | [aar-api.md](https://github.com/BlitterStudio/aar/blob/main/docs/aar-api.md) | Every `aar_*` call and `AAR_*` constant, with the ZZ9000 notes and extension table. |

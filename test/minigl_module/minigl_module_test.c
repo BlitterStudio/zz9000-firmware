@@ -1069,6 +1069,22 @@ int main(void)
     /* Queued ARM presentation needs two retained frames plus one draw target. */
     assert(amiberry_transport_inproc_ctx()->state.target.buffer_count == 3U);
     {
+        const aar_gl *draw = gl;
+        double depth;
+        uint8_t mask[4];
+
+        assert(draw->version == AAR_GL_VERSION_11);
+        assert(draw->StencilFunc == NULL);
+        draw->ClearDepth(0.25);
+        draw->GetDoublev(0x0b73U, &depth); /* GL_DEPTH_CLEAR_VALUE */
+        assert(depth == 0.25);
+        draw->ClearDepth(1.0);
+        draw->ColorMask(0U, 1U, 0U, 1U);
+        draw->GetBooleanv(0x0c23U, mask); /* GL_COLOR_WRITEMASK */
+        assert(mask[0] == 0U && mask[1] == 1U && mask[2] == 0U && mask[3] == 1U);
+        draw->ColorMask(1U, 1U, 1U, 1U);
+    }
+    {
         const aar_gl *draw = (const aar_gl *)gl;
         uint32_t textures[3];
         uint8_t *pixels = calloc(1U, 64U << 20);

@@ -666,7 +666,7 @@ static void test_table_copy_uses_only_veneers(void)
     CHECK(zzapp_svc_copy_api(&app, &direct) == AAR_E_INVAL);
 }
 
-static void test_gl_table_copy_uses_only_veneers(void)
+static void test_gl_table_copy_preserves_missing_calls(void)
 {
     aar_gl direct;
     aar_gl app;
@@ -675,14 +675,20 @@ static void test_gl_table_copy_uses_only_veneers(void)
 
     memset(&direct, 0, sizeof(direct));
     direct.size = sizeof(direct);
-    direct.version = AAR_GL_VERSION_ARRAYS;
+    direct.version = AAR_GL_VERSION_11;
     direct.Begin = (void *)(uintptr_t)0x12345678U;
+    direct.ClearDepth = (void *)(uintptr_t)0x12345678U;
     CHECK(zzapp_svc_copy_gl(&app, &direct) == AAR_OK);
     CHECK(app.size == direct.size);
-    CHECK(app.version == AAR_GL_VERSION_ARRAYS);
+    CHECK(app.version == AAR_GL_VERSION_11);
     entries = (uintptr_t *)(void *)((uint8_t *)&app + offsetof(aar_gl, Begin));
-    for (i = 0; i < zzapp_svc_gl_count(); ++i)
-        CHECK(zzapp_svc_is_veneer(entries[i]));
+    for (i = 0; i < zzapp_svc_gl_count(); ++i) {
+        if (i == gl_slot(offsetof(aar_gl, Begin)) ||
+            i == gl_slot(offsetof(aar_gl, ClearDepth)))
+            CHECK(entries[i] == zzapp_svc_gl_veneer(i));
+        else
+            CHECK(entries[i] == 0U);
+    }
 }
 
 static void test_descriptors_cover_callable_slots(void)
@@ -1358,6 +1364,54 @@ static void test_gl_getters_copy_full_outputs(void)
              &frame, (uint32_t[9]){ vector_pnames[0], user_va + 0x500U });
     CHECK(getter_calls == 1U);
     CHECK(getter_pointer != (uintptr_t)(user_va + 0x500U));
+    teardown_dispatch();
+}
+
+static void test_minor6_gl_pointer_extents(void)
+{
+    zzapp_svc_frame_t frame;
+    uint32_t getd = ZZAPP_SVC_GL_FIRST + gl_slot(offsetof(aar_gl, GetDoublev));
+    uint32_t getb = ZZAPP_SVC_GL_FIRST + gl_slot(offsetof(aar_gl, GetBooleanv));
+    uint32_t light = ZZAPP_SVC_GL_FIRST + gl_slot(offsetof(aar_gl, Lightfv));
+
+    setup_dispatch();
+    if (!user_page) {
+        teardown_dispatch();
+        return;
+    }
+    gl.GetDoublev = (void (*)(uint32_t, double *))mock_get_integerv;
+    gl.GetBooleanv = (void (*)(uint32_t, uint8_t *))mock_get_integerv;
+    dispatch(api_slot(offsetof(aar_api, gl_bind)), &frame, (uint32_t[9]){ 1U });
+
+    /* Sixteen doubles do not fit in the last 64 bytes of the page.
+     * Four GLbooleans do fit in its last four bytes. */
+    dispatch(getd, &frame, (uint32_t[9]){ 0x0ba6U, user_va + 0xfc0U });
+    CHECK(frame.r[0] == (uint32_t)AAR_E_FAULT && getter_calls == 0U);
+    dispatch(getb, &frame, (uint32_t[9]){ 0x0c23U, user_va + 0xffcU });
+    CHECK(getter_calls == 1U);
+    /* GL_POSITION is four floats; a one-float pointer is not enough. */
+    dispatch(light, &frame, (uint32_t[9]){ 0x4000U, 0x1203U, user_va + 0xffcU });
+    CHECK(frame.r[0] == (uint32_t)AAR_E_FAULT);
+    /* A direct SVC for an absent hard-float slot may not call through NULL. */
+    dispatch(ZZAPP_SVC_GL_FIRST + gl_slot(offsetof(aar_gl, ClearDepth)), &frame,
+             (uint32_t[9]){ 0U });
+    CHECK(frame.r[0] == (uint32_t)AAR_E_NOSYS);
+    teardown_dispatch();
+}
+
+static void test_minor6_present_timestamp_uses_both_registers(void)
+{
+    zzapp_svc_frame_t frame;
+
+    setup_dispatch();
+    if (user_page) {
+        uint64_t expected = mock_time_us();
+        api.display_last_present_us = mock_time_us;
+        dispatch(api_slot(offsetof(aar_api, display_last_present_us)), &frame,
+                 (uint32_t[9]){ 0U });
+        CHECK(frame.r[0] == (uint32_t)expected);
+        CHECK(frame.r[1] == (uint32_t)(expected >> 32));
+    }
     teardown_dispatch();
 }
 static void test_rejected_pixel_store_does_not_change_validation(void)
@@ -2047,7 +2101,7 @@ static void test_user_tables_and_state_are_per_record(void)
 int main(void)
 {
     test_table_copy_uses_only_veneers();
-    test_gl_table_copy_uses_only_veneers();
+    test_gl_table_copy_preserves_missing_calls();
     test_pointer_checks();
     test_large_and_section_pointer_checks();
     test_gl_span_validation();
@@ -2064,6 +2118,8 @@ int main(void)
 #endif
     test_svc_uses_core_aware_slot_resolver();
     test_gl_getters_copy_full_outputs();
+    test_minor6_gl_pointer_extents();
+    test_minor6_present_timestamp_uses_both_registers();
     test_svc_number_comes_from_r12();
     test_fast_no_lock_calls();
 #if ZZAPP_SVC_PROBES

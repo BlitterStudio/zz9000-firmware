@@ -16,6 +16,11 @@ struct aar_stat;
 struct aar_dirent;
 struct aar_surface;
 struct aar_audio;
+struct aar_volume_info;
+struct aar_locale_info;
+struct aar_display_info;
+struct aar_display_mode;
+struct aar_pointer;
 struct zzapp_rec;
 
 /* SDK status numbers. Match sdk_mailbox.h; guarded so either include order works. */
@@ -110,6 +115,28 @@ int zzapp_svc_file_stat(const char *path, struct aar_stat *out);
 int zzapp_svc_file_list_open(const char *path);
 int zzapp_svc_file_list_next(int list, struct aar_dirent *out);
 int zzapp_svc_file_list_close(int list);
+/* API 0.6 files. Paths follow the rules of file_open; every call waits the
+ * file timeout (AAR_E_TIMEDOUT) and a stop ends it with AAR_E_IO. */
+int zzapp_svc_file_delete(const char *path);
+int zzapp_svc_file_rename(const char *from, const char *to, uint32_t flags);
+int zzapp_svc_dir_create(const char *path);
+int zzapp_svc_file_set_date(const char *path, int64_t mtime);
+int zzapp_svc_file_set_protect(const char *path, uint32_t protect);
+int zzapp_svc_file_truncate(int fd, uint64_t size);
+/* Structure results write at most min(out->size, sizeof) bytes, with the
+ * size field set to that. */
+int zzapp_svc_volume_info(const char *path, struct aar_volume_info *out);
+/* API 0.6 time, locale, environment and clipboard: parked requests with no
+ * deadline of their own. env_get and clip_read answer AAR_E_NOSPC with *out_n
+ * set when the value does not fit; a NULL buffer is valid only with 0 bytes. */
+int zzapp_svc_time_unix_us(int64_t *out_us);
+int zzapp_svc_locale_info(struct aar_locale_info *out);
+int zzapp_svc_env_get(const char *name, char *buf, uint32_t bytes,
+		      uint32_t *out_n);
+int zzapp_svc_clip_read(uint32_t unit, uint32_t type, void *buf,
+			uint32_t bytes, uint32_t *out_n);
+int zzapp_svc_clip_write(uint32_t unit, uint32_t type, const void *data,
+			 uint32_t bytes);
 int zzapp_svc_display_open(uint32_t w, uint32_t h, uint32_t format,
 			   uint32_t flags, struct aar_surface *out);
 int zzapp_svc_display_flip(uint32_t surface_id);
@@ -128,6 +155,26 @@ uint32_t zzapp_svc_display_latest_dropped(void);
  * reach the client. */
 int zzapp_display_latest(void);
 int zzapp_svc_display_vsync(void);
+/* API 0.6 display. Resize needs AAR_DISPCAP_RESIZE in the granted caps
+ * (AAR_E_NOSYS otherwise) and no flip pending (AAR_E_BUSY); the surface is
+ * remapped and *out refreshed, or, when the client's reply cannot be used, the
+ * display is closed. wait_vblank on a display the card scans out directly
+ * waits for a blank of that screen (zzapp_services_display_vblank and
+ * zzapp_services_display_mailbox_end count one when the address VDMA was
+ * pointed at is the display's own), AAR_E_TIMEDOUT at the timeout if none was
+ * seen; on a window or scaled display it is the client's: its AAR_OK,
+ * AAR_E_TIMEDOUT or AAR_E_NOSYS pass through. last_present_us is the time the
+ * last flip or GL swap was seen shown, 0 before the first. */
+int zzapp_svc_display_info(uint32_t surface_id, struct aar_display_info *out);
+int zzapp_svc_display_modes(struct aar_display_mode *out, uint32_t max,
+			    uint32_t *out_n);
+int zzapp_svc_display_resize(uint32_t surface_id, uint32_t w, uint32_t h,
+			     struct aar_surface *out);
+int zzapp_svc_display_set_title(uint32_t surface_id, const char *title);
+int zzapp_svc_display_pointer(uint32_t surface_id, uint32_t mode,
+			      const struct aar_pointer *image);
+int zzapp_svc_display_wait_vblank(uint32_t timeout_us);
+uint64_t zzapp_svc_display_last_present_us(void);
 int zzapp_svc_event_poll(struct aar_event *out, uint32_t max, uint32_t *out_n);
 int zzapp_svc_audio_open(uint32_t rate, uint32_t channels, struct aar_audio *out);
 int zzapp_svc_audio_close(void);

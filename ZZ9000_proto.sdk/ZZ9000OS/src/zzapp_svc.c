@@ -23,7 +23,7 @@
 #define VENEER_BYTES 12U
 #define VENEER_PAGE_BYTES 4096U
 #define STRING_BYTES 512U
-#define COPY_BYTES sizeof(aar_dirent)
+#define COPY_BYTES ((sizeof(aar_dirent) + 7U) & ~(size_t)7U)
 #define API_FIRST offsetof(aar_api, exit)
 #define GL_FIRST offsetof(aar_gl, Begin)
 #define API_SLOT(field) ((uint32_t)((offsetof(aar_api, field) - API_FIRST) / sizeof(void *)))
@@ -50,6 +50,7 @@ _Static_assert(API_VENEERS <= ZZAPP_SVC_GL_FIRST, "api veneers below gl");
 #define GL_DOUBLE 0x140aU
 #define GL_VERTEX_ARRAY 0x8074U
 #define MGL_ARRAY_TRANSFORMATIONS 0x701dU
+#define GL_NORMAL_ARRAY 0x8075U
 #define GL_COLOR_ARRAY 0x8076U
 #define GL_TEXTURE_COORD_ARRAY 0x8078U
 #define GL_TEXTURE0 0x84c0U
@@ -193,14 +194,15 @@ typedef struct {
 } gl_pixel_store_t;
 typedef struct {
     uint32_t pointer;
-    int32_t size;
     uint32_t type;
     int32_t stride;
+    uint8_t size; /* one to four components, or zero before a valid pointer */
     uint8_t enabled;
 } gl_client_array_t;
 typedef struct {
     gl_client_array_t vertex;
     gl_client_array_t color;
+    gl_client_array_t normal;
     gl_client_array_t texcoord[GL_TEXTURE_UNITS];
     gl_pixel_store_t pack;
     gl_pixel_store_t unpack;
@@ -780,6 +782,8 @@ static inline void gl_telemetry_frontend_end(svc_state_t *st)
 #define DF(a, v, r, p0, p1, p2) { a, v, r, 0U, 0U, { p0, p1, p2 } }
 #define DL(a, r, p0, p1, p2) { a, 0U, r, 0U, ZZAPP_SVC_FAST_NO_LOCK, \
                                 { p0, p1, p2 } }
+#define DN(a, p0, p1) { a, 0U, ZZAPP_SVC_RETURN_INT, 0U, \
+                        ZZAPP_SVC_COPY_OUT_ON_NOSPC, { p0, p1, N } }
 #define IN_FIXED(a, n, c) P(a, ZZAPP_SVC_POINTER_IN, ZZAPP_SVC_LENGTH_FIXED, 0U, n, c)
 #define OUT_FIXED(a, n, c) P(a, ZZAPP_SVC_POINTER_OUT, ZZAPP_SVC_LENGTH_FIXED, 0U, n, c)
 #define OUT_OPTIONAL(a, n, c) { a, ZZAPP_SVC_POINTER_OUT, ZZAPP_SVC_LENGTH_FIXED, 0U, n, c, 1U, 0U, 0U }
@@ -791,7 +795,8 @@ static inline void gl_telemetry_frontend_end(svc_state_t *st)
 #define IN_STRING(a) P(a, ZZAPP_SVC_POINTER_IN, ZZAPP_SVC_LENGTH_STRING, 0U, 1U, 1U)
 #define IN_PIXELS(a, n, f, t) { a, ZZAPP_SVC_POINTER_IN, ZZAPP_SVC_LENGTH_GL_PIXELS, n, 1U, 0U, 0U, f, t }
 #define OUT_PIXELS(a, n, f, t) { a, ZZAPP_SVC_POINTER_OUT, ZZAPP_SVC_LENGTH_GL_PIXELS, n, 1U, 0U, 0U, f, t }
-#define OUT_GL_GET(a) P(a, ZZAPP_SVC_POINTER_OUT, ZZAPP_SVC_LENGTH_GL_GET, 0U, 4U, 1U)
+#define OUT_GL_GET(a, e) P(a, ZZAPP_SVC_POINTER_OUT, ZZAPP_SVC_LENGTH_GL_GET, 0U, e, 1U)
+#define IN_GL_VECTOR(a, p) P(a, ZZAPP_SVC_POINTER_IN, ZZAPP_SVC_LENGTH_GL_VECTOR, p, sizeof(float), 1U)
 #define IN_INDICES(a, n) P(a, ZZAPP_SVC_POINTER_IN, ZZAPP_SVC_LENGTH_GL_INDICES, n, 1U, 0U)
 /* Pointers a NULL value of which the API defines as AAR_E_INVAL (or as a
  * valid "none"): dispatch skips them, the handler decides. */
@@ -853,6 +858,20 @@ static const zzapp_svc_descriptor_t api_descriptors[API_VENEERS] = {
     [API_SLOT(msg_send)] = D(1, ZZAPP_SVC_RETURN_INT, IN_OPT(0, AAR_MSG_BYTES), N, N),
     [API_SLOT(msg_poll)] = DP(1, ZZAPP_SVC_RETURN_INT, OUT_OPTIONAL(0, AAR_MSG_BYTES, 1U), N, N),
     [API_SLOT(msg_wait)] = D(1, ZZAPP_SVC_RETURN_INT, N, N, N),
+    /* core: file mutations, host environment and clipboard */
+    [API_SLOT(file_delete)] = D(1, ZZAPP_SVC_RETURN_INT, IN_STRING_OPT(0), N, N),
+    [API_SLOT(file_rename)] = D(3, ZZAPP_SVC_RETURN_INT, IN_STRING_OPT(0), IN_STRING_OPT(1), N),
+    [API_SLOT(dir_create)] = D(1, ZZAPP_SVC_RETURN_INT, IN_STRING_OPT(0), N, N),
+    [API_SLOT(file_set_date)] = D(4, ZZAPP_SVC_RETURN_INT, IN_STRING_OPT(0), N, N),
+    [API_SLOT(file_set_protect)] = D(2, ZZAPP_SVC_RETURN_INT, IN_STRING_OPT(0), N, N),
+    [API_SLOT(file_truncate)] = D(4, ZZAPP_SVC_RETURN_INT, N, N, N),
+    [API_SLOT(volume_info)] = D(2, ZZAPP_SVC_RETURN_INT, IN_STRING_OPT(0), IO_SIZED(1, sizeof(aar_volume_info)), N),
+    [API_SLOT(time_unix_us)] = D(1, ZZAPP_SVC_RETURN_INT, OUT_U64(0), N, N),
+    [API_SLOT(locale_info)] = D(1, ZZAPP_SVC_RETURN_INT, IO_SIZED(0, sizeof(aar_locale_info)), N, N),
+    [API_SLOT(env_get)] = { 4, 0U, ZZAPP_SVC_RETURN_INT, 0U, ZZAPP_SVC_COPY_OUT_ON_NOSPC,
+                           { IN_STRING_OPT(0), OUT_ARG_OPT(1, 2), OUT_U32(3) } },
+    [API_SLOT(clip_read)] = DN(5, OUT_ARG_OPT(2, 3), OUT_U32(4)),
+    [API_SLOT(clip_write)] = D(4, ZZAPP_SVC_RETURN_INT, IN_ARG_OPT(2, 3), N, N),
     /* optional */
     [API_SLOT(ext)] = D(2, ZZAPP_SVC_RETURN_POINTER, N, N, N),
     [API_SLOT(map_file)] = D(3, ZZAPP_SVC_RETURN_INT, IN_STRING_OPT(0), OUT_PTR(1), OUT_U64(2)),
@@ -867,6 +886,13 @@ static const zzapp_svc_descriptor_t api_descriptors[API_VENEERS] = {
     [API_SLOT(display_set_palette)] = D(4, ZZAPP_SVC_RETURN_INT, IN_COUNT_OPT(3, 2, 4U), N, N),
     [API_SLOT(display_close)] = D(1, ZZAPP_SVC_RETURN_INT, N, N, N),
     [API_SLOT(display_latest_dropped)] = D(0, ZZAPP_SVC_RETURN_INT, N, N, N),
+    [API_SLOT(display_info)] = D(2, ZZAPP_SVC_RETURN_INT, IO_SIZED(1, sizeof(aar_display_info)), N, N),
+    [API_SLOT(display_modes)] = DN(3, OUT_COUNT_OPT(0, 1, sizeof(aar_display_mode)), OUT_U32(2)),
+    [API_SLOT(display_resize)] = D(4, ZZAPP_SVC_RETURN_INT, OUT_OPTIONAL(3, sizeof(aar_surface), 1U), N, N),
+    [API_SLOT(display_set_title)] = D(2, ZZAPP_SVC_RETURN_INT, IN_STRING_OPT(1), N, N),
+    [API_SLOT(display_pointer)] = D(3, ZZAPP_SVC_RETURN_INT, IN_OPT(2, sizeof(aar_pointer)), N, N),
+    [API_SLOT(display_wait_vblank)] = D(1, ZZAPP_SVC_RETURN_INT, N, N, N),
+    [API_SLOT(display_last_present_us)] = D(0, ZZAPP_SVC_RETURN_U64, N, N, N),
     /* audio */
     [API_SLOT(audio_open)] = D(3, ZZAPP_SVC_RETURN_INT, OUT_OPTIONAL(2, sizeof(aar_audio), 1U), N, N),
     [API_SLOT(audio_close)] = D(0, ZZAPP_SVC_RETURN_INT, N, N, N),
@@ -935,8 +961,8 @@ static const zzapp_svc_descriptor_t gl_descriptors[GL_COUNT] = {
     G1(ReadBuffer, ZZAPP_SVC_RETURN_VOID),
     [GL_SLOT(ReadPixels)] = D(7, ZZAPP_SVC_RETURN_VOID, OUT_PIXELS(6, 2, 4, 5), N, N),
     G1(GetString, ZZAPP_SVC_RETURN_POINTER),
-    [GL_SLOT(GetIntegerv)] = D(2, ZZAPP_SVC_RETURN_VOID, OUT_GL_GET(1), N, N),
-    [GL_SLOT(GetFloatv)] = D(2, ZZAPP_SVC_RETURN_VOID, OUT_GL_GET(1), N, N),
+    [GL_SLOT(GetIntegerv)] = D(2, ZZAPP_SVC_RETURN_VOID, OUT_GL_GET(1, 4U), N, N),
+    [GL_SLOT(GetFloatv)] = D(2, ZZAPP_SVC_RETURN_VOID, OUT_GL_GET(1, 4U), N, N),
     G0(GetError, ZZAPP_SVC_RETURN_INT), G2(Hint, ZZAPP_SVC_RETURN_VOID),
     G2(PixelStorei, ZZAPP_SVC_RETURN_VOID), DF(0, 8, ZZAPP_SVC_RETURN_VOID, N, N, N),
     [GL_SLOT(Build2DMipmaps)] = D(7, ZZAPP_SVC_RETURN_INT, IN_PIXELS(6, 2, 4, 5), N, N),
@@ -947,7 +973,39 @@ static const zzapp_svc_descriptor_t gl_descriptors[GL_COUNT] = {
     G1(EnableClientState, ZZAPP_SVC_RETURN_VOID), G1(DisableClientState, ZZAPP_SVC_RETURN_VOID),
     G1(ClientActiveTextureARB, ZZAPP_SVC_RETURN_VOID), G3(DrawArrays, ZZAPP_SVC_RETURN_VOID),
     [GL_SLOT(DrawElements)] = D(4, ZZAPP_SVC_RETURN_VOID, IN_INDICES(3, 1), N, N),
-    G2(LockArrays, ZZAPP_SVC_RETURN_VOID), G0(UnlockArrays, ZZAPP_SVC_RETURN_VOID)
+    G2(LockArrays, ZZAPP_SVC_RETURN_VOID), G0(UnlockArrays, ZZAPP_SVC_RETURN_VOID),
+    [GL_SLOT(ClearDepth)] = DF(0, 2, ZZAPP_SVC_RETURN_VOID, N, N, N),
+    G4(ColorMask, ZZAPP_SVC_RETURN_VOID),
+    [GL_SLOT(PolygonOffset)] = DF(0, 2, ZZAPP_SVC_RETURN_VOID, N, N, N),
+    [GL_SLOT(MultMatrixf)] = D(1, ZZAPP_SVC_RETURN_VOID, IN_FIXED(0, 64U, 1U), N, N),
+    [GL_SLOT(LoadMatrixd)] = D(1, ZZAPP_SVC_RETURN_VOID, IN_FIXED(0, 128U, 1U), N, N),
+    [GL_SLOT(MultMatrixd)] = D(1, ZZAPP_SVC_RETURN_VOID, IN_FIXED(0, 128U, 1U), N, N),
+    [GL_SLOT(GetDoublev)] = D(2, ZZAPP_SVC_RETURN_VOID, OUT_GL_GET(1, 8U), N, N),
+    [GL_SLOT(GetBooleanv)] = D(2, ZZAPP_SVC_RETURN_VOID, OUT_GL_GET(1, 1U), N, N),
+    G1(ActiveTextureARB, ZZAPP_SVC_RETURN_VOID),
+    [GL_SLOT(MultiTexCoord2fARB)] = DF(1, 2, ZZAPP_SVC_RETURN_VOID, N, N, N),
+    [GL_SLOT(MultiTexCoord2fvARB)] = D(2, ZZAPP_SVC_RETURN_VOID, IN_FIXED(1, 8U, 1U), N, N),
+    [GL_SLOT(Normal3f)] = DF(0, 3, ZZAPP_SVC_RETURN_VOID, N, N, N),
+    [GL_SLOT(Normal3fv)] = D(1, ZZAPP_SVC_RETURN_VOID, IN_FIXED(0, 12U, 1U), N, N),
+    G3(NormalPointer, ZZAPP_SVC_RETURN_VOID),
+    [GL_SLOT(Lightf)] = DF(2, 1, ZZAPP_SVC_RETURN_VOID, N, N, N),
+    [GL_SLOT(Lightfv)] = D(3, ZZAPP_SVC_RETURN_VOID, IN_GL_VECTOR(2, 1), N, N),
+    [GL_SLOT(LightModelf)] = DF(1, 1, ZZAPP_SVC_RETURN_VOID, N, N, N),
+    [GL_SLOT(LightModelfv)] = D(2, ZZAPP_SVC_RETURN_VOID, IN_GL_VECTOR(1, 0), N, N),
+    G2(LightModeli, ZZAPP_SVC_RETURN_VOID),
+    [GL_SLOT(Materialf)] = DF(2, 1, ZZAPP_SVC_RETURN_VOID, N, N, N),
+    [GL_SLOT(Materialfv)] = D(3, ZZAPP_SVC_RETURN_VOID, IN_GL_VECTOR(2, 1), N, N),
+    G2(ColorMaterial, ZZAPP_SVC_RETURN_VOID),
+    [GL_SLOT(Fogf)] = DF(1, 1, ZZAPP_SVC_RETURN_VOID, N, N, N),
+    [GL_SLOT(Fogfv)] = D(2, ZZAPP_SVC_RETURN_VOID, IN_GL_VECTOR(1, 0), N, N),
+    G2(Fogi, ZZAPP_SVC_RETURN_VOID),
+    [GL_SLOT(LineWidth)] = DF(0, 1, ZZAPP_SVC_RETURN_VOID, N, N, N),
+    [GL_SLOT(PointSize)] = DF(0, 1, ZZAPP_SVC_RETURN_VOID, N, N, N),
+    G3(Color3ub, ZZAPP_SVC_RETURN_VOID), G2(Vertex2i, ZZAPP_SVC_RETURN_VOID),
+    [GL_SLOT(Vertex2fv)] = D(1, ZZAPP_SVC_RETURN_VOID, IN_FIXED(0, 8U, 1U), N, N),
+    G2(TexCoord2i, ZZAPP_SVC_RETURN_VOID), G1(IsTexture, ZZAPP_SVC_RETURN_INT),
+    G8(CopyTexImage2D, ZZAPP_SVC_RETURN_VOID), G8(CopyTexSubImage2D, ZZAPP_SVC_RETURN_VOID),
+    [GL_SLOT(TexEnvfv)] = D(3, ZZAPP_SVC_RETURN_VOID, IN_GL_VECTOR(2, 1), N, N)
 };
 
 uint32_t zzapp_svc_api_count(void) { return API_COUNT; }
@@ -1113,13 +1171,20 @@ aar_gl *zzapp_svc_gl_for_slot(uint32_t pid)
 int zzapp_svc_copy_gl(aar_gl *destination, const aar_gl *source)
 {
     uintptr_t *entries;
-    uint32_t i;
-    if (!destination || !source || source->size > sizeof(*destination) || source->size < GL_FIRST)
+    const uintptr_t *direct;
+    uint32_t i, count;
+
+    if (!destination || !source || source->size > sizeof(*destination) ||
+        source->size < GL_FIRST || (source->size - GL_FIRST) % sizeof(void *))
         return AAR_E_INVAL;
-    memcpy(destination, source, source->size);
+    destination->size = source->size;
+    destination->version = source->version;
+    count = (source->size - GL_FIRST) / sizeof(void *);
     entries = (uintptr_t *)(void *)((uint8_t *)destination + GL_FIRST);
-    for (i = 0U; i < GL_COUNT; ++i)
-        entries[i] = zzapp_svc_gl_veneer(i);
+    direct = (const uintptr_t *)(const void *)((const uint8_t *)source + GL_FIRST);
+    for (i = 0U; i < count; ++i)
+        entries[i] = direct[i] ? zzapp_svc_gl_veneer(i) : 0U;
+    memset(entries + count, 0, (GL_COUNT - count) * sizeof(*entries));
     return AAR_OK;
 }
 static int zzapp_svc_copy_gl_for_slot(const svc_state_t *st, aar_gl *destination,
@@ -1134,8 +1199,9 @@ static int zzapp_svc_copy_gl_for_slot(const svc_state_t *st, aar_gl *destination
         return AAR_OK;
     entries = (uintptr_t *)(void *)((uint8_t *)destination + GL_FIRST);
     for (i = 0U; i < GL_COUNT; ++i)
-        entries[i] = (uintptr_t)st->veneer_alias +
-                     (ZZAPP_SVC_GL_FIRST + i) * VENEER_BYTES;
+        if (entries[i])
+            entries[i] = (uintptr_t)st->veneer_alias +
+                         (ZZAPP_SVC_GL_FIRST + i) * VENEER_BYTES;
     return AAR_OK;
 }
 
@@ -1225,6 +1291,17 @@ static void gl_record_client_call(svc_state_t *st, uint32_t number,
             state->in_begin = 0U;
         return;
     }
+    if (number == GL_SLOT(NormalPointer)) {
+        if (!state->in_begin) {
+            array = &state->normal;
+            array->size = args[0] == GL_FLOAT && (int32_t)args[1] >= 0 &&
+                          args[2] ? 3 : 0;
+            array->type = GL_FLOAT;
+            array->stride = (int32_t)args[1];
+            array->pointer = args[2];
+        }
+        return;
+    }
     array = gl_client_array(state, number);
     if (array) {
         int32_t size = (int32_t)args[0];
@@ -1278,6 +1355,7 @@ static void gl_record_client_call(svc_state_t *st, uint32_t number,
             return;
         if (args[0] == GL_VERTEX_ARRAY) state->vertex.enabled = enabled;
         else if (args[0] == GL_COLOR_ARRAY) state->color.enabled = enabled;
+        else if (args[0] == GL_NORMAL_ARRAY) state->normal.enabled = enabled;
         else if (args[0] == GL_TEXTURE_COORD_ARRAY)
             state->texcoord[state->active_texture].enabled = enabled;
     }
@@ -1310,7 +1388,8 @@ static int gl_validate_array_index(const zzapp_as_t *as,
     uint32_t texture;
 
     if (!gl_validate_array_element(as, &state->vertex, index) ||
-        !gl_validate_array_element(as, &state->color, index))
+        !gl_validate_array_element(as, &state->color, index) ||
+        !gl_validate_array_element(as, &state->normal, index))
         return 0;
     for (texture = 0U; texture < GL_TEXTURE_UNITS; ++texture)
         if (!gl_validate_array_element(as, &state->texcoord[texture], index))
@@ -1354,11 +1433,9 @@ static int gl_validate_spans(svc_state_t *st, const zzapp_as_t *as,
 {
     uint32_t texture;
 
-    if (!gl_validate_array_span(st, as, &state->vertex, min, max,
-                                element_count))
-        return 0;
-    if (!gl_validate_array_span(st, as, &state->color, min, max,
-                                element_count))
+    if (!gl_validate_array_span(st, as, &state->vertex, min, max, element_count) ||
+        !gl_validate_array_span(st, as, &state->color, min, max, element_count) ||
+        !gl_validate_array_span(st, as, &state->normal, min, max, element_count))
         return 0;
     for (texture = 0U; texture < GL_TEXTURE_UNITS; ++texture)
         if (!gl_validate_array_span(st, as, &state->texcoord[texture],
@@ -1528,10 +1605,18 @@ static int gl_indices_bytes(const uint32_t args[SVC_MAX_WORDS], uint32_t first,
     *bytes = (uint32_t)length;
     return AAR_OK;
 }
-static int gl_get_bytes(const uint32_t args[SVC_MAX_WORDS], uint32_t *bytes)
+static uint32_t gl_vector_values(uint32_t pname)
 {
-    *bytes = zzapp_gl_get_values(args[0]) * sizeof(uint32_t);
-    return AAR_OK;
+    switch (pname) {
+    case 0x1204U: /* spot direction */
+        return 3U;
+    case 0x1200U: case 0x1201U: case 0x1202U: case 0x1203U:
+    case 0x1600U: case 0x1602U: /* AMBIENT..POSITION, EMISSION, AMBIENT_AND_DIFFUSE */
+    case 0x0B53U: case 0x0B66U: case 0x2201U: /* model ambient, fog/texenv color */
+        return 4U;
+    default:
+        return 1U;
+    }
 }
 /* Extent in bytes of one pointer argument. AAR_E_FAULT for a length no
  * address space holds, AAR_E_INVAL for a 64-bit service length the
@@ -1554,7 +1639,9 @@ static int pointer_bytes(const svc_state_t *st, const zzapp_svc_pointer_t *point
     else if (pointer->length == ZZAPP_SVC_LENGTH_GL_INDICES)
         return gl_indices_bytes(args, pointer->length_argument, bytes);
     else if (pointer->length == ZZAPP_SVC_LENGTH_GL_GET)
-        return gl_get_bytes(args, bytes);
+        length = zzapp_gl_get_values(args[0]) * pointer->element_bytes;
+    else if (pointer->length == ZZAPP_SVC_LENGTH_GL_VECTOR)
+        length = gl_vector_values(args[pointer->length_argument]) * sizeof(float);
     else return AAR_OK;
     if (length > UINT32_MAX) return AAR_E_FAULT;
     *bytes = (uint32_t)length;
@@ -1657,7 +1744,9 @@ static void finish_pointers(const zzapp_svc_descriptor_t *descriptor,
     uint32_t i;
 
     if (descriptor->result == ZZAPP_SVC_RETURN_INT && result != (uint32_t)AAR_OK &&
-        (!descriptor->copy_out_on_positive || (int32_t)result <= 0))
+        (!descriptor->copy_out_on_positive || (int32_t)result <= 0) &&
+        (!(descriptor->flags & ZZAPP_SVC_COPY_OUT_ON_NOSPC) ||
+         result != (uint32_t)AAR_E_NOSPC))
         return;
     for (i = 0U; i < 3U; ++i) {
         const zzapp_svc_pointer_t *pointer = &descriptor->pointers[i];
@@ -1668,6 +1757,23 @@ static void finish_pointers(const zzapp_svc_descriptor_t *descriptor,
         if (tails[i])
             memset((uint8_t *)(uintptr_t)originals[i] + lengths[i], 0, tails[i]);
     }
+}
+
+/* The descriptor copies the image header; only the pixels named by a valid
+ * CUSTOM header are read. The service copies them before parking the app. */
+static int check_pointer_image(const zzapp_as_t *as, const aar_pointer *image)
+{
+    uintptr_t pixels = (uintptr_t)image->argb;
+
+    if (!pixels || !image->width || image->width > AAR_POINTER_MAX_DIM ||
+        !image->height || image->height > AAR_POINTER_MAX_DIM ||
+        (uint32_t)image->hot_x >= image->width ||
+        (uint32_t)image->hot_y >= image->height)
+        return AAR_E_INVAL;
+    if ((pixels & (sizeof(uint32_t) - 1U)) != 0U)
+        return AAR_E_FAULT;
+    return zzapp_svc_check_user(as, (uint32_t)pixels,
+                                image->width * image->height * sizeof(uint32_t), 0);
 }
 
 /* heap_shrink's out pointer must not name memory the call gives back: its
@@ -1717,6 +1823,16 @@ static int call_gl_float(const aar_gl *gl, uint32_t slot, const zzapp_svc_frame_
     else if (slot == GL_SLOT(TexParameterf)) gl->TexParameterf(args[0], args[1], a);
     else if (slot == GL_SLOT(TexEnvf)) gl->TexEnvf(args[0], args[1], a);
     else if (slot == GL_SLOT(Perspective)) gl->Perspective(double_argument(frame, 0U), double_argument(frame, 1U), double_argument(frame, 2U), double_argument(frame, 3U));
+    else if (slot == GL_SLOT(ClearDepth)) gl->ClearDepth(double_argument(frame, 0U));
+    else if (slot == GL_SLOT(PolygonOffset)) gl->PolygonOffset(a, b);
+    else if (slot == GL_SLOT(MultiTexCoord2fARB)) gl->MultiTexCoord2fARB(args[0], a, b);
+    else if (slot == GL_SLOT(Normal3f)) gl->Normal3f(a, b, c);
+    else if (slot == GL_SLOT(Lightf)) gl->Lightf(args[0], args[1], a);
+    else if (slot == GL_SLOT(LightModelf)) gl->LightModelf(args[0], a);
+    else if (slot == GL_SLOT(Materialf)) gl->Materialf(args[0], args[1], a);
+    else if (slot == GL_SLOT(Fogf)) gl->Fogf(args[0], a);
+    else if (slot == GL_SLOT(LineWidth)) gl->LineWidth(a);
+    else if (slot == GL_SLOT(PointSize)) gl->PointSize(a);
     else return 0;
     *result = 0U;
     return 1;
@@ -1749,7 +1865,6 @@ static int dispatch_api(const aar_api *api, svc_state_t *st, uint32_t pid,
                         const zzapp_svc_descriptor_t *descriptor, uint32_t number,
                         uint32_t args[SVC_MAX_WORDS], uint32_t *result)
 {
-    (void)descriptor;
     uintptr_t entry;
     if (number == API_SLOT(gl_bind)) {
         if (!AAR_API_COVERS(api, gl_bind) || !api->gl_bind) return AAR_E_NOSYS;
@@ -1775,15 +1890,15 @@ static int dispatch_api(const aar_api *api, svc_state_t *st, uint32_t pid,
             return AAR_E_NOSYS;
         return dispatch_bind(st, pid, runtime->gl_bind_flags(args[0], args[1]), result);
     }
-    if (number == API_SLOT(time_us)) {
-        uint64_t value = api->time_us();
+    if (entry_at(api, api->size, API_FIRST, number, &entry) != AAR_OK)
+        return AAR_E_NOSYS;
+    if (descriptor->result == ZZAPP_SVC_RETURN_U64) {
+        uint64_t value = ((uint64_t (*)(void))entry)();
 
         *result = (uint32_t)value;
         frame->r[1] = (uint32_t)(value >> 32);
         return AAR_OK;
     }
-    if (entry_at(api, api->size, API_FIRST, number, &entry) != AAR_OK)
-        return AAR_E_NOSYS;
     *result = call_words(entry, args);
     if (number == API_SLOT(gl_unbind))
         gl_release(st, st->gl_client.generation);
@@ -1799,6 +1914,10 @@ static int dispatch_gl(svc_state_t *st, uint32_t pid, const zzapp_svc_frame_t *f
     int status = AAR_OK;
 
     if (!gl || !proc || !table || st->gl_client.generation != proc->generation) {
+        status = AAR_E_NOSYS;
+        goto done;
+    }
+    if (entry_at(gl, gl->size, GL_FIRST, number, &entry) != AAR_OK) {
         status = AAR_E_NOSYS;
         goto done;
     }
@@ -1856,10 +1975,6 @@ static int dispatch_gl(svc_state_t *st, uint32_t pid, const zzapp_svc_frame_t *f
     }
     if (call_gl_float(gl, number, frame, args, result))
         goto done;
-    if (entry_at(gl, gl->size, GL_FIRST, number, &entry) != AAR_OK) {
-        status = AAR_E_NOSYS;
-        goto done;
-    }
     *result = call_words(entry, args);
     gl_record_client_call(st, number, args);
 done:
@@ -1874,7 +1989,7 @@ static void zzapp_svc_dispatch_slow(const aar_api *api, zzapp_proc_t *proc,
     const zzapp_svc_descriptor_t *descriptor;
     uint32_t result = 0U;
     uint32_t args[SVC_MAX_WORDS] = { 0U };
-    uint8_t copies[3][COPY_BYTES];
+    _Alignas(8) uint8_t copies[3][COPY_BYTES];
     char strings[3][STRING_BYTES];
     uint32_t originals[3] = { 0U };
     uint32_t lengths[3] = { 0U };
@@ -1899,6 +2014,9 @@ static void zzapp_svc_dispatch_slow(const aar_api *api, zzapp_proc_t *proc,
     if (gl)
         counters_handler_start(st);
     status = frame_arguments(&proc->as, frame, descriptor->arguments, args);
+    if (!gl && number == API_SLOT(display_pointer) &&
+        args[1] != AAR_POINTER_CUSTOM)
+        args[2] = 0U;
     if (status == AAR_OK)
         status = prepare_pointers(st, &proc->as, descriptor, args, copies,
                                   strings, originals, lengths, tails);
@@ -1934,6 +2052,15 @@ static void zzapp_svc_dispatch_slow(const aar_api *api, zzapp_proc_t *proc,
         if (zzapp_svc_check_user(&proc->as, (uint32_t)(uintptr_t)open->tile,
                                  open->tile_bytes, 1) != AAR_OK) {
             frame->r[0] = (uint32_t)AAR_E_FAULT;
+            return;
+        }
+    }
+    if (!gl && number == API_SLOT(display_pointer) &&
+        args[1] == AAR_POINTER_CUSTOM && originals[0]) {
+        status = check_pointer_image(&proc->as,
+            (const aar_pointer *)(const void *)copies[0]);
+        if (status != AAR_OK) {
+            frame->r[0] = (uint32_t)status;
             return;
         }
     }

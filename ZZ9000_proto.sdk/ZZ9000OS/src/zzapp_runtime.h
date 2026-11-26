@@ -177,9 +177,22 @@ void scheduler_core1_service_from_app(void);
 
 /* spsr is the interrupted CPSR. Only user mode is an app fault. */
 int zzapp_fault_is_app(uint32_t pc, uint32_t abort_lr, uint32_t spsr);
+/* A user-mode fault, from the abort vectors, with the registers they read:
+ * pc, the user sp and lr, the fault address and status, the CPSR. The stop is
+ * requested here and completed by the system thread, which writes the fault
+ * record and the stack snapshot (only from inside the app's own stack) before
+ * it publishes the state and the end reason. */
 void zzapp_take_app_fault(uint32_t fault, uint32_t pc, uint32_t sp,
                           uint32_t lr, uint32_t far, uint32_t fsr,
                           uint32_t cpsr);
+/* Core 1's exception vectors call this with the frame they saved. For a
+ * scheduler tick (ZZAPP_KERNEL_DISPATCH_TICK) the frame is where the running
+ * app was: a stall stop decided in the same tick takes pc, sp and lr from it,
+ * and the profiler takes the pc of a user-mode frame, before the scheduler
+ * saves the frame and picks the next context. */
+zzapp_arm_frame_t *zzapp_kernel_arch_dispatch(zzapp_arm_frame_t *frame,
+                                               uint32_t source,
+                                               uint32_t return_adjust);
 
 void zzapp_api_enter(void);
 void zzapp_api_leave(void);
