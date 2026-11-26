@@ -17,10 +17,30 @@ LDLIBS := -Wl,--wrap=card_pool_alloc $(HOST_DEMUX) $(HOST_LIBWEBP) -lpng -ljpeg 
 
 .PHONY: test smoke fixtures sanitize clean
 
-test: $(BUILD)/jpeg_png_image_test $(BUILD)/webp_image_test $(BUILD)/webp_animation_test
+test: $(BUILD)/jpeg_png_image_test $(BUILD)/webp_image_test $(BUILD)/webp_animation_test $(BUILD)/png_oneshot_test
 	$(BUILD)/jpeg_png_image_test
 	$(BUILD)/webp_image_test
 	$(BUILD)/webp_animation_test
+	$(BUILD)/png_oneshot_test
+
+# One-shot DECODE_PNG through the production dispatcher. sdk_mailbox.c is
+# built apart from the codecs: the module mocks of test/modules (zlib.h,
+# jpeglib.h) would shadow the real codec headers. Symbols outside the
+# exercised paths stay unresolved, as in test/sdk_service.
+MAILBOX_MOCKS := $(ROOT)/test/modules/mock
+PNG_RUNTIME := $(FIRMWARE_SRC)/sdk_image_stream.c $(FIRMWARE_SRC)/sdk_jpeg.c $(FIRMWARE_SRC)/sdk_surface.c \
+	$(FIRMWARE_SRC)/sdk_smp_lock.c $(FIRMWARE_SRC)/sdk_decode_reclaim.c \
+	$(FIRMWARE_SRC)/card_pool.c ../card_pool/host_card_pool.c
+
+$(BUILD)/sdk_mailbox_host.o: $(FIRMWARE_SRC)/sdk_mailbox.c $(FIRMWARE_SRC)/sdk_mailbox.h $(MAILBOX_MOCKS)/mailbox_test_decls.h | $(BUILD)
+	$(CC) -O2 -g -Wall -Wextra -fno-pie -DTASKQ_HOST_TEST -DSDK_MAILBOX_HOST_TEST \
+		-include $(MAILBOX_MOCKS)/mailbox_test_decls.h -I$(MAILBOX_MOCKS) -I$(FIRMWARE_SRC) -c -o $@ $<
+$(BUILD)/scheduler_host.o: $(FIRMWARE_SRC)/scheduler.c $(FIRMWARE_SRC)/scheduler.h | $(BUILD)
+	$(CC) -O2 -g -Wall -Wextra -fno-pie -DTASKQ_HOST_TEST -I$(FIRMWARE_SRC) -c -o $@ $<
+$(BUILD)/png_oneshot_test: png_oneshot_test.c host_runtime.c $(PNG_RUNTIME) $(BUILD)/sdk_mailbox_host.o $(BUILD)/scheduler_host.o | $(BUILD)
+	$(CC) $(CFLAGS) $(INCLUDES) -o $@ png_oneshot_test.c host_runtime.c $(PNG_RUNTIME) \
+		$(BUILD)/sdk_mailbox_host.o $(BUILD)/scheduler_host.o \
+		-Wl,--unresolved-symbols=ignore-all -Wl,--wrap=card_pool_alloc -lpng -ljpeg -lz -lm
 
 smoke: $(BUILD)/webp_smoke
 	@printf '%s\n' 'usage: $(BUILD)/webp_smoke input.webp output.ppm'

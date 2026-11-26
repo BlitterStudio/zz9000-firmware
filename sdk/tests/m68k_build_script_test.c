@@ -106,6 +106,7 @@ static int check_script(const char *path, const char *name)
   ok &= expect_contains(script, name, "tools/zz9k-libeventcancel.c");
   ok &= expect_contains(script, name, "tools/zz9k-libsmoke.c");
   ok &= expect_contains(script, name, "tools/zz9k-libdecode.c");
+  ok &= expect_contains(script, name, "tools/zz9k-pngdecode.c");
   ok &= expect_contains(script, name, "tools/zz9k-hash.c");
   ok &= expect_contains(script, name, "tools/zz9k-inflate.c");
   ok &= expect_contains(script, name, "tools/zz9k-archive.c");
@@ -189,6 +190,7 @@ static int check_script(const char *path, const char *name)
   ok &= expect_contains(script, name, "build/zz9k-libeventports");
   ok &= expect_contains(script, name, "build/zz9k-libeventcancel");
   ok &= expect_contains(script, name, "build/zz9k-libdecode");
+  ok &= expect_contains(script, name, "build/zz9k-pngdecode");
   ok &= expect_contains(script, name, "build/zz9k-library-demo");
   ok &= expect_contains(script, name, "build/zz9k-jpeg-stream-demo");
   ok &= expect_contains(script, name, "build/zz9k-typed-decode-demo");

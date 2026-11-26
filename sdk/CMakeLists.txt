@@ -1194,6 +1194,7 @@ add_test(
           ${CMAKE_CURRENT_SOURCE_DIR}/tools/zz9k-bench.c
           ${CMAKE_CURRENT_SOURCE_DIR}/tools/zz9k-surface-info.c
           ${CMAKE_CURRENT_SOURCE_DIR}/tools/zz9k-libdecode.c
+          ${CMAKE_CURRENT_SOURCE_DIR}/tools/zz9k-pngdecode.c
           ${CMAKE_CURRENT_SOURCE_DIR}/tools/zz9k-jpeg.c
           ${CMAKE_CURRENT_SOURCE_DIR}/tools/zz9k-png.c
           ${CMAKE_CURRENT_SOURCE_DIR}/tools/zz9k-hash.c

@@ -746,6 +746,31 @@ struct jpeg_op_params {
 typedef char jpeg_op_params_size_check[
     (sizeof(struct jpeg_op_params) <= TASKQ_OP_PARAM_BYTES) ? 1 : -1];
 
+/*
+ * Native-endian packed parameters for a deferred DECODE_PNG task: the
+ * resolved, range-checked source and destination of one request, plus the
+ * slice state of its one-shot image session (session 0 = not begun yet,
+ * offset = next source byte to feed). Same enqueue gates as DECODE_JPEG:
+ * never a framebuffer-backed or ARM-local destination.
+ */
+struct png_op_params {
+	uint32_t src_addr;
+	uint32_t src_len;
+	uint32_t dst_addr;
+	uint32_t dst_length;
+	uint32_t dst_surface;
+	uint32_t dst_pitch;
+	uint32_t output_format;
+	uint32_t offset;
+	uint32_t session;
+	uint16_t dst_x, dst_y;
+	uint16_t dst_width, dst_height;   /* decode bounds (right/bottom edge) */
+	uint16_t flags;
+};
+
+typedef char png_op_params_size_check[
+    (sizeof(struct png_op_params) <= TASKQ_OP_PARAM_BYTES) ? 1 : -1];
+
 #define SDK_JPEG_DECODE_ROWS_PER_SLICE 2U
 #define SDK_JPEG_CACHE_CHUNK_BYTES (32U * 1024U)
 
@@ -3113,6 +3138,128 @@ static uint16_t handle_decode_jpeg(volatile struct SDKMailboxEntry *req,
 	return SDK_STATUS_OK;
 }
 
+
+/*
+ * One-shot PNG decode: the session decoder (sdk_image_stream.c) run
+ * start to finish for one request, so a one-shot and a session decode of
+ * the same file produce the same pixels and the same errors. The request
+ * layout is the JPEG one. Output is a surface in a 32-bit or RGB888
+ * format; FIT scaling is not available for PNG (UNSUPPORTED, as for a
+ * session). Core 1 runs it in input slices like a core-1 session; the
+ * inline fallback runs the same steps on core 0.
+ */
+static uint16_t handle_decode_png(volatile struct SDKMailboxEntry *req,
+                                  volatile struct SDKMailboxEntry *comp,
+                                  uint16_t payload_len)
+{
+	volatile struct SDKImageDecodePayload *payload;
+	volatile struct SDKImageDecodeResultPayload *result;
+	struct SDKImageStreamBegin begin;
+	struct SDKImageStreamResult image_result;
+	struct SDKSharedBuffer *src;
+	struct SDKSurface dst;
+	uint32_t src_offset;
+	uint32_t src_length;
+	uint32_t dst_x;
+	uint32_t dst_y;
+	uint32_t dst_width;
+	uint32_t dst_height;
+	uint32_t dst_handle;
+	uint32_t output_format;
+	uint32_t flags;
+	uint16_t status;
+
+	if (payload_len < sizeof(*payload))
+		return complete_status(req, comp, SDK_STATUS_BAD_REQUEST);
+
+	payload = (volatile struct SDKImageDecodePayload *)req->payload;
+	src = find_shared_buffer(get_be32(payload->src_handle));
+	dst_handle = get_be32(payload->dst_surface);
+	if (!src || !get_surface_info(dst_handle, &dst))
+		return complete_status(req, comp, SDK_STATUS_BAD_HANDLE);
+
+	src_offset = get_be32(payload->src_offset);
+	src_length = get_be32(payload->src_length);
+	dst_x = get_be32(payload->dst_x);
+	dst_y = get_be32(payload->dst_y);
+	output_format = get_be32(payload->output_format);
+	flags = get_be32(payload->flags);
+
+	if (output_format != dst.format)
+		return complete_status(req, comp, SDK_STATUS_UNSUPPORTED);
+	if (!buffer_range_valid(src, src_offset, src_length) ||
+	    src_length == 0U) {
+		return complete_status(req, comp, SDK_STATUS_BAD_REQUEST);
+	}
+	if (!decode_bounds(dst.width, dst_x, get_be32(payload->dst_width),
+	                   &dst_width) ||
+	    !decode_bounds(dst.height, dst_y, get_be32(payload->dst_height),
+	                   &dst_height)) {
+		return complete_status(req, comp, SDK_STATUS_BAD_REQUEST);
+	}
+
+	memset(&begin, 0, sizeof(begin));
+	begin.codec = SDK_IMAGE_CODEC_PNG;
+	begin.output_mode = dst_handle == SDK_SURFACE_HANDLE_FRAMEBUFFER ?
+		SDK_IMAGE_OUTPUT_FRAMEBUFFER : SDK_IMAGE_OUTPUT_SURFACE;
+	begin.dst_surface = dst_handle;
+	begin.dst_x = dst_x;
+	begin.dst_y = dst_y;
+	begin.dst_width = dst_width;
+	begin.dst_height = dst_height;
+	begin.output_format = output_format;
+	begin.flags = flags;
+	begin.dst_address = (uintptr_t)dst.address;
+	begin.dst_pitch = dst.pitch;
+	begin.dst_length = dst.length;
+	status = sdk_image_stream_validate_begin(&begin);
+	if (status != SDK_STATUS_OK)
+		return complete_status(req, comp, status);
+
+	/* Defer to core 1 under the DECODE_JPEG gates (see there). */
+	if (dst_handle != SDK_SURFACE_HANDLE_FRAMEBUFFER &&
+	    !surface_is_arm_local(&dst) &&
+	    dst.width <= 0xffffU && dst.height <= 0xffffU &&
+	    dst_x <= 0xffffU && dst_y <= 0xffffU &&
+	    dst_width <= 0xffffU && dst_height <= 0xffffU) {
+		struct png_op_params p;
+
+		memset(&p, 0, sizeof(p));
+		p.src_addr = src->address + src_offset;
+		p.src_len = src_length;
+		p.dst_addr = dst.address;
+		p.dst_length = dst.length;
+		p.dst_surface = dst_handle;
+		p.dst_pitch = dst.pitch;
+		p.output_format = output_format;
+		p.dst_x = (uint16_t)dst_x;
+		p.dst_y = (uint16_t)dst_y;
+		p.dst_width = (uint16_t)dst_width;
+		p.dst_height = (uint16_t)dst_height;
+		p.flags = (uint16_t)flags;
+		if (service_try_defer(SDK_OP_DECODE_PNG, req, &p, sizeof(p),
+		                      src_length) == SDK_STATUS_QUEUED)
+			return SDK_STATUS_QUEUED;
+		/* defer unavailable -> decode inline below */
+	}
+
+	status = sdk_image_stream_png_oneshot_decode(
+		&begin, (const uint8_t *)(uintptr_t)(src->address + src_offset),
+		src_length, &image_result);
+	if (status != SDK_STATUS_OK)
+		return complete_status(req, comp, status);
+	scheduler_shared()->tasks_on_core0++;   /* offload-class op run inline */
+
+	write_completion(comp, req, SDK_STATUS_OK, sizeof(*result));
+	memset((void *)comp->payload, 0, sizeof(comp->payload));
+	result = (volatile struct SDKImageDecodeResultPayload *)comp->payload;
+	put_be32(result->width, image_result.image_width);
+	put_be32(result->height, image_result.image_height);
+	put_be32(result->output_format, output_format);
+	put_be32(result->flags, 0U);
+	put_be32(result->bytes_written, image_result.bytes_written);
+	return SDK_STATUS_OK;
+}
 
 /*
  * MP3 decoder contexts: one for the core-0 inline path, one for the
@@ -6676,6 +6823,64 @@ uint16_t sdk_mailbox_run_offload_task(const taskq_desc_t *d,
 		*result_len = sizeof(struct SDKImageDecodeResultPayload);
 		return SDK_STATUS_OK;
 	}
+	case SDK_OP_DECODE_PNG: {
+		struct png_op_params *p =
+		    (struct png_op_params *)(void *)d->op_params;
+		struct SDKImageStreamResult image_result;
+		volatile struct SDKImageDecodeResultPayload *reply;
+		int done = 0;
+		uint16_t s;
+
+		*result_len = 0U;
+		if (smp_cpu_id() != 1)
+			return SDK_STATUS_INTERNAL_ERROR;
+		if (p->session == 0U) {
+			struct SDKImageStreamBegin begin;
+
+			memset(&begin, 0, sizeof(begin));
+			begin.codec = SDK_IMAGE_CODEC_PNG;
+			begin.output_mode = SDK_IMAGE_OUTPUT_SURFACE;
+			begin.dst_surface = p->dst_surface;
+			begin.dst_x = p->dst_x;
+			begin.dst_y = p->dst_y;
+			begin.dst_width = p->dst_width;
+			begin.dst_height = p->dst_height;
+			begin.output_format = p->output_format;
+			begin.flags = p->flags;
+			begin.dst_address = p->dst_addr;
+			begin.dst_pitch = p->dst_pitch;
+			begin.dst_length = p->dst_length;
+			begin.core1_affine = 1U;
+			s = sdk_image_stream_png_oneshot_begin(&begin,
+			                                       &p->session);
+			if (s != SDK_STATUS_OK) {
+				p->session = 0U;
+				return s;
+			}
+		}
+		s = sdk_image_stream_png_oneshot_step(
+			p->session, (const uint8_t *)(uintptr_t)p->src_addr,
+			p->src_len, &p->offset, &done, &image_result);
+		if (s != SDK_STATUS_OK) {
+			p->session = 0U;
+			return s;
+		}
+		if (!done)
+			return SDK_TASK_IN_PROGRESS;
+		p->session = 0U;
+
+		memset(result_payload, 0,
+		       sizeof(struct SDKImageDecodeResultPayload));
+		reply = (volatile struct SDKImageDecodeResultPayload *)
+		    result_payload;
+		put_be32(reply->width, image_result.image_width);
+		put_be32(reply->height, image_result.image_height);
+		put_be32(reply->output_format, p->output_format);
+		put_be32(reply->flags, 0U);
+		put_be32(reply->bytes_written, image_result.bytes_written);
+		*result_len = sizeof(struct SDKImageDecodeResultPayload);
+		return SDK_STATUS_OK;
+	}
 	case SDK_OP_DECODE_MP3: {
 		const struct mp3_op_params *p =
 		    (const struct mp3_op_params *)d->op_params;
@@ -8515,6 +8720,7 @@ static int opcode_reserves_request_id_zero(uint16_t opcode)
 	case SDK_OP_SCALE_IMAGE:
 	case SDK_OP_SCALE_IMAGE_CLIPPED:
 	case SDK_OP_DECODE_JPEG:
+	case SDK_OP_DECODE_PNG:
 	case SDK_OP_DECODE_MP3:
 	case SDK_OP_AUDIO_STREAM_FEED:
 	case SDK_OP_AUDIO_STREAM_READ:
@@ -8820,6 +9026,7 @@ static uint16_t handle_request(volatile struct SDKMailboxEntry *req,
 	case SDK_OP_DECODE_JPEG:
 		return handle_decode_jpeg(req, comp, payload_len);
 	case SDK_OP_DECODE_PNG:
+		return handle_decode_png(req, comp, payload_len);
 	case SDK_OP_DECODE_GIF:
 		return complete_status(req, comp, SDK_STATUS_UNSUPPORTED);
 	case SDK_OP_DECODE_MP3:
@@ -9044,6 +9251,13 @@ uint16_t sdk_mailbox_test_handle_request(
 	volatile struct SDKMailboxEntry *comp)
 {
 	return handle_request(req, comp, 1U);
+}
+
+/* The task loop sets this per request (pending_requests == 1); a host test
+ * that wants the deferred path sets it the same way. */
+void sdk_mailbox_test_set_batch_tail(int batch_tail)
+{
+	g_request_is_batch_tail = batch_tail ? 1 : 0;
 }
 #endif
 

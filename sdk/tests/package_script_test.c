@@ -149,6 +149,7 @@ static int check_script(const char *path, const char *name)
                             "amiga/datatypes/descriptors/ZZ9000-PNG.b64");
   ok &= expect_contains(script, name, "build/zz9k-surfaceops");
   ok &= expect_contains(script, name, "build/zz9k-libdecode");
+  ok &= expect_contains(script, name, "build/zz9k-pngdecode");
   ok &= expect_contains(script, name, "build/zz9k-libevent");
   ok &= expect_contains(script, name, "build/zz9k-libeventbatch");
   ok &= expect_contains(script, name, "build/zz9k-libeventcb");

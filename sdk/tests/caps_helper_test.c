@@ -263,6 +263,11 @@ static int test_service_flag_names(void)
                    "webp-animation")) {
     return 48;
   }
+  if (!expect_name(zz9k_service_flag_name(ZZ9K_SERVICE_IMAGE,
+                                          ZZ9K_SERVICE_FLAG_IMAGE_PNG_ONE_SHOT),
+                   "png-one-shot")) {
+    return 58;
+  }
   if (!expect_name(zz9k_service_flag_name(
                        ZZ9K_SERVICE_AUDIO,
                        ZZ9K_SERVICE_FLAG_AUDIO_STREAM_REDUCE),
@@ -512,7 +517,7 @@ static int test_service_flag_iteration(void)
   if (zz9k_known_service_flag(ZZ9K_SERVICE_SURFACE, 5) != 0U) {
     return 45;
   }
-  if (zz9k_known_service_flag_count(ZZ9K_SERVICE_IMAGE) != 18U) {
+  if (zz9k_known_service_flag_count(ZZ9K_SERVICE_IMAGE) != 19U) {
     return 5;
   }
   if (zz9k_known_service_flag(ZZ9K_SERVICE_IMAGE, 4) !=
@@ -535,7 +540,9 @@ static int test_service_flag_iteration(void)
       ZZ9K_SERVICE_FLAG_IMAGE_WEBP) return 47;
   if (zz9k_known_service_flag(ZZ9K_SERVICE_IMAGE, 17) !=
       ZZ9K_SERVICE_FLAG_IMAGE_WEBP_ANIMATION) return 48;
-  if (zz9k_known_service_flag(ZZ9K_SERVICE_IMAGE, 18) != 0U) return 49;
+  if (zz9k_known_service_flag(ZZ9K_SERVICE_IMAGE, 18) !=
+      ZZ9K_SERVICE_FLAG_IMAGE_PNG_ONE_SHOT) return 49;
+  if (zz9k_known_service_flag(ZZ9K_SERVICE_IMAGE, 19) != 0U) return 59;
   if (zz9k_known_service_flag_count(ZZ9K_SERVICE_CODEC) != 19U) {
     return 9;
   }
