@@ -147,11 +147,47 @@ static void test_reclaim_by_owner_leaves_every_other_owner(void)
     CHECK(blocks_of(SDK_DECODE_POOL_OWNER) == 1U);
 }
 
+/* The core-0 audio ring decoders own SDK_AUDIO_LEASE_DECODE_OWNER. It is a
+ * MEDIA owner that no app serial, video session, module id or the shared
+ * decode heap can produce, and releasing the shared heap's owner (the core-1
+ * reset reclaim) or one app's leaves it, and the other way round. */
+static void test_lease_owner_is_reserved(void)
+{
+    const uint32_t lease = SDK_AUDIO_LEASE_DECODE_OWNER;
+    uint32_t serial;
+    uint32_t id;
+    uint32_t clash = 0U;
+
+    CHECK(CARD_POOL_OWNER_CLASS(lease) == CARD_POOL_CLASS_MEDIA);
+    CHECK(lease != SDK_DECODE_POOL_OWNER);
+    CHECK(lease != CARD_POOL_OWNER(CARD_POOL_CLASS_MEDIA, SDK_MEDIA_SHARED_INSTANCE));
+    for (serial = 1U; serial <= 0x00ffffffU; serial++)
+        clash += sdk_compression_app_owner_bits(serial) == lease;
+    for (id = 0U; id <= 0x0000ffffU; id++)
+        clash += (CARD_POOL_OWNER(CARD_POOL_CLASS_MEDIA, MODULE_TAG | id)) == lease;
+    for (id = 1U; id < SDK_MEDIA_VIDEO_INSTANCE_LIMIT; id++)
+        clash += CARD_POOL_OWNER(CARD_POOL_CLASS_MEDIA, id) == lease;
+    CHECK(clash == 0U);
+
+    host_card_pool_reset(128U << 20);
+    CHECK(card_pool_alloc(&card_pool, 0x10000U, lease) != 0U);
+    CHECK(card_pool_alloc(&card_pool, 0x10000U, SDK_DECODE_POOL_OWNER) != 0U);
+    CHECK(card_pool_alloc(&card_pool, 0x10000U,
+                          sdk_compression_app_owner_bits(5U)) != 0U);
+    (void)card_pool_release_owner(&card_pool, SDK_DECODE_POOL_OWNER);
+    (void)card_pool_release_owner(&card_pool, sdk_compression_app_owner_bits(5U));
+    CHECK(blocks_of(lease) == 1U && card_pool.block_count == 1U);
+    CHECK(card_pool_alloc(&card_pool, 0x10000U, SDK_DECODE_POOL_OWNER) != 0U);
+    (void)card_pool_release_owner(&card_pool, lease);
+    CHECK(blocks_of(lease) == 0U && blocks_of(SDK_DECODE_POOL_OWNER) == 1U);
+}
+
 int main(void)
 {
     test_owners_are_distinct_for_1024_serials();
     test_no_serial_leaves_the_app_range();
     test_reclaim_by_owner_leaves_every_other_owner();
+    test_lease_owner_is_reserved();
     printf("decode_owner_test: %d checks, %d failures\n", checks, failures);
     return failures != 0;
 }

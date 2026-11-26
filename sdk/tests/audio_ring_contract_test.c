@@ -60,10 +60,9 @@ static int test_builders(void)
   if (zz9k_audio_build_ring_acquire_desc(&acquire, 1U, ZZ9K_AUDIO_METER_IDENTITY_SDK_STREAM, 256U, 0U, 0U)) {
     return 6;
   }
-  /* Unknown acquire flags are rejected (bit 0 is SOURCE_RATE, bit 2
-   * IDLE_PAUSED; bits 1 and 3+ are undefined). */
+  /* Bit 1 is firmware-only S16BE; bit 4 is unknown on both ends. */
   if (zz9k_audio_build_ring_acquire_desc(&acquire, 1U, ZZ9K_AUDIO_METER_IDENTITY_SDK_STREAM, 128U, 1U << 1, 0U) ||
-      zz9k_audio_build_ring_acquire_desc(&acquire, 1U, ZZ9K_AUDIO_METER_IDENTITY_SDK_STREAM, 128U, 1U << 3, 0U)) {
+      zz9k_audio_build_ring_acquire_desc(&acquire, 1U, ZZ9K_AUDIO_METER_IDENTITY_SDK_STREAM, 128U, 1U << 4, 0U)) {
     return 7;
   }
   /* IDLE_PAUSED alone (bypass lease), and with SOURCE_RATE; the request
@@ -82,10 +81,21 @@ static int test_builders(void)
             (ZZ9K_AUDIO_RING_ACQUIRE_FLAG_SOURCE_RATE | ZZ9K_AUDIO_RING_ACQUIRE_FLAG_IDLE_PAUSED)) {
       return 7;
     }
-    acquire.flags = 1U << 3;
+    acquire.flags = 1U << 4;
     if (zz9k_request_audio_ring_acquire(&request, &acquire) == ZZ9K_STATUS_OK) {
       return 7;
     }
+  }
+  if (!zz9k_audio_build_ring_acquire_desc(&acquire, 1U,
+          ZZ9K_AUDIO_METER_IDENTITY_SDK_STREAM, 128U,
+          ZZ9K_AUDIO_RING_ACQUIRE_FLAG_CODEC | ZZ9K_AUDIO_RING_ACQUIRE_FLAG_IDLE_PAUSED, 0U) ||
+      zz9k_audio_build_ring_acquire_desc(&acquire, 1U,
+          ZZ9K_AUDIO_METER_IDENTITY_SDK_STREAM, 128U,
+          ZZ9K_AUDIO_RING_ACQUIRE_FLAG_CODEC | ZZ9K_AUDIO_RING_ACQUIRE_FLAG_SOURCE_RATE, 44100U) ||
+      zz9k_audio_build_ring_acquire_desc(&acquire, 1U,
+          ZZ9K_AUDIO_METER_IDENTITY_SDK_STREAM, 128U,
+          ZZ9K_AUDIO_RING_ACQUIRE_FLAG_CODEC, 44100U)) {
+    return 20;
   }
   /* Rate-bearing acquires: flag + a vocabulary rate is accepted;
    * off-vocabulary rates and a rate without the flag are rejected. */
@@ -310,6 +320,16 @@ static int test_acquire_reply(void)
   if (zz9k_reply_audio_ring_acquire_result(&reply, &grant) !=
       ZZ9K_STATUS_INTERNAL_ERROR) {
     return 20; /* contract-2 zero source rate stays malformed */
+  }
+  zz9k_put_be32(&reply.payload.inline_data[28], ZZ9K_AUDIO_RING_CONTRACT_CODEC_STREAM);
+  if (zz9k_reply_audio_ring_acquire_result(&reply, &grant) != ZZ9K_STATUS_OK ||
+      grant.sample_contract != ZZ9K_AUDIO_RING_CONTRACT_CODEC_STREAM ||
+      grant.source_rate != 0U) {
+    return 21;
+  }
+  zz9k_put_be32(&reply.payload.inline_data[44], 44100U);
+  if (zz9k_reply_audio_ring_acquire_result(&reply, &grant) != ZZ9K_STATUS_INTERNAL_ERROR) {
+    return 22;
   }
 
   /* Zorro II compact grant: one slot, bounded gain flagged. */

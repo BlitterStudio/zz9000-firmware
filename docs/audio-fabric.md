@@ -192,14 +192,14 @@ producer cannot attach in that state. The first fabric producer resets the TX
 buffer to `AUDIO_TX_BUFFER_ADDRESS`; later producer changes leave the
 formatter configuration unchanged.
 
-A direct-ring client uses the audio service opcodes below. The client writes
-PCM into the granted board-visible ring and publishes its producer line. PCM
-does not pass through mailbox payloads.
+A direct-ring client uses the audio service opcodes below. It writes
+PCM or codec input into a board-visible ring and publishes its producer
+line. The data does not pass through mailbox payloads.
 
 | Opcode | Value | Operation |
 | --- | --- | --- |
 | `SDK_OP_AUDIO_FABRIC_STATE_GET` | `0x0512` | Read one slot's framed state |
-| `SDK_OP_AUDIO_RING_ACQUIRE` | `0x0513` | Acquire a generation-bound PCM ring and control block |
+| `SDK_OP_AUDIO_RING_ACQUIRE` | `0x0513` | Acquire a generation-bound ring and control block |
 | `SDK_OP_AUDIO_RING_RELEASE` | `0x0514` | Release a generation-bound lease |
 
 The audio service advertises 28 opcodes, `0x0500` through `0x051B`. The
@@ -207,7 +207,7 @@ retired copy-submit range `0x050f` through `0x0511` remains reserved, as do
 `0x0501` and `0x0502`. The voice engine opcodes `0x0518` through `0x051B` are
 inside the count, and the voice service flag is set on Zorro III only.
 
-A successful acquire zeroes the PCM ring and control block, publishes a fresh
+A successful acquire zeroes the ring and control block, publishes a fresh
 generation, and begins in `LEASED`. The slot becomes `ACTIVE` after the first
 valid producer-line publication. A release stops the contribution, rebuilds
 queued periods from the remaining producers, and advances the generation. A
@@ -254,8 +254,8 @@ mailbox currently accepts 8000, 12000, 24000, 32000, 44100, or 48000 Hz.
 `SDK_AUDIO_RING_ACQUIRE_FLAG_SOURCE_S16BE` is valid only with the source-rate
 flag.
 
-`SDK_AUDIO_RING_ACQUIRE_FLAG_IDLE_PAUSED` (bit 2, with or without the source-rate
-flag) is for a client that cannot publish while the host operating system is
+`SDK_AUDIO_RING_ACQUIRE_FLAG_IDLE_PAUSED` (bit 2, valid with PCM and codec
+leases) is for a client that cannot publish while the host operating system is
 active, such as a WHDLoad audio plugin. While the producer line carries
 `PAUSED`, the heartbeat timeout does not run, whether the token changes or not,
 and a line that stays unreadable while the last valid line was paused does not
@@ -272,9 +272,10 @@ other accepted rate is converted into 48 kHz periods by
 `audio_fabric_lease_poll()` on the core-0 main loop. The ISR copies those
 staged periods; it does not run the lease FIR conversion.
 
-At most two live producers may require conversion across the pump and the two
-lease slots. A 48 kHz bypass lease may acquire a free slot. An acquire that
-would exceed the conversion limit returns `BUSY`. The SDK playback pump also
+At most two producers may require conversion across the pump and the two
+lease slots. A codec lease counts toward this limit, even while paused.
+A 48 kHz bypass lease may acquire a free slot. An acquire that would
+exceed the conversion limit returns `BUSY`. The SDK playback pump also
 counts when its bound source rate differs from 48 kHz. The voice slot renders
 at 48 kHz and never needs conversion.
 
@@ -289,6 +290,167 @@ at 48 kHz and never needs conversion.
 Clients should check the capability and service flags before using the
 opcodes. Firmware that does not recognize the source-rate flag returns
 `BAD_REQUEST`.
+
+## Stream markers and codec leases
+
+An acquire with `SDK_AUDIO_RING_ACQUIRE_FLAG_CODEC` (bit 3) grants a
+`SDK_AUDIO_RING_CONTRACT_CODEC_STREAM` ring (value 8). The request and
+grant rate words are zero. The flag can be combined with `IDLE_PAUSED`
+only. Older firmware answers `BAD_REQUEST`; clients can then acquire a
+plain PCM lease. The grant geometry stays the same, but codec input can
+be published a byte at a time.
+
+All words are big-endian and covered by their line's existing seqlock.
+The grant generation at offset 4 keeps identifying the lease. The
+words below are offsets within each 64-byte line.
+
+| Producer offset | Field | Meaning |
+| ---: | --- | --- |
+| 24 | `stream_seq` | Nonzero serial for a stream or flush; change it to issue a marker |
+| 28 | `stream_codec` | 0 raw PCM, 1 MP3, 2 FLAC, 3 Ogg Vorbis, `0xffffffff` stop |
+| 32, 36 | `stream_start_hi`, `stream_start_lo` | Absolute byte cursor at the start of the stream |
+| 40 | `stream_flags` | Bit 0 `APPEND`, bit 1 `END` |
+| 44 | `stream_param` | Raw PCM sample rate in Hz; zero means 44100 Hz. Zero for other codecs |
+| 48 | `stream_gain` | MP3, FLAC and Vorbis volume, 0 for mute through 32767 for unity |
+
+For WAV, strip the RIFF container and send stereo S16LE samples as
+codec 0. The other codecs take file bytes from byte 0. Firmware multiplies
+the compressed track gain by the lease gain as it fills new TX periods.
+`stream_gain` applies only to periods that came from a compressed stream;
+raw PCM (codec 0) always plays at the lease gain. Each staged period keeps
+its own mode, so after an `APPEND` between raw PCM and a compressed codec
+(either way) the already staged tail of the old stream keeps the old
+stream's gain while the new stream follows its own, even though the
+decoder has moved on. The gain itself is still read live when a period is
+filled, not baked into the staged audio.
+
+To start a track, publish a new serial, codec, and start cursor. Write
+the file bytes at or above that cursor and publish the write cursor
+after the writes. The grant's byte cursors are monotonic across tracks. The
+start cursor must be at or above the consumed (credit)
+cursor the lease publishes and at or below the published write cursor. The
+same bound holds for plain PCM and codec leases, and PCM that is staged
+but not yet credited does not tighten it: a start equal to the published
+credit is valid. A new serial without `APPEND` flushes the old input,
+staging, and queued TX periods; a stop marker does the same without
+starting another stream. It takes effect on the next formatter tick and
+leaves at most the period the DMA is playing. A plain PCM lease also
+flushes when it sees a changed nonzero serial and a valid start cursor. It
+echoes the serial, credits the discarded bytes, and ignores the other
+marker fields. A start below the credit is not a valid flush: a plain
+lease ignores the marker and does not echo the serial, a codec lease
+reports `BAD_MARKER` for it. The credit never moves back. Leave the marker
+words zero for legacy behavior.
+
+Set `END` with the last published byte cursor to drain. To loop, append
+the next serial with `APPEND` and the previous stream's end cursor as
+its start. The append becomes the previous stream's implicit `END`.
+Wait until the firmware echoes the current serial before appending to
+it, so there is at most one pending marker. The next decoder starts
+once the current stream has staged its last period, without discarding
+queued output. The resampler keeps its filter history across the append
+while the decoded rate stays the same, so a track whose decoded length is a
+whole number of 20 ms source periods loops without a seam. A flush or a new
+lease starts the filter from silence, which produces about 10 zero frames at
+the start of the output. A final short period is padded with silence (a
+two-period quantum at 11025 Hz). If decoding failed before the append was
+promoted, the failure is reported against the pending serial.
+
+The filter history carries across an append only inside one gain domain. An
+append between raw PCM and a compressed codec starts the new stream's
+filter from silence, so the old stream's tail (muted or not) never reaches
+the other domain's first output frames. Periods already staged are not
+changed. A same-domain loop, such as FLAC to FLAC, still keeps the history.
+
+| Firmware offset | Field | Meaning |
+| ---: | --- | --- |
+| 8, 12 | `consumed_cursor_hi`, `consumed_cursor_lo` | Ring credit after firmware copies input out of the grant |
+| 16 | `status` | Lease status; heartbeat and cursor faults still revoke the lease |
+| 20 | `stream_seq` | Serial accepted for playback, or last plain PCM flush |
+| 24 | `decode_state` | 0 idle, 1 running, 2 drained, 3 error |
+| 28 | `decode_error` | 0 unless in error |
+| 32 | `decoded_rate` | Native decoded Hz, zero until known |
+| 36 | `decoded_channels` | 1 or 2, zero until known |
+
+Free space is capacity minus the difference between the write and credit
+cursors. A flush discards bytes below its start cursor, so a producer
+may count from its new start cursor for that publication. Keep the
+control line live with heartbeats while unpaused. `PAUSED` holds decoding
+and staging, and `IDLE_PAUSED` suspends the heartbeat timeout. Release
+and Amiga reset clear the lease.
+
+The credit cursor is the last value the firmware published, and it moves
+only on a formatter tick. A codec lease's decoder copies input from the
+ring on the main loop between ticks; that read-ahead is private and is
+published at the next tick, after the tick has judged the producer's
+marker. So a replacement start equal to the published credit is always
+valid, however far the decoder has read, and the write cursor is held to
+the published credit plus the capacity. The read-ahead cannot be
+reclaimed by the producer early, and the published credit never moves
+back. A flush and a new lease reset the private cursor, an `APPEND` keeps
+it, and an `APPEND` whose start is below the bytes the decoder already
+took is a `BAD_MARKER` (an append is not a rewind). Publish a write cursor
+past the previous stream's end only together with the append marker, or the
+previous decoder may already have consumed those bytes.
+
+`DRAINED` and `ERROR` are sticky until the next marker. Both wait for any
+decoded PCM, including the last scheduled TX period, to play. Check that
+the serial matches before acting on the state. Codec errors do not
+revoke the lease. `decode_error` values are 1 unknown codec, 2 bad
+marker, 3 unsupported format, 4 corrupt input, 5 allocation failure, and
+6 empty output.
+
+The main loop on core 0 runs the existing MP3, FLAC and Vorbis decoders,
+duplicates mono, and stages up to two periods per pass at 48 kHz. The
+formatter ISR mixes staged PCM; it never runs a decoder. A codec slot
+keeps up to 24 future periods in staging. It starts after six periods
+are ready, or sooner if a short track has finished decoding. Sustained
+Zorro requests still allow a codec poll every 4 ms. A pass targets at
+most 4,608 decoded PCM bytes, but one MP3 or FLAC frame may exceed the
+remaining budget and the decoder may need to parse headers first.
+Requests to core 0 wait for the pass; its elapsed time on the card has
+not been measured.
+
+The SDK audio stream service decodes FLAC and Vorbis on core 1 while a codec
+lease decodes on core 0. The libFLAC wrappers (`sdk_flac_alloc.c`) and the
+Tremor arena allocator (`sdk_vorbis_alloc.c`) therefore keep one allocation
+context per core: the stream quota, card-pool owner and failure flag for
+libFLAC, and the selected arena and out-of-memory jump target for Tremor.
+A decoder call on one core never changes what the other core allocates
+from, and an out-of-memory jump never lands in the other core's call. A
+decode pass runs to completion on its core, so one context per core is
+enough, and neither the formatter interrupt nor the other core waits on a
+lock. MP3 keeps all its state in the stream session and shares nothing.
+
+The resampler accepts 8000, 11025, 12000, 16000, 22050, 24000, 32000,
+44100, 48000, 88200 and 96000 Hz. Compressed streams at 176400 and
+192000 Hz are reduced by two before resampling.
+
+A codec lease's decoder memory is allocated on first use and freed outside
+the ISR. The FIFO block, every libFLAC allocation and every Tremor arena
+region belong to one card-pool owner, `SDK_AUDIO_LEASE_DECODE_OWNER`
+(MEDIA instance `0xfffffd`, documented with the other MEDIA owners in
+`sdk_compression.h`). A core-1 reset reclaims the shared core-1 decode heap
+(`SDK_DECODE_POOL_OWNER`) and the app decoder owners, so it leaves a running
+lease and its decoded audio untouched. The lease's memory is released when
+the lease ends, on release and on revocation. The owner is not used by any
+app serial, video session or module id.
+
+An Amiga reset takes the lent fast-RAM window back from the card pool, and
+the Amiga then owns that memory, so a decoder in it must be gone before the
+take-back: libFLAC frees read an allocation header and a freed Tremor region
+is a free the pool ignores. The reset handler therefore calls
+`audio_fabric_codec_reset_quiesce()` once it has closed the Amiga gate
+(REG6) and quiesced core 1, and before `take_back_lent_card_pool()`. It
+ends every codec lease decoder and frees its pool memory, on the main loop,
+so no decoder pass is in flight; the ISR never touches the decoder
+backend. The leases and their staged PCM stay until `audio_fabric_reset()`
+runs from `sdk_mailbox_init()` later in the handler, which finds no decoder
+left. Until then a decoder pass does not start and a codec acquire answers
+`EBUSY`; `audio_fabric_reset()` lifts the hold. Core-1 decode backends are
+unchanged. `test/audio/audio_codec_reset_order_test.c` runs a FLAC and a
+Vorbis lease in the lent range through the reset order and the wrong order
+over the real card pool.
 
 ## Instrument build
 

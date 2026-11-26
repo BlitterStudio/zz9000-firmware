@@ -72,10 +72,14 @@ uint16_t sdk_decompress_stream_close(uint32_t session);
 /*
  * MEDIA instances are partitioned: 1 through 0xff are SDK video-session
  * owners; 0x100 through 0x7fffff are app decoder owners; 0x800000 through
- * 0xffffff are ZZM resident-module owners.  The shared core-1 decode heap
- * uses 0xfffffe in the module-reserved range and is reclaimed only on a
- * core-1 reset.  MEDIA_INPUT has its own card-pool class, so mailbox media
- * buffers are outside this map.
+ * 0xffffff are ZZM resident-module owners (module ids are small numbers). The
+ * shared core-1 decode heap uses 0xfffffe and is reclaimed only on a core-1
+ * reset.
+ * 0xfffffd is the core-0 audio ring (WHDLoad) decoders: their FIFOs and every
+ * backend allocation. It is never released by a core-1 reset, only by the
+ * lease that owns it and by an Amiga reset. 0xfffffc is reserved.
+ * MEDIA_INPUT has its own card-pool class, so mailbox media buffers are
+ * outside this map.
  */
 #define SDK_MEDIA_VIDEO_INSTANCE_LIMIT 0x00000100U
 #define SDK_MEDIA_APP_INSTANCE_BASE SDK_MEDIA_VIDEO_INSTANCE_LIMIT
@@ -115,5 +119,16 @@ void *sdk_decode_heap_alloc_owned(size_t size, uint32_t owner);
 void sdk_decode_heap_free(void *ptr);
 void *sdk_decode_heap_realloc(void *ptr, size_t size);
 void *sdk_decode_heap_calloc(size_t count, size_t size);
+
+/* Owner of every allocation made for a core-0 audio ring (codec lease)
+ * decoder. Distinct from SDK_DECODE_POOL_OWNER so the core-1 reset reclaim
+ * does not free a lease that survives it. */
+#define SDK_AUDIO_LEASE_DECODE_OWNER (((uint32_t)2u << 24) | 0x00fffffdu)
+typedef char sdk_audio_lease_owner_is_reserved[
+	(SDK_AUDIO_LEASE_DECODE_OWNER != SDK_DECODE_POOL_OWNER &&
+	 (SDK_AUDIO_LEASE_DECODE_OWNER >> 24) == 2u &&
+	 (SDK_AUDIO_LEASE_DECODE_OWNER & 0x00ffffffu) >= 0x00800000u &&
+	 (SDK_AUDIO_LEASE_DECODE_OWNER & 0x00ffffffu) !=
+		SDK_MEDIA_SHARED_INSTANCE) ? 1 : -1];
 
 #endif /* SDK_COMPRESSION_H */

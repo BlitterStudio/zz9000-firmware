@@ -10,10 +10,14 @@
 /*                                                                 */
 /*******************************************************************/
 
-_STACK_SIZE = DEFINED(_STACK_SIZE) ? _STACK_SIZE : 0x4000;
-/* The 8 MiB runtime region also contains the ARM exception stacks below,
- * so the newlib break stops before that 22 KiB reservation. */
-_HEAP_SIZE = DEFINED(_HEAP_SIZE) ? _HEAP_SIZE : 0x007FA800;
+/* The core-0 lease decoder can build a Tremor codebook with up to
+ * 64 KiB of stack scratch. Keep room for the rest of its call chain. */
+_STACK_SIZE = DEFINED(_STACK_SIZE) ? _STACK_SIZE : 0x20000;
+/* Subtract the system stack and the 6 KiB of exception stacks from
+ * the 8 MiB runtime region. */
+_HEAP_SIZE = DEFINED(_HEAP_SIZE) ? _HEAP_SIZE :
+	(0x00800000 - _STACK_SIZE - _ABORT_STACK_SIZE - _SUPERVISOR_STACK_SIZE -
+	 _IRQ_STACK_SIZE - _FIQ_STACK_SIZE - _UNDEF_STACK_SIZE);
 
 _ABORT_STACK_SIZE = DEFINED(_ABORT_STACK_SIZE) ? _ABORT_STACK_SIZE : 1024;
 _SUPERVISOR_STACK_SIZE = DEFINED(_SUPERVISOR_STACK_SIZE) ? _SUPERVISOR_STACK_SIZE : 2048;

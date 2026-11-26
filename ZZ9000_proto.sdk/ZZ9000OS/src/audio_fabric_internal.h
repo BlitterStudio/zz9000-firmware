@@ -50,11 +50,48 @@ struct fabric_lease_preconvert {
 	uint32_t consumed;     /* staging bytes staged into TX (ISR writer) */
 	uint64_t src_consumed; /* source bytes pulled by the poll */
 	uint32_t cost[AUDIO_FABRIC_LEASE_STAGING_PERIODS];
+	/* Codec lease only: 1 when the staging period holds a compressed
+	 * stream (stream_gain applies), 0 for raw PCM. Written with the period
+	 * and read, like cost[], by the ISR fill and the replay. */
+	uint8_t compressed[AUDIO_FABRIC_LEASE_STAGING_PERIODS];
 	uint8_t active;
 	uint8_t primed;
 };
 
 uint8_t *fabric_lease_staging_ring(uint32_t slot);
+
+struct fabric_stream_marker {
+	uint64_t start;
+	uint32_t seq;
+	uint32_t codec;
+	uint32_t param;
+};
+
+/* Marker acceptance, the advertised credit and TX retirement belong to the
+ * ISR. The poll commits decoded periods and its private input progress
+ * under the local IRQ guard. */
+struct fabric_lease_codec {
+	struct fabric_stream_marker current;
+	struct fabric_stream_marker next;
+	uint64_t end;
+	uint64_t next_end;
+	/* Decoder input taken from the ring: private to the main-loop poll
+	 * and the ISR. The credit the producer sees is audio_fabric_lease
+	 * .credited, which only the ISR moves: it judges a replacement marker
+	 * against the credit published at the previous tick, then promotes
+	 * this cursor. Reset by a flush and by a new lease. */
+	uint64_t input;
+	uint32_t state;
+	uint32_t error;
+	uint32_t rate;
+	uint32_t channels;
+	uint32_t gain;
+	uint32_t flushes;     /* output flushes accepted by the ISR */
+	uint8_t enabled;
+	uint8_t eof;
+	uint8_t next_eof;
+	uint8_t done;
+};
 
 /* Lease-plane per-slot state (plan U3, direct rings). ring == NULL means
  * no lease holds the slot. The granted PCM ring and the 128-byte seqlock
@@ -96,6 +133,10 @@ struct audio_fabric_lease {
 	uint8_t clip_open;        /* at-rail region continuity latch */
 	uint32_t peak;            /* 16.16 peak-hold of source samples */
 	uint32_t clips;           /* at-rail source regions, saturating */
+	/* The serial is separate from the grant's generation. Plain leases
+	 * also echo the last accepted flush marker. */
+	uint32_t stream_seq;
+	struct fabric_lease_codec codec;
 };
 
 struct audio_fabric_slot {
