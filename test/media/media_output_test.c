@@ -2,9 +2,10 @@
  * Shared-buffer media output: validation, fixed palettes and the scaling and
  * conversion pipeline against a straightforward scalar reference.
  *
- * The reference follows docs/media-shared-output.md literally, one pixel at a
- * time with no tables or caches, so it shares the specification with
- * sdk_media_output.c and nothing else.
+ * The reference follows the "Scaling and conversion" section of
+ * sdk/docs/zz9k-media-output.md literally, one pixel at a time with no tables
+ * or caches, so it shares the specification with sdk_media_output.c and
+ * nothing else.
  *
  * SPDX-License-Identifier: GPL-3.0-or-later
  */

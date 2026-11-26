@@ -45,6 +45,7 @@ allocator.
 | Media session shared-buffer output ([zz9k-media-output.md](zz9k-media-output.md)) | Limited | Limited | The picture slots must be a host-window buffer, so one picture has to fit the 16 KiB window (160x100 in 5 planes is 10,000 bytes). Not run on a Zorro II machine. |
 | ZZPlay MPEG Program Stream and Transport Stream video/PIP | No | No | Current code accepts only an acknowledged generation-1 PIP layout. On that legacy 4 MiB layout, the 224 KiB pool fits a 352x288 YUY2 frame (202,752 bytes) and rejects 640x360 (460,800 bytes). |
 | `zz9k-palette` and `ZZ9KQueryPalette()` | No | No | Not available on Zorro II. Firmware does not advertise `ZZ9K_SERVICE_FLAG_SURFACE_PALETTE_QUERY` there and `ZZ9K_OP_QUERY_PALETTE` returns `ZZ9K_STATUS_UNSUPPORTED`, because firmware shadows the CLUT only from the Zorro III upload path. |
+| One-shot PNG decode (`ZZ9KDecodePng()`) | Limited | Limited | The whole PNG file has to sit in one shared buffer the Amiga can write. On Zorro II that is a host-window buffer, so a file larger than the free window cannot be decoded one-shot. Image sessions feed the file in chunks and do not have that limit; `zz9k-png` and `zz9k-picture.datatype` use them. |
 
 ## External integration notes
 

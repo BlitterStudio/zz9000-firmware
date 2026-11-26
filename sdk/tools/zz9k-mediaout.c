@@ -8,7 +8,7 @@
  * time until the picture was complete and a checksum of the bytes in the
  * slot. With -w it also draws the picture in a window.
  *
- * Video only: it binds no audio. See docs/media-shared-output.md for the
+ * Video only: it binds no audio. See sdk/docs/zz9k-media-output.md for the
  * contract and for the card test this tool is part of.
  *
  * SPDX-License-Identifier: GPL-3.0-or-later

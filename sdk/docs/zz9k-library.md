@@ -1443,7 +1443,7 @@ opcodes live at the top of the audio range:
 | `ZZ9K_OP_AUDIO_TRIM_SUBMIT` | `0x050b` | Submit this owner's source-trim balance; the reserved `ZZ9K_AUDIO_BALANCE_NEUTRAL` word is the keep-baseline release; result reports the applied pair, the bound, and `ZZ9K_AUDIO_TRIM_RESULT_BOUNDED` |
 | `ZZ9K_OP_AUDIO_METER_READ` | `0x050c` | Read one direction's framed snapshot (generation-checked, read-and-clear peak hold) |
 | `ZZ9K_OP_AUDIO_SCENE_SAVE` | `0x050d` | Start the non-blocking persist to `ZZ9000.CFG` (temp-then-replace); result status `ZZ9K_AUDIO_SCENE_SAVE_QUEUED` (watch the state get's `save_status`) / `ZZ9K_AUDIO_SCENE_SAVE_BUSY` / `REJECTED`; the machine never blocks the mailbox dispatch |
-| `ZZ9K_OP_AUDIO_CONTROL_STATE_GET` | `0x050e` | Active scene, baseline/applied pairs, derived AX-equivalent boundary, per-card Paula/AX clean ceilings, flags, and append-only save status |
+| `ZZ9K_OP_AUDIO_CONTROL_STATE_GET` | `0x050e` | Active scene, baseline/applied pairs, derived AX-equivalent boundary, per-card Paula/AX clean ceilings, flags, stereo separation, and append-only save status |
 
 All payloads are the shared 48-byte inline convention, big-endian, mirrored
 as `ZZ9KAudio*Payload` structs in `include/zz9k/abi.h`. Staged scene
@@ -1464,6 +1464,21 @@ remains the append-only tail word at offset 44. The pair applies live
 through the ordinary staged commit and persists as
 `audio_ceiling_paula` / `audio_ceiling_ax` on scene Save. Scene Save also
 preserves a present `audio_limiter` configuration key.
+
+Stereo separation is a setting for all card output, Paula and AX alike,
+and not part of a scene. `ZZ9K_AUDIO_SCENE_PARAM_SEPARATION` (18) stages it
+through `ZZ9K_OP_AUDIO_SCENE_WRITE` as a percentage of 0 to
+`ZZ9K_AUDIO_SEPARATION_MAX` (100); a larger value returns
+`ZZ9K_STATUS_BAD_REQUEST`. The scene index is ignored, but a write that sets
+`ZZ9K_AUDIO_SCENE_WRITE_FLAG_COMMIT` still needs a valid one, like every
+commit. The value joins the next commit. 100, the default, is full stereo and
+0 is mono. State get returns the live value in the word at offset 32, which
+was reserved, and sets
+`ZZ9K_AUDIO_CONTROL_FLAG_SEPARATION` (bit 1) in `flags`; firmware without
+stereo separation leaves the word zero and the flag clear, so check the flag
+before reading it. Scene Save persists the value as `audio_separation`, which
+the firmware also applies at boot. The DSP matrix is described in
+[zz9000ax/README.md](../../zz9000ax/README.md).
 
 Scene **names** are user labels carried beside the master-chain
 parameters. They flow through two paths and no opcode of their own:

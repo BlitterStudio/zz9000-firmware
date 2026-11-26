@@ -1,7 +1,7 @@
 /*
  * Shared-buffer output of a media session. See sdk_media_output.h.
  *
- * The conversion is specified in docs/media-shared-output.md: the scaler
+ * The conversion is specified in sdk/docs/zz9k-media-output.md: the scaler
  * works per axis on the three planes (vertical pass into a row, horizontal
  * pass into the output width), the colour matrix is BT.601 limited range with
  * the constants the overlay compositor uses, and the quantiser adds a 4x4

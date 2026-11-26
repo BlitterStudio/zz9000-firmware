@@ -35,12 +35,14 @@ For a P96 source, the VDMA reads the packed YUV422 bitmap that P96 owns. It
 rescans that bitmap every frame, so a new picture written by the application
 appears without any work from the ARM.
 
-SDK video sessions come from ZZPlay and other `zz9k.library` players. The decoder
-outputs planar 4:2:0. Core 1 packs each frame into one of two packed-YUV422
-staging buffers that are not being scanned. At vblank, core 0 flushes the
-caches and points the VDMA at the new buffer. Frames larger than 1280x720 are
-packed at half size, and the plane scales them back up. This lets a 1080p
-stream play natively in a 1280x720 window.
+SDK video sessions with overlay output come from ZZPlay and other
+`zz9k.library` players. A session with shared-buffer output never reaches the
+plane (see [zz9k-media-output.md](../sdk/docs/zz9k-media-output.md)). The
+decoder outputs planar 4:2:0. Core 1 packs each frame into one of two
+packed-YUV422 staging buffers that are not being scanned. At vblank, core 0
+flushes the caches and points the VDMA at the new buffer. Frames larger than
+1280x720 are packed at half size, and the plane scales them back up. This lets
+a 1080p stream play natively in a 1280x720 window.
 
 ## When the native plane is used
 
