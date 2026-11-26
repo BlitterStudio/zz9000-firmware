@@ -50,6 +50,10 @@ struct fabric_lease_preconvert {
 	uint32_t consumed;     /* staging bytes staged into TX (ISR writer) */
 	uint64_t src_consumed; /* source bytes pulled by the poll */
 	uint32_t cost[AUDIO_FABRIC_LEASE_STAGING_PERIODS];
+	/* Codec lease only: 1 when the staging period holds a compressed
+	 * stream (stream_gain applies), 0 for raw PCM. Written with the period
+	 * and read, like cost[], by the ISR fill and the replay. */
+	uint8_t compressed[AUDIO_FABRIC_LEASE_STAGING_PERIODS];
 	uint8_t active;
 	uint8_t primed;
 };

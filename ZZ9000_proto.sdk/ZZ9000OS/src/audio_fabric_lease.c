@@ -69,6 +69,7 @@ static struct {
 	uint32_t flushes;
 	struct zz_audio_convert convert;
 	uint32_t rate;
+	uint8_t compressed;
 } g_codec_owner[AUDIO_FABRIC_LEASE_SLOT_END];
 
 static void fabric_codec_end(uint32_t slot)
@@ -963,7 +964,7 @@ static void fabric_lease_rebase_cursors(struct fabric_lease_preconvert *p);
 /* 11025 Hz needs a 40 ms conversion quantum (441 input frames).
  * Only that quantum can wrap. All other rates fill one period directly. */
 static uint32_t fabric_codec_stage(uint32_t slot, uint32_t generation,
-	uint32_t stream_seq, const struct fabric_codec_view *v)
+	uint32_t stream_seq, uint8_t compressed, const struct fabric_codec_view *v)
 {
 	static int16_t input[2U * 1920U];
 	static int16_t wrapped[4U * CODEC_MIX_FRAMES];
@@ -1012,6 +1013,11 @@ static uint32_t fabric_codec_stage(uint32_t slot, uint32_t generation,
 			break;
 		}
 		fabric_lease_meter(s, src, pull * 4U);
+		/* The gain domain travels with the staged period (the ISR fill
+		 * and replay read it), not with the decoder's current stream. */
+		for (uint32_t k = 0U; k < periods; k++)
+			p->compressed[(offset / AUDIO_BYTES_PER_PERIOD + k) %
+				AUDIO_FABRIC_LEASE_STAGING_PERIODS] = compressed;
 		p->staged = staged + bytes;
 		fabric_lease_rebase_cursors(p);
 		smp_local_irq_restore(irq);
@@ -1057,16 +1063,24 @@ static void fabric_codec_poll(uint32_t slot)
 
 	if (g_codec_owner[slot].generation != generation ||
 	    g_codec_owner[slot].seq != marker.seq) {
+		const uint8_t compressed = marker.codec != SDK_AUDIO_RING_CODEC_PCM;
+
 		g_codec_ops->begin(slot, marker.codec, marker.param);
 		/* A stream that follows an APPEND with no flush continues the
 		 * resampler's filter history, so a loop has no seam. A flush
-		 * or a new lease starts the filter from silence. */
+		 * or a new lease starts the filter from silence, and so does a
+		 * change between raw PCM and a compressed codec: the two take
+		 * different gain, so the first stream's tail must not feed the
+		 * next one through the filter. Periods already staged keep
+		 * their output. */
 		if (g_codec_owner[slot].generation != generation ||
-		    g_codec_owner[slot].flushes != flushes)
+		    g_codec_owner[slot].flushes != flushes ||
+		    g_codec_owner[slot].compressed != compressed)
 			g_codec_owner[slot].rate = 0U;
 		g_codec_owner[slot].generation = generation;
 		g_codec_owner[slot].seq = marker.seq;
 		g_codec_owner[slot].flushes = flushes;
+		g_codec_owner[slot].compressed = compressed;
 	}
 	v = g_codec_ops->step(slot, &input);
 	remaining = v.frames;
@@ -1082,7 +1096,8 @@ static void fabric_codec_poll(uint32_t slot)
 			v.complete = 1;
 			remaining = 0U;
 		} else {
-			remaining = fabric_codec_stage(slot, generation, marker.seq, &v);
+			remaining = fabric_codec_stage(slot, generation, marker.seq,
+				marker.codec != SDK_AUDIO_RING_CODEC_PCM, &v);
 		}
 	}
 

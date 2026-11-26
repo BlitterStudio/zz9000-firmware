@@ -458,15 +458,23 @@ void audio_fabric_bench_poll(void)
 }
 #endif /* AUDIO_FABRIC_BENCH */
 
-/* Lease balance scale (post-fill pass, shared by every fill path). */
-static void fabric_apply_lease_gain(struct audio_fabric_slot *s)
+/* Lease balance scale (post-fill pass, shared by every fill path). A
+ * compressed codec lease period also takes the live stream_gain; the
+ * period's own mode decides, not the decoder's current stream, which can
+ * already be the next one when a staged tail fills the TX ring. */
+static int fabric_staged_compressed(const struct audio_fabric_slot *s,
+	uint32_t seq)
+{
+	return s->lease.codec.enabled &&
+		s->preconvert.compressed[seq % AUDIO_FABRIC_LEASE_STAGING_PERIODS];
+}
+
+static void fabric_apply_lease_gain(struct audio_fabric_slot *s, int compressed)
 {
 	uint32_t gain = s->gain;
 	uint32_t shift = 7U;
 
-	if (s->lease.codec.enabled &&
-	    s->lease.codec.current.codec != SDK_AUDIO_RING_CODEC_PCM &&
-	    s->lease.codec.gain < 32767U) {
+	if (compressed && s->lease.codec.gain < 32767U) {
 		gain = gain * s->lease.codec.gain >> 7;
 		shift = 15U;
 	}
@@ -532,7 +540,7 @@ static uint32_t fabric_slot_fill_lease_preconvert(
 	}
 	p->consumed += AUDIO_FABRIC_PERIOD_BYTES;
 	s->staged_seq[index] = seq;
-	fabric_apply_lease_gain(s);
+	fabric_apply_lease_gain(s, fabric_staged_compressed(s, seq));
 	return cost;
 }
 
@@ -704,7 +712,7 @@ static uint32_t fabric_slot_fill(struct audio_fabric_slot *s,
 	/* Lease gain (0..255 mixer scale; unity skips the pass so the
 	 * pump's bit-identical parity is untouched): one saturating
 	 * clamp per frame, then the shared mix clamps again. */
-	fabric_apply_lease_gain(s);
+	fabric_apply_lease_gain(s, 0);
 	return pull;
 silence:
 	/* The caller commits either the mix (this slot adds nothing) or a
@@ -797,7 +805,7 @@ static uint32_t fabric_rebuild_pull(struct audio_fabric_slot *s,
 		offset = (seq % AUDIO_FABRIC_LEASE_STAGING_PERIODS) *
 			AUDIO_FABRIC_PERIOD_BYTES;
 		memcpy(slot, staging + offset, AUDIO_FABRIC_PERIOD_BYTES);
-		fabric_apply_lease_gain(s);
+		fabric_apply_lease_gain(s, fabric_staged_compressed(s, seq));
 		return want;
 	}
 	src_frames = rate / 50U;
@@ -868,7 +876,7 @@ static uint32_t fabric_rebuild_pull(struct audio_fabric_slot *s,
 		g_fabric_host_isr_conversions++;
 #endif
 	}
-	fabric_apply_lease_gain(s);
+	fabric_apply_lease_gain(s, 0);
 	return want;
 }
 

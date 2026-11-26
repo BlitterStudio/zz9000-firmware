@@ -437,6 +437,218 @@ static void test_error(int eof_before_append)
 	      "can play again after error", NULL);
 }
 
+/* ---- raw PCM <-> compressed APPEND at stream_gain 0 ----
+ *
+ * A hand-built FLAC of whole conversion periods (882 frames at 44.1 kHz),
+ * so the stream ends with no zero padding and the resampler's history is
+ * full of noise at the end. */
+#define FLAC_PERIOD_FRAMES 882U
+#define CAP_PERIODS 26U
+static int16_t cap[CAP_PERIODS][TICK_BYTES / 2U];
+
+static uint8_t crc8(const uint8_t *p, uint32_t n)
+{
+	uint8_t c = 0U;
+
+	while (n--) {
+		c ^= *p++;
+		for (unsigned i = 0; i < 8U; i++)
+			c = (uint8_t)((c & 0x80U) ? ((c << 1) ^ 0x07U) : (unsigned)(c << 1));
+	}
+	return c;
+}
+
+static uint16_t crc16(const uint8_t *p, uint32_t n)
+{
+	uint16_t c = 0U;
+
+	while (n--) {
+		c ^= (uint16_t)(*p++ << 8);
+		for (unsigned i = 0; i < 8U; i++)
+			c = (uint16_t)((c & 0x8000U) ? ((c << 1) ^ 0x8005U) : (unsigned)(c << 1));
+	}
+	return c;
+}
+
+/* One FLAC frame of verbatim 16-bit stereo, 44.1 kHz. */
+static uint32_t make_flac(uint8_t *out, const int16_t *pcm, uint32_t frames)
+{
+	uint32_t n = 0U, head, i;
+	uint64_t info = ((uint64_t)44100U << 44) | (1ULL << 41) | (15ULL << 36) | frames;
+
+	memcpy(out, "fLaC", 4U);
+	out[4] = 0x80U; out[5] = 0U; out[6] = 0U; out[7] = 34U;
+	out[8] = (uint8_t)((frames >> 8) & 0xffU); out[9] = (uint8_t)frames;
+	out[10] = out[8]; out[11] = out[9];
+	memset(out + 12, 0, 6U);
+	for (i = 0; i < 8U; i++)
+		out[18 + i] = (uint8_t)(info >> (56U - 8U * i));
+	memset(out + 26, 0, 16U);
+	n = 42U;
+	head = n;
+	out[n++] = 0xffU; out[n++] = 0xf8U; out[n++] = 0x79U; out[n++] = 0x18U;
+	out[n++] = 0x00U;
+	out[n++] = (uint8_t)((frames - 1U) >> 8); out[n++] = (uint8_t)(frames - 1U);
+	out[n] = crc8(out + head, n - head);
+	n++;
+	for (uint32_t ch = 0; ch < 2U; ch++) {
+		out[n++] = 0x02U;
+		for (i = 0; i < frames; i++) {
+			out[n++] = (uint8_t)((uint16_t)pcm[2U * i + ch] >> 8);
+			out[n++] = (uint8_t)pcm[2U * i + ch];
+		}
+	}
+	{
+		uint16_t crc = crc16(out + head, n - head);
+
+		out[n++] = (uint8_t)(crc >> 8);
+		out[n++] = (uint8_t)crc;
+	}
+	return n;
+}
+
+/* Noise for whole periods, so a few leaked frames are plain to see. */
+static void make_noise(int16_t *pcm, uint32_t frames)
+{
+	uint32_t x = 12345U;
+
+	for (uint32_t i = 0; i < frames * 2U; i++) {
+		x = x * 1664525U + 1013904223U;
+		pcm[i] = (int16_t)((int32_t)(x >> 16) - 32768) / 2;
+	}
+}
+
+struct pstat { unsigned loud, busy; };
+
+static struct pstat period_stat(const int16_t *p)
+{
+	struct pstat st = { 0U, 0U };
+
+	for (uint32_t i = 0; i < TICK_BYTES / 2U; i++)
+		st.loud += p[i] > 500 || p[i] < -500;
+	for (uint32_t i = 1; i < TICK_BYTES / 4U; i++) {
+		int32_t d = p[2U * i] - p[2U * (i - 1U)];
+
+		st.busy += d > 1000 || d < -1000;
+	}
+	return st;
+}
+
+/* Play `ticks` periods of the streams in the ring, capturing the DMA. The
+ * second stream (if any) appends to the first, both publish gain `gain`. */
+static void play_streams(uint32_t codec1, uint32_t len1, uint32_t codec2,
+	uint32_t len2, uint32_t gain)
+{
+	for (unsigned t = 0; t < CAP_PERIODS; t++) {
+		memcpy(cap[t], g_fabric_tx + g_dma_count % AUDIO_TX_BUFFER_SIZE, TICK_BYTES);
+		if (len2 != 0U && t >= 2U)
+			publish(2U, codec2, len1, len1 + len2, 0U,
+				SDK_AUDIO_RING_STREAM_FLAG_APPEND | SDK_AUDIO_RING_STREAM_FLAG_END,
+				gain);
+		else
+			publish(1U, codec1, 0U, len1,0U,
+				len2 == 0U ? SDK_AUDIO_RING_STREAM_FLAG_END : 0U, gain);
+		play_tick();
+	}
+}
+
+static unsigned count_steady(unsigned *busy_periods, unsigned *first_loud)
+{
+	unsigned steady = 0U;
+
+	*busy_periods = 0U;
+	*first_loud = CAP_PERIODS;
+	for (unsigned t = 0; t < CAP_PERIODS; t++) {
+		struct pstat st = period_stat(cap[t]);
+
+		if (st.loud != 0U && t < *first_loud)
+			*first_loud = t;
+		steady += st.loud >= 1800U && st.busy <= 8U;
+		*busy_periods += st.busy >= 64U;
+	}
+	return steady;
+}
+
+static void test_mixed_append(void)
+{
+	static int16_t noise[2U * 2U * FLAC_PERIOD_FRAMES * 4U];
+	static int16_t level[2U * FLAC_PERIOD_FRAMES * 5U];
+	static uint8_t flac[40000], flac2[40000], ref[CAP_PERIODS][TICK_BYTES];
+	const uint32_t frames = 4U * FLAC_PERIOD_FRAMES;
+	const uint32_t pcm_bytes = sizeof(level);
+	unsigned steady, busy, first, ref_first, same;
+	uint32_t flac_len;
+
+	make_noise(noise, frames);
+	for (uint32_t i = 0; i < sizeof(level) / sizeof(level[0]); i++)
+		level[i] = 20000;
+	flac_len = make_flac(flac, noise, frames);
+
+	/* Reference: the PCM alone from silence. */
+	begin(0U, CODEC_FLAGS);
+	write_bytes(0U, (const uint8_t *)level, pcm_bytes);
+	play_streams(SDK_AUDIO_RING_CODEC_PCM, pcm_bytes, 0U, 0U, 32767U);
+	steady = count_steady(&busy, &ref_first);
+	check(steady >= 4U && busy == 0U && ref_first < CAP_PERIODS,
+	      "reference PCM plays", fmt("%u steady, %u busy, first %u", steady, busy, ref_first));
+	memcpy(ref, cap, sizeof(ref));
+
+	/* Compressed, muted, then PCM: the FLAC tail is staged when the decoder
+	 * promotes the PCM stream, and stays muted; the PCM is not. */
+	begin(0U, CODEC_FLAGS);
+	write_bytes(0U, flac, flac_len);
+	write_bytes(flac_len, (const uint8_t *)level, pcm_bytes);
+	play_streams(SDK_AUDIO_RING_CODEC_FLAC, flac_len, SDK_AUDIO_RING_CODEC_PCM,
+		pcm_bytes, 0U);
+	steady = count_steady(&busy, &first);
+	check(busy == 0U, "muted compressed tail is silent before PCM", fmt("%u busy periods", busy));
+	check(steady >= 4U, "PCM after a muted compressed stream plays at unity",
+	      fmt("%u steady periods", steady));
+	/* The filter history must not carry the muted tail into the PCM. */
+	same = first < CAP_PERIODS - 2U &&
+	       !memcmp(cap[first], ref[ref_first], 2U * TICK_BYTES);
+	check(same, "no compressed history in the first PCM periods",
+	      fmt("first loud %u (reference %u)", first, ref_first));
+
+	/* PCM then muted compressed: the PCM staged ahead keeps its level when
+	 * the decoder promotes the compressed stream. */
+	begin(0U, CODEC_FLAGS);
+	write_bytes(0U, (const uint8_t *)level, pcm_bytes);
+	write_bytes(pcm_bytes, flac, flac_len);
+	play_streams(SDK_AUDIO_RING_CODEC_PCM, pcm_bytes, SDK_AUDIO_RING_CODEC_FLAC,
+		flac_len, 0U);
+	steady = count_steady(&busy, &first);
+	check(steady >= 4U, "PCM before a muted compressed stream is not muted",
+	      fmt("%u steady periods", steady));
+	check(busy == 0U, "compressed stream after PCM is muted", fmt("%u busy periods", busy));
+
+	/* The same-domain loop keeps the filter history: two appended FLAC
+	 * files play bit for bit like one file of the same samples. */
+	{
+		static int16_t twice[2U * 2U * FLAC_PERIOD_FRAMES * 8U];
+		uint32_t len2;
+		static int16_t joined[CAP_PERIODS][TICK_BYTES / 2U];
+
+		memcpy(twice, noise, 2U * frames * sizeof(noise[0]));
+		memcpy(twice + 2U * frames, noise, 2U * frames * sizeof(noise[0]));
+		len2 = make_flac(flac2, twice, 2U * frames);
+		begin(0U, CODEC_FLAGS);
+		write_bytes(0U, flac2, len2);
+		play_streams(SDK_AUDIO_RING_CODEC_FLAC, len2, 0U, 0U, 32767U);
+		memcpy(joined, cap, sizeof(joined));
+		count_steady(&busy, &ref_first);
+		begin(0U, CODEC_FLAGS);
+		write_bytes(0U, flac, flac_len);
+		write_bytes(flac_len, flac, flac_len);
+		play_streams(SDK_AUDIO_RING_CODEC_FLAC, flac_len, SDK_AUDIO_RING_CODEC_FLAC,
+			flac_len, 32767U);
+		count_steady(&busy, &first);
+		check(first + 8U <= CAP_PERIODS && ref_first + 8U <= CAP_PERIODS &&
+		      !memcmp(cap[first], joined[ref_first], 8U * TICK_BYTES),
+		      "same-domain loop keeps the filter history", fmt("first %u vs %u", first, ref_first));
+	}
+}
+
 static uint32_t load(const char *path, uint8_t *data, uint32_t capacity)
 {
 	FILE *f = fopen(path, "rb");
@@ -471,6 +683,7 @@ int main(void)
 	decode_file(SDK_AUDIO_RING_CODEC_VORBIS, data, len, 44100U, 2U, 0U);
 	test_loop();
 	test_loop_seam();
+	test_mixed_append();
 	test_flush_at_credit(SDK_AUDIO_RING_ACQUIRE_FLAG_IDLE_PAUSED, 0U, 0U);
 	test_flush_at_credit(SDK_AUDIO_RING_ACQUIRE_FLAG_IDLE_PAUSED, 0U, 5000U);
 	test_flush_at_credit(SDK_AUDIO_RING_ACQUIRE_FLAG_IDLE_PAUSED |

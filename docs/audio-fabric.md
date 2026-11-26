@@ -316,6 +316,13 @@ words below are offsets within each 64-byte line.
 For WAV, strip the RIFF container and send stereo S16LE samples as
 codec 0. The other codecs take file bytes from byte 0. Firmware multiplies
 the compressed track gain by the lease gain as it fills new TX periods.
+`stream_gain` applies only to periods that came from a compressed stream;
+raw PCM (codec 0) always plays at the lease gain. Each staged period keeps
+its own mode, so after an `APPEND` between raw PCM and a compressed codec
+(either way) the already staged tail of the old stream keeps the old
+stream's gain while the new stream follows its own, even though the
+decoder has moved on. The gain itself is still read live when a period is
+filled, not baked into the staged audio.
 
 To start a track, publish a new serial, codec, and start cursor. Write
 the file bytes at or above that cursor and publish the write cursor
@@ -348,6 +355,12 @@ lease starts the filter from silence, which produces about 10 zero frames at
 the start of the output. A final short period is padded with silence (a
 two-period quantum at 11025 Hz). If decoding failed before the append was
 promoted, the failure is reported against the pending serial.
+
+The filter history carries across an append only inside one gain domain. An
+append between raw PCM and a compressed codec starts the new stream's
+filter from silence, so the old stream's tail (muted or not) never reaches
+the other domain's first output frames. Periods already staged are not
+changed. A same-domain loop, such as FLAC to FLAC, still keeps the history.
 
 | Firmware offset | Field | Meaning |
 | ---: | --- | --- |
