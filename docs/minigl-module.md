@@ -106,6 +106,9 @@ reclaim release the binding and its module reference. The runtime exposes
 the GL table through SVC veneers rather than making module addresses callable
 from user mode.
 
+App GL reports `GL_STENCIL_BITS` as 0. There is no stencil buffer, and the
+app's `glStencil*` calls have no effect.
+
 The binding draws into and reads the swap target. In copy mode it rotates
 three colour targets and presents the back one; the front target is the frame
 the last swap queued. The front end opens an in-process context drawing and

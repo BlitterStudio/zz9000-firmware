@@ -105,6 +105,18 @@ typedef struct aar_zz_board {
 	 * it is outside. */
 	int (*token)(void *user, const volatile void *ptr, uint32_t bytes,
 		     uint32_t *token);
+	/*
+	 * One stable host-visible allocation of `bytes` (a whole number of
+	 * shared granules, so a granule-aligned alias exposes nothing but the
+	 * allocation): cleared, cache-inhibited, its address never moves until
+	 * `surface_free`. Fills a non-zero `handle` and the CPU pointer. AAR_OK,
+	 * else an AAR_E_* with nothing allocated. May be NULL (AAR_E_NOSYS).
+	 */
+	int (*surface_alloc)(void *user, uint32_t bytes, uint32_t *handle,
+			     volatile uint8_t **ptr);
+	/* Frees one allocation of `surface_alloc`. AAR_E_STALE for a handle
+	 * that is not live. May be NULL. */
+	int (*surface_free)(void *user, uint32_t handle);
 	/* Barrier hooks of aar_queue_*; NULL on the 68k. */
 	aar_barrier_fn acquire;
 	aar_barrier_fn release;

@@ -407,8 +407,10 @@ int zzapp_xport_post_log(zzapp_rec_t *rec, const void *data, uint32_t len);
  *   any other completion: dropped, unknown_dropped;
  *   AAR_OP_EVENT: into the event ring. When the ring is full, mouse motion
  *     is merged into one pending event (dx and dy summed while the buttons
- *     stay the same) that zzapp_xport_take_event moves into the ring as soon
- *     as there is room; anything else, and a mouse event with other buttons,
+ *     stay the same; with AAR_MOUSE_ABSOLUTE in buttons they are a position
+ *     and the latest one replaces the pending one) that
+ *     zzapp_xport_take_event moves into the ring as soon as there is room;
+ *     anything else, and a mouse event with other buttons,
  *     is dropped (events_dropped);
  *   AAR_OP_MSG: into the inbox. The client's credits keep the inbox from
  *     overflowing, so the pump never leaves a message in the CQ. A client

@@ -194,6 +194,16 @@ Points that matter to a caller:
   an app publishes, and `AARSharedToken` is its inverse. `AARSharedUnmap` is
   bookkeeping: the pages stay cache-inhibited, because restoring them costs
   about 0.7 s a range.
+- `AARExt(AAR_PLATFORM_ZZ9000, AAR_EXT_ZZ9000_CLIENT)` ends with
+  `surface_alloc(bytes, &handle, &ptr)` and `surface_free(handle)`: a stable,
+  host-visible, cache-inhibited block of the card's shared heap
+  (`ZZ9KAllocShared` of the `zz9k.library` the platform layer already holds)
+  for a window or scaling surface, whose address never moves until it is freed,
+  so it holds no lock and can be published as an `AARSharedToken`. The size is
+  rounded up to whole 4 KiB granules, the base is granule-aligned and the
+  contents are cleared, so an alias of it exposes nothing else. The card does
+  not know the aliases a caller makes: free the handle after releasing them.
+  A handle left open is reclaimed when the library closes `zz9k.library`.
 - `AARInfo.shared_max_mib` is 62 on the ZZ9000, the largest limit the card
   grants (`ZZAPP_SHARED_MAX_MIB`, the app's shared alias window).
   `AARSetTags` with `AAR_TAG_SHARED_MIB` above it returns `AAR_E_INVAL`.

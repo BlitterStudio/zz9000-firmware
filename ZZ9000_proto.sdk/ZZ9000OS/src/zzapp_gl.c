@@ -418,6 +418,7 @@ static void w_Flush(void) { ENTER(); GLFlush(CTX); LEAVE(); }
 #define ZZAPP_GL_FRONT 0x0404U
 #define ZZAPP_GL_BACK 0x0405U
 #define ZZAPP_GL_FOG_COLOR 0x0b66U
+#define ZZAPP_GL_STENCIL_BITS 0x0d57U
 static uint32_t swap_target_name(uint32_t mode)
 {
     return mode == ZZAPP_GL_FRONT || mode == ZZAPP_GL_FRONT_LEFT ?
@@ -449,7 +450,19 @@ static const uint8_t *w_GetString(uint32_t name)
     LEAVE();
     return r;
 }
-static void w_GetIntegerv(uint32_t pname, int32_t *params) { ENTER(); GLGetIntegerv(CTX, pname, params); LEAVE(); }
+/* There is no stencil attachment. Handle this query without creating a
+ * front-end GL_INVALID_ENUM; other names still go through the front end. */
+static void w_GetIntegerv(uint32_t pname, int32_t *params)
+{
+    ENTER();
+    if (pname == ZZAPP_GL_STENCIL_BITS) {
+        if (params)
+            *params = 0;
+    } else {
+        GLGetIntegerv(CTX, pname, params);
+    }
+    LEAVE();
+}
 static void w_GetFloatv(uint32_t pname, float *params) { ENTER(); GLGetFloatv(CTX, pname, params); LEAVE(); }
 static uint32_t w_GetError(void) { uint32_t r; ENTER(); r = GLGetError(CTX); LEAVE(); return r; }
 static void w_Hint(uint32_t target, uint32_t mode) { ENTER(); GLHint(CTX, target, mode); LEAVE(); }

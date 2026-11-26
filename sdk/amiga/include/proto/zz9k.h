@@ -441,6 +441,52 @@ static __inline int ZZ9KCancelAsyncAtBase(struct Library *base,
   return zz9k_d0;
 }
 
+static __inline int ZZ9KAllocSharedAtBase(struct Library *base,
+                                          uint32_t length,
+                                          uint32_t alignment,
+                                          uint32_t flags,
+                                          ZZ9KSharedBuffer *buffer)
+{
+  register uint32_t zz9k_d0 __asm("d0") = length;
+  register uint32_t zz9k_d1 __asm("d1") = alignment;
+  register uint32_t zz9k_d2 __asm("d2") = flags;
+  register struct Library *zz9k_a6 __asm("a6") = base;
+  register ZZ9KSharedBuffer *zz9k_a0 __asm("a0") = buffer;
+  __asm volatile("jsr -72(a6)"
+                 : "+r"(zz9k_d0), "+r"(zz9k_d1), "+r"(zz9k_a0)
+                 : "r"(zz9k_a6), "r"(zz9k_d2)
+                 : ZZ9K_INLINE_CLOBBERS_D1_A0);
+  return (int)zz9k_d0;
+}
+
+static __inline int ZZ9KFreeSharedAtBase(struct Library *base,
+                                         uint32_t handle)
+{
+  register uint32_t zz9k_d0 __asm("d0") = handle;
+  register struct Library *zz9k_a6 __asm("a6") = base;
+  __asm volatile("jsr -78(a6)"
+                 : "+r"(zz9k_d0)
+                 : "r"(zz9k_a6)
+                 : ZZ9K_INLINE_CLOBBERS);
+  return (int)zz9k_d0;
+}
+
+static __inline int ZZ9KMemFillAtBase(struct Library *base, uint32_t handle,
+                                      uint32_t offset, uint32_t length,
+                                      uint8_t value)
+{
+  register uint32_t zz9k_d0 __asm("d0") = handle;
+  register uint32_t zz9k_d1 __asm("d1") = offset;
+  register uint32_t zz9k_d2 __asm("d2") = length;
+  register uint32_t zz9k_d3 __asm("d3") = value;
+  register struct Library *zz9k_a6 __asm("a6") = base;
+  __asm volatile("jsr -84(a6)"
+                 : "+r"(zz9k_d0), "+r"(zz9k_d1)
+                 : "r"(zz9k_a6), "r"(zz9k_d2), "r"(zz9k_d3)
+                 : ZZ9K_INLINE_CLOBBERS_D1);
+  return (int)zz9k_d0;
+}
+
 static __inline int __ZZ9KWaitAsyncInline(ZZ9KAsyncRequest *async,
                                           uint32_t timeout_polls,
                                           uint32_t *polls_run)

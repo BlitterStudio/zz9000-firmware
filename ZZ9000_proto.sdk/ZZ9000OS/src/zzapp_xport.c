@@ -1084,12 +1084,10 @@ static void store_completion(zzapp_rec_t *rec, const aar_completion *c)
 	x->stats.unknown_dropped++;
 }
 
-/* Mouse motion that finds the event ring full is merged into one pending
- * event, as the library merges it (sum dx and dy while the buttons stay the
- * same), and goes into the ring ahead of anything newer as soon as there is
- * room. 1 when `ev` was kept; a click or a button change is not folded into
- * earlier motion, and any other event has nowhere to wait: 0, the caller
- * counts the drop. */
+/* Hold one motion event while the ring is full. While buttons and code
+ * match, keep the latest absolute position or sum relative motion. The
+ * pending event enters the ring before newer events. Return zero when the
+ * event cannot be held so the caller counts the drop. */
 static int event_merge_mouse(zzapp_rec_xport_t *x, const aar_event *ev)
 {
 	int32_t dx, dy;
@@ -1104,6 +1102,12 @@ static int event_merge_mouse(zzapp_rec_xport_t *x, const aar_event *ev)
 	}
 	if (x->ev_mouse.buttons != ev->buttons || x->ev_mouse.code != ev->code)
 		return 0;
+	if (ev->buttons & AAR_MOUSE_ABSOLUTE) {
+		x->ev_mouse.dx = ev->dx;
+		x->ev_mouse.dy = ev->dy;
+		x->ev_mouse.time_ms = ev->time_ms;
+		return 1;
+	}
 	dx = (int32_t)x->ev_mouse.dx + ev->dx;
 	dy = (int32_t)x->ev_mouse.dy + ev->dy;
 	x->ev_mouse.dx = (int16_t)(dx > 32767 ? 32767 : dx < -32768 ? -32768 : dx);

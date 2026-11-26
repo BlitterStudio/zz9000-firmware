@@ -769,6 +769,63 @@ static LONG ext_release_handle(ULONG handle)
 	return release_handle(&zz, handle);
 }
 
+/*
+ * Stable host-visible surfaces: an allocation of the card's shared heap that
+ * the caller can use as the backing of a window or scaling surface. The
+ * address is immutable until `surface_free` (no lock is held, nothing is
+ * paged or moved), so it can be published as an AARSharedToken. The size is
+ * rounded up to whole shared granules and the base is granule-aligned, so an
+ * alias of the allocation exposes no neighbouring bytes; the contents start
+ * cleared. The card does not know about aliases the caller derived from it:
+ * free the handle only after the alias is released. A handle the caller
+ * leaks is reclaimed when the library closes zz9k.library for good.
+ */
+static LONG ext_surface_alloc(ULONG bytes, ULONG *handle, APTR *ptr)
+{
+	struct zz_state *s = &zz;
+	volatile uint8_t *mapped = NULL;
+	uint32_t rounded, id = 0u, token;
+	int rc;
+
+	if (handle)
+		*handle = 0u;
+	if (ptr)
+		*ptr = (APTR)0;
+	if (!handle || !ptr)
+		return AAR_E_INVAL;
+	if (bytes == 0u || bytes > UINT32_MAX - (ZZ_SHARED_GRANULE - 1u))
+		return AAR_E_INVAL;
+	if (!s->attached || !s->board.surface_alloc || !s->board.surface_free)
+		return AAR_E_NOSYS;
+	rounded = (bytes + ZZ_SHARED_GRANULE - 1u) & ~(ZZ_SHARED_GRANULE - 1u);
+	rc = s->board.surface_alloc(s->board.user, rounded, &id, &mapped);
+	if (rc != AAR_OK)
+		return rc;
+	/* The hook's promise is checked here, so a card that returned
+	 * something else never reaches the caller. */
+	if (id == 0u || !mapped || !s->board.token ||
+	    s->board.token(s->board.user, mapped, rounded, &token) != AAR_OK ||
+	    (token & (ZZ_SHARED_GRANULE - 1u)) != 0u) {
+		if (id != 0u)
+			(void)s->board.surface_free(s->board.user, id);
+		return AAR_E_IO;
+	}
+	*handle = id;
+	*ptr = (APTR)(uintptr_t)mapped;
+	return AAR_OK;
+}
+
+static LONG ext_surface_free(ULONG handle)
+{
+	struct zz_state *s = &zz;
+
+	if (handle == 0u)
+		return AAR_E_STALE;
+	if (!s->attached || !s->board.surface_free)
+		return AAR_E_NOSYS;
+	return s->board.surface_free(s->board.user, handle);
+}
+
 static aar_client_ext_zz9000 zz_ext = {
 	sizeof(aar_client_ext_zz9000),
 	0u,
@@ -778,6 +835,8 @@ static aar_client_ext_zz9000 zz_ext = {
 	 * is not in this table: AARSetLogSink is a call of the base library. */
 	aar_core_ext_stats,
 	aar_core_ext_lease_pause,
+	ext_surface_alloc,
+	ext_surface_free,
 };
 
 static const void *zz_ext_get(struct aar_plat *p, uint32_t ext_id)
@@ -1075,6 +1134,64 @@ static int amiga_token(void *user, const volatile void *ptr, uint32_t bytes,
 	return AAR_OK;
 }
 
+/* One allocation of the card's shared heap (zz9k.library ZZ9KAllocShared, the
+ * library the board already opened): its address is the card's own and never
+ * moves, so nothing is locked and nothing waits on a lock. The heap does not
+ * clear what it hands out, so the block is first made cache-inhibited (which
+ * writes back and drops whatever the 68k cache held of it) and then cleared
+ * by the card, before anyone can alias it. A block that fails any step goes
+ * straight back to the heap, so a failed call leaks nothing. */
+static int amiga_surface_alloc(void *user, uint32_t bytes, uint32_t *handle,
+			       volatile uint8_t **ptr)
+{
+	zz_amiga *a = (zz_amiga *)user;
+	ZZ9KSharedBuffer buf;
+	volatile uint8_t *mapped = NULL;
+	uint32_t token;
+	int status, rc;
+
+	rc = amiga_prepare(a);
+	if (rc != AAR_OK)
+		return rc;
+	memset(&buf, 0, sizeof(buf));
+	status = ZZ9KAllocSharedAtBase(a->zz9k, bytes, ZZ_SHARED_GRANULE,
+				       ZZ9K_ALLOC_HOST_WINDOW, &buf);
+	if (status != ZZ9K_STATUS_OK)
+		return status_to_aar(status);
+	if (buf.handle == 0u || !buf.data || buf.length < bytes) {
+		/* A card that answered OK with a block that is unusable. */
+		if (buf.handle != 0u)
+			(void)ZZ9KFreeSharedAtBase(a->zz9k, buf.handle);
+		return AAR_E_IO;
+	}
+	rc = amiga_token(a, buf.data, bytes, &token);
+	if (rc == AAR_OK && (token & (ZZ_SHARED_GRANULE - 1u)) != 0u)
+		rc = AAR_E_IO;
+	if (rc == AAR_OK)
+		rc = amiga_map(a, token, bytes, &mapped);
+	if (rc == AAR_OK && mapped != (volatile uint8_t *)buf.data)
+		rc = AAR_E_IO;
+	if (rc == AAR_OK) {
+		status = ZZ9KMemFillAtBase(a->zz9k, buf.handle, 0u, bytes, 0u);
+		if (status != ZZ9K_STATUS_OK)
+			rc = status_to_aar(status);
+	}
+	if (rc != AAR_OK) {
+		(void)ZZ9KFreeSharedAtBase(a->zz9k, buf.handle);
+		return rc;
+	}
+	*handle = buf.handle;
+	*ptr = mapped;
+	return AAR_OK;
+}
+
+static int amiga_surface_free(void *user, uint32_t handle)
+{
+	zz_amiga *a = (zz_amiga *)user;
+
+	return status_to_aar(ZZ9KFreeSharedAtBase(a->zz9k, handle));
+}
+
 static uint32_t amiga_now_ms(zz_amiga *a)
 {
 	struct timeval tv;
@@ -1323,6 +1440,8 @@ static int board_attach(struct zz_state *s)
 	s->board.prepare = amiga_prepare;
 	s->board.map = amiga_map;
 	s->board.token = amiga_token;
+	s->board.surface_alloc = amiga_surface_alloc;
+	s->board.surface_free = amiga_surface_free;
 	return AAR_OK;
 
 fail:

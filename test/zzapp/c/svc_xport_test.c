@@ -264,7 +264,7 @@ static struct {
 	uint32_t vol[4];		/* blocks total, used, block bytes, flags */
 	uint32_t protect;		/* the protection word FILE_STAT reports */
 	uint32_t open_caps;		/* reply flags of a display open and resize */
-	uint32_t resize_front, resize_back, resize_pitch, resize_w, resize_h;
+	uint32_t resize_front, resize_back, resize_spare, resize_pitch, resize_w, resize_h;
 	int32_t resize_result;
 	uint32_t info[6];		/* the out words of DISPLAY_INFO */
 	uint32_t mode_total, mode_max_len;
@@ -483,6 +483,7 @@ static void client_handle(client_t *c, const aar_request *r)
 		d.out[AAR_R_DISPLAY_OPEN_LAYOUT] = cl.open_layout;
 		d.out[AAR_R_DISPLAY_OPEN_FRONT] = cl.resize_front;
 		d.out[AAR_R_DISPLAY_OPEN_BACK] = cl.resize_back;
+		d.out[AAR_R_DISPLAY_OPEN_SPARE] = cl.resize_spare;
 		break;
 	case AAR_OP_DISPLAY_TITLE:
 		if (buf)
@@ -1551,16 +1552,38 @@ static void test_events_messages(void)
 	CHECK(mbox(ZZAPP_OP_RELEASE, handle, 0U, 0U, NULL, NULL) == SDK_STATUS_OK);
 }
 
-static void post_mouse(client_t *c, int16_t dx, int16_t dy, uint16_t buttons)
+static void post_mouse_at(client_t *c, int16_t dx, int16_t dy, uint16_t buttons,
+			  uint16_t code, uint32_t time_ms)
 {
 	aar_event in;
 
 	memset(&in, 0, sizeof(in));
 	in.type = AAR_EV_MOUSE;
+	in.code = code;
 	in.dx = dx;
 	in.dy = dy;
 	in.buttons = buttons;
+	in.time_ms = time_ms;
 	CHECK(aar_queue_post_event(&c->cq, &in, NULL, NULL) == AAR_OK);
+}
+
+static void post_mouse(client_t *c, int16_t dx, int16_t dy, uint16_t buttons)
+{
+	post_mouse_at(c, dx, dy, buttons, 0U, 0U);
+}
+
+/* Takes the 64 keys of a full ring and then the one held mouse event after
+ * them, and nothing more. */
+static void take_full_ring_and_held(zzapp_rec_t *rec, aar_event *held)
+{
+	aar_event ev;
+	uint32_t i;
+
+	for (i = 0U; i < ZZAPP_XPORT_EVENT_ENTRIES; i++)
+		CHECK(zzapp_xport_take_event(rec, &ev) == 1 &&
+		      ev.type == AAR_EV_KEY_DOWN && ev.code == i);
+	CHECK(zzapp_xport_take_event(rec, held) == 1);
+	CHECK(zzapp_xport_take_event(rec, &ev) == 0);
 }
 
 /* Fills the event ring with ZZAPP_XPORT_EVENT_ENTRIES key events. */
@@ -1655,6 +1678,71 @@ static void test_event_ring_full_mouse(void)
 	CHECK(zzapp_xport_pump(rec) == 2);
 	drain_events(&d);
 	CHECK(d.mice == 1U && d.dx == 32767);
+	CHECK(mbox(ZZAPP_OP_RELEASE, handle, 0U, 0U, NULL, NULL) == SDK_STATUS_OK);
+}
+
+/* An absolute mouse event (AAR_MOUSE_ABSOLUTE in buttons) is a position: the
+ * merge while the ring is full keeps the latest one with its time, never sums
+ * it and never saturates it as a delta; the flag and code stay as posted.
+ * Absolute and relative motion, and different buttons, are not folded into
+ * each other: the second one is dropped and counted (spec 8.3). */
+static void test_event_ring_full_absolute_mouse(void)
+{
+	client_t c;
+	zzapp_rec_t *rec;
+	aar_event held;
+	uint32_t handle, dropped, i;
+
+	reset_all();
+	rec = claim(&c, &handle);
+
+	/* 20 positions (10 i, 5 i): one event, the last position, the flag kept. */
+	fill_event_ring(&c, rec);
+	dropped = zzapp_xport_stats(rec)->events_dropped;
+	for (i = 1U; i <= 20U; i++)
+		post_mouse_at(&c, (int16_t)(10U * i), (int16_t)(5U * i),
+			      AAR_MOUSE_ABSOLUTE, 0U, 1000U + i);
+	CHECK(zzapp_xport_pump(rec) == 20);
+	CHECK(zzapp_xport_stats(rec)->events_dropped == dropped);
+	take_full_ring_and_held(rec, &held);
+	CHECK(held.type == AAR_EV_MOUSE && held.code == 0U);
+	CHECK(held.dx == 200 && held.dy == 100);
+	CHECK(held.buttons == AAR_MOUSE_ABSOLUTE && held.time_ms == 1020U);
+
+	/* A held button stays set even at coordinates near the int16 limits. */
+	fill_event_ring(&c, rec);
+	post_mouse_at(&c, 30000, -30000, AAR_MOUSE_ABSOLUTE | AAR_MOUSE_LEFT, 0U, 5U);
+	post_mouse_at(&c, -32768, 32767, AAR_MOUSE_ABSOLUTE | AAR_MOUSE_LEFT, 0U, 6U);
+	post_mouse_at(&c, 30000, 30000, AAR_MOUSE_ABSOLUTE | AAR_MOUSE_LEFT, 0U, 7U);
+	CHECK(zzapp_xport_pump(rec) == 3);
+	take_full_ring_and_held(rec, &held);
+	CHECK(held.dx == 30000 && held.dy == 30000 && held.code == 0U);
+	CHECK(held.buttons == (AAR_MOUSE_ABSOLUTE | AAR_MOUSE_LEFT) && held.time_ms == 7U);
+
+	/* Relative motion into a pending absolute event, a click into it, and
+	 * the reverse: dropped, not summed. The position is still the latest
+	 * absolute one. */
+	fill_event_ring(&c, rec);
+	dropped = zzapp_xport_stats(rec)->events_dropped;
+	post_mouse_at(&c, 7, 8, AAR_MOUSE_ABSOLUTE, 0U, 1U);
+	post_mouse_at(&c, 3, 3, 0U, 0U, 2U);
+	post_mouse_at(&c, 9, 9, AAR_MOUSE_ABSOLUTE | AAR_MOUSE_LEFT, 1U, 3U);
+	post_mouse_at(&c, 11, 12, AAR_MOUSE_ABSOLUTE, 0U, 4U);
+	CHECK(zzapp_xport_pump(rec) == 4);
+	CHECK(zzapp_xport_stats(rec)->events_dropped == dropped + 2U);
+	take_full_ring_and_held(rec, &held);
+	CHECK(held.dx == 11 && held.dy == 12 && held.buttons == AAR_MOUSE_ABSOLUTE &&
+	      held.time_ms == 4U);
+
+	fill_event_ring(&c, rec);
+	dropped = zzapp_xport_stats(rec)->events_dropped;
+	post_mouse_at(&c, 5, 6, 0U, 0U, 1U);
+	post_mouse_at(&c, 100, 100, AAR_MOUSE_ABSOLUTE, 0U, 2U);
+	post_mouse_at(&c, 1, 1, 0U, 0U, 3U);
+	CHECK(zzapp_xport_pump(rec) == 3);
+	CHECK(zzapp_xport_stats(rec)->events_dropped == dropped + 1U);
+	take_full_ring_and_held(rec, &held);
+	CHECK(held.dx == 6 && held.dy == 7 && held.buttons == 0U && held.time_ms == 3U);
 	CHECK(mbox(ZZAPP_OP_RELEASE, handle, 0U, 0U, NULL, NULL) == SDK_STATUS_OK);
 }
 
@@ -2576,7 +2664,7 @@ static void test_display_caps_v06(void)
 
 	/* Every feature asked for and granted; runtime-owned bits and junk in
 	 * the reply are not the client's to grant. */
-	cl.open_caps = FEATURE_CAPS | AAR_DISPCAP_LATEST | AAR_DISPCAP_CLUT8 | 0x8000U;
+	cl.open_caps = FEATURE_CAPS | AAR_DISPCAP_LATEST | AAR_DISPCAP_CLUT8 | 0x4000U;
 	CHECK(zzapp_svc_display_open(640U, 480U, AAR_FMT_RGB565,
 				     all | AAR_DISPLAY_VSYNC | AAR_DISPLAY_LATEST, &s) == AAR_OK);
 	CHECK(cl.last[AAR_OP_DISPLAY_OPEN].arg[AAR_A_DISPLAY_OPEN_FLAGS] ==
@@ -3186,6 +3274,161 @@ static void test_display_native_vblank(void)
 	cl.blank_at_yield = cl.yields + 1U;
 	CHECK(zzapp_svc_display_wait_vblank(50000U) == AAR_OK);
 	CHECK(st->vblank_seq == 2U && zzapp_svc_display_last_present_us() != 0U);
+	zzapp_services_on_app_end();
+	(void)zzapp_rec_retire(rec->hdr.pid);
+	(void)mbox(ZZAPP_OP_RELEASE, handle, 0U, 0U, NULL, NULL);
+}
+
+/* One native-wait attempt with the card's blank at `addr` on the first yield. */
+static int wait_blank_at(uint32_t addr, uint32_t timeout_us)
+{
+	int rc;
+
+	cl.blank_at_yield = cl.yields + 1U;
+	cl.blank_addr = addr;
+	rc = zzapp_svc_display_wait_vblank(timeout_us);
+	cl.blank_at_yield = 0U;
+	return rc;
+}
+
+/* A WINDOW or SCALED display whose client names the P96 screen that owns it
+ * (AAR_DISP_REPLY_SCANOUT, SPARE) is waited on natively, and only the blank
+ * that scans out exactly that screen ends the wait. The name is no app
+ * surface. Without the flag, or with a name outside the P96 window or equal
+ * to the app's own buffers, the wait stays with the client. */
+static void test_display_window_source_vblank(void)
+{
+	enum { SCREEN = 0x00900000, OTHER = 0x00A00000, OUTSIDE = 0x04000000 };
+	client_t c;
+	zzapp_rec_t *rec;
+	uint32_t handle;
+	aar_surface s, s2;
+	struct zzapp_service_runtime *st;
+	uint64_t t0;
+	uint64_t dt;
+	unsigned round;
+	unsigned bad;
+	uint32_t bad_spare[4] = { 0U, OUTSIDE, 0x00400000U, 0x00100000U };
+
+	reset_all();
+	rec = claim(&c, &handle);
+	give_space(rec);
+	st = runtime_of(rec);
+	cl.clock_step = 1000U;
+	for (round = 0U; round < 2U; round++) {
+		uint32_t caps = round == 0U ?
+			(AAR_DISPCAP_WINDOW | AAR_DISPCAP_RESIZE) : AAR_DISPCAP_SCALED;
+		uint32_t flags = round == 0U ?
+			(AAR_DISPLAY_WINDOW | AAR_DISPLAY_RESIZABLE) : AAR_DISPLAY_SCALE;
+		uint32_t seq = st->vblank_seq;
+
+		/* Named screen: native wait, never the client. */
+		cl.open_caps = caps | AAR_DISP_REPLY_SCANOUT;
+		cl.open_spare = SCREEN;
+		CHECK(zzapp_svc_display_open(640U, 480U, AAR_FMT_RGB565, flags, &s) == AAR_OK);
+		CHECK(st->display_source == SCREEN);
+		CHECK(st->display_spare == 0U);	/* not an app surface */
+		CHECK((s.caps & AAR_DISP_REPLY_SCANOUT) == 0U);
+		CHECK(st->display_scanout_ack == 0U && st->display_mailbox_active == 0);
+		cl.nreq[AAR_OP_DISPLAY_VBLANK] = 0U;
+		CHECK(wait_blank_at(SCREEN, 50000U) == AAR_OK);
+		CHECK(st->vblank_seq == ++seq && st->vblank_waiting == 0U);
+		CHECK(cl.nreq[AAR_OP_DISPLAY_VBLANK] == 0U);
+		CHECK(st->wait_kind == ZZAPP_WAIT_NONE);
+		/* No other scanout counts: another screen, staging memory, the
+		 * app's own buffers, nothing. Each ends at the timeout. */
+		{
+			uint32_t wrong[5] = { OTHER, SCREEN + 0x1000U, st->display_front,
+					      st->display_back, 0U };
+			unsigned i;
+
+			for (i = 0U; i < 5U; i++) {
+				t0 = fake_now;
+				CHECK(wait_blank_at(wrong[i], 20000U) == AAR_E_TIMEDOUT);
+				dt = fake_now - t0;
+				CHECK(dt >= 20000U && dt < 20000U + 3U * cl.clock_step);
+			}
+		}
+		CHECK(st->vblank_seq == seq && st->vblank_waiting == 0U);
+		CHECK(cl.nreq[AAR_OP_DISPLAY_VBLANK] == 0U);
+		/* A blank with nobody waiting costs nothing. */
+		zzapp_services_display_vblank(SCREEN);
+		CHECK(st->vblank_seq == seq);
+		/* A stop ends the wait, and a blank of the screen is no flip. */
+		cl.stop_at_yield = cl.yields + 2U;
+		CHECK(zzapp_svc_display_wait_vblank(5000000U) == AAR_E_IO);
+		CHECK(st->vblank_waiting == 0U && st->wait_kind == ZZAPP_WAIT_NONE);
+		cl.stop_at_yield = 0U;
+		rec->host.stop_requested = 0U;
+		zzapp_services_display_vblank(SCREEN);
+		CHECK(zzapp_svc_display_last_present_us() == 0U);
+
+		/* A resize keeps the owning screen whatever its reply carries: a
+		 * flagged reply with another SPARE, then an unflagged one. */
+		if (round == 0U) {
+			cl.resize_front = 0x00700000U;
+			cl.resize_back = 0x00800000U;
+			cl.resize_pitch = 1280U;
+			cl.resize_spare = OTHER;
+			CHECK(zzapp_svc_display_resize(s.id, 320U, 240U, &s2) == AAR_OK);
+			CHECK(st->display_source == SCREEN && st->display_spare == 0U);
+			CHECK(st->display_front == 0x00700000U);
+			CHECK(wait_blank_at(SCREEN, 50000U) == AAR_OK);
+			CHECK(wait_blank_at(OTHER, 20000U) == AAR_E_TIMEDOUT);
+			CHECK(wait_blank_at(st->display_front, 20000U) == AAR_E_TIMEDOUT);
+			cl.open_caps = caps;
+			cl.resize_spare = 0U;
+			CHECK(zzapp_svc_display_resize(s.id, 400U, 300U, &s2) == AAR_OK);
+			CHECK(st->display_source == SCREEN);
+			CHECK(wait_blank_at(SCREEN, 50000U) == AAR_OK);
+			CHECK(wait_blank_at(OTHER, 20000U) == AAR_E_TIMEDOUT);
+			CHECK(cl.nreq[AAR_OP_DISPLAY_VBLANK] == 0U);
+			cl.open_caps = caps | AAR_DISP_REPLY_SCANOUT;
+		}
+
+		/* The name goes with the display. */
+		CHECK(zzapp_svc_display_close(s.id) == AAR_OK);
+		CHECK(st->display_source == 0U);
+		CHECK(zzapp_svc_display_wait_vblank(1000U) == AAR_E_INVAL);
+
+		/* Not named, or named wrongly: the client is asked, the open
+		 * still works, and no native blank is accepted. A name that is
+		 * not the owning screen is not an app buffer either. */
+		for (bad = 0U; bad < 5U; bad++) {
+			seq = st->vblank_seq;
+			if (bad < 4U) {
+				cl.open_caps = caps | AAR_DISP_REPLY_SCANOUT;
+				cl.open_spare = bad_spare[bad];
+			} else {
+				cl.open_caps = caps;	/* no flag: SPARE is an app buffer */
+				cl.open_spare = SCREEN;
+			}
+			CHECK(zzapp_svc_display_open(640U, 480U, AAR_FMT_RGB565, flags, &s) == AAR_OK);
+			CHECK(st->display_source == 0U);
+			CHECK(st->display_spare == (bad < 4U ? 0U : (uint32_t)SCREEN));
+			cl.nreq[AAR_OP_DISPLAY_VBLANK] = 0U;
+			cl.vblank_silent = 1;
+			t0 = fake_now;
+			CHECK(wait_blank_at(SCREEN, 50000U) == AAR_E_TIMEDOUT);
+			dt = fake_now - t0;
+			CHECK(dt >= 50000U + ZZAPP_VBLANK_GRACE_US - 3U * cl.clock_step);
+			CHECK(cl.nreq[AAR_OP_DISPLAY_VBLANK] == 1U);
+			CHECK(st->vblank_seq == seq);
+			cl.vblank_silent = 0;
+			CHECK(zzapp_svc_display_wait_vblank(50000U) == AAR_OK);
+			CHECK(cl.nreq[AAR_OP_DISPLAY_VBLANK] == 2U);
+			CHECK(zzapp_svc_display_close(s.id) == AAR_OK);
+		}
+	}
+
+	/* A flag on a direct-scanout open is not a name: SPARE stays the
+	 * app's buffer and no source is kept. */
+	cl.open_caps = AAR_DISP_REPLY_SCANOUT;
+	cl.open_spare = SCREEN;
+	CHECK(zzapp_svc_display_open(640U, 480U, AAR_FMT_RGB565, 0U, &s) == AAR_OK);
+	CHECK(st->display_source == 0U && st->display_spare == (uint32_t)SCREEN);
+	CHECK(zzapp_svc_display_close(s.id) == AAR_OK);
+
 	zzapp_services_on_app_end();
 	(void)zzapp_rec_retire(rec->hdr.pid);
 	(void)mbox(ZZAPP_OP_RELEASE, handle, 0U, 0U, NULL, NULL);
@@ -4004,6 +4247,7 @@ int main(void)
 	test_log();
 	test_events_messages();
 	test_event_ring_full_mouse();
+	test_event_ring_full_absolute_mouse();
 	test_pass_wakes();
 	test_display_pan();
 	test_display_vblank();
@@ -4020,6 +4264,7 @@ int main(void)
 	test_display_title_pointer();
 	test_display_wait_vblank();
 	test_display_native_vblank();
+	test_display_window_source_vblank();
 	test_display_resize();
 	test_display_event_gating();
 	test_audio_card();
