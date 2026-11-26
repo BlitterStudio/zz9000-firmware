@@ -611,11 +611,20 @@ played underruns in the ring header (`AAR_AUDIO_RING_UNDERRUNS`, a
 little-endian word beside `read_frame`), where the app and the client read
 them; on the AHI route the client consumes the ring and the word stays 0.
 
-**Amiga services.** File mutations, volume queries, wall time, locale,
-environment and clipboard calls use the same parked request path as file
-reads. The launcher applies its configured root and access policy. An
-environment value larger than the transport buffer can be counted but not
-returned whole; clipboard transfers use successive chunks.
+**Amiga services.** File mutations, volume queries, file comments, wall
+time, locale, environment and clipboard calls use the same parked request
+path as file reads. The launcher applies its configured root and access
+policy. An environment value larger than the transport buffer can be
+counted but not returned whole; clipboard transfers use successive chunks.
+A file comment is at most `AAR_FILE_COMMENT_MAX` (79) native bytes with no
+NUL and no terminator. `aar_file_get_comment` sends the path and the
+capacity (`min(bytes, 79)`) in one request, copies the bytes the client
+writes over the start of the buffer, and answers `AAR_E_NOSPC` with the
+full length when the capacity was short; a length above 79, or one that
+disagrees with the result, is `AAR_E_IO`. `aar_file_set_comment` sends the
+path, a NUL and the comment as one buffer; more than 79 bytes or an
+embedded NUL is `AAR_E_INVAL` before anything is sent. A client that does
+not serve either request answers `AAR_E_NOSYS`.
 
 **Display.** A WINDOW or SCALED grant names off-screen buffers. Firmware
 does not point scanout at them, and records presentation when the client

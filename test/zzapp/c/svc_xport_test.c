@@ -277,6 +277,15 @@ static struct {
 	uint8_t locale_rec[AAR_LOCALE_REC_BYTES];
 	const uint8_t *env_value;
 	uint32_t env_len, env_buf_len;
+	/* file comments: the client's stored comment, what its completion may
+	 * misreport, and what the last SET carried */
+	uint8_t comment[AAR_FILE_COMMENT_MAX + 1U];
+	uint32_t comment_len;
+	int comment_lie;		/* report comment_lie_len, not the length */
+	uint32_t comment_lie_len;
+	int comment_ok_short;		/* answer OK even when the room was short */
+	uint8_t comment_set[512];
+	uint32_t comment_set_len;
 	const uint8_t *clip_data;
 	uint32_t clip_len, clip_cap, clip_seq, clip_max_len;
 	int clip_drift, clip_stall;
@@ -442,6 +451,37 @@ static void client_handle(client_t *c, const aar_request *r)
 				sizeof(cl.path2) - 1U);
 		}
 		break;
+	case AAR_OP_FILE_GET_COMMENT: {
+		uint32_t cap = r->arg[AAR_A_FILE_COMMENT_CAP];
+		uint32_t n = cl.comment_len < cap ? cl.comment_len : cap;
+
+		CHECK(buf && cap <= r->buf_len);
+		/* The path is read first, the comment is written over it. */
+		strncpy(cl.path, (const char *)buf, sizeof(cl.path) - 1U);
+		if (n != 0U)
+			memcpy(buf, cl.comment, n);
+		d.out[AAR_R_FILE_COMMENT_LEN] = cl.comment_lie ?
+			cl.comment_lie_len : cl.comment_len;
+		if (cl.result == 0 && cl.comment_len > cap && !cl.comment_ok_short)
+			d.result = AAR_E_NOSPC;
+		break;
+	}
+	case AAR_OP_FILE_SET_COMMENT: {
+		uint32_t pl;
+
+		CHECK(buf != NULL);
+		pl = (uint32_t)strlen((const char *)buf) + 1U;
+		CHECK(r->buf_len >= pl);
+		strncpy(cl.path, (const char *)buf, sizeof(cl.path) - 1U);
+		cl.comment_set_len = r->buf_len - pl;
+		if (cl.comment_set_len <= sizeof(cl.comment_set))
+			memcpy(cl.comment_set, buf + pl, cl.comment_set_len);
+		if (cl.result == 0 && cl.comment_set_len <= AAR_FILE_COMMENT_MAX) {
+			memcpy(cl.comment, buf + pl, cl.comment_set_len);
+			cl.comment_len = cl.comment_set_len;
+		}
+		break;
+	}
 	case AAR_OP_VOLUME_INFO:
 		if (buf)
 			strncpy(cl.path, (const char *)buf, sizeof(cl.path) - 1U);
@@ -2358,6 +2398,184 @@ static void test_files_v06(void)
 	CHECK(mbox(ZZAPP_OP_RELEASE, handle, 0U, 0U, NULL, NULL) == SDK_STATUS_OK);
 }
 
+/* File comments: the scripted client keeps one comment (cl.comment). */
+static void test_file_comments(void)
+{
+	client_t c;
+	zzapp_rec_t *rec;
+	uint32_t handle;
+	uint8_t hi[AAR_FILE_COMMENT_MAX];
+	uint8_t nul[5] = { 1U, 2U, 0U, 4U, 5U };
+	uint8_t out[300];
+	char p255[256], p256[257];
+	uint32_t n, before_get, before_set;
+	unsigned i;
+
+	reset_all();
+	rec = claim(&c, &handle);
+	(void)rec;
+	/* 79 bytes, every one with the high bit set: native bytes, no
+	 * conversion. */
+	for (i = 0U; i < sizeof(hi); i++)
+		hi[i] = (uint8_t)(0x81U + (i * 5U) % 126U);
+	hi[0] = 0x80U;
+	hi[1] = 0xffU;
+
+	/* A full-length comment survives a set and a get unchanged; the
+	 * request carries the path, a NUL and exactly those bytes. */
+	CHECK(zzapp_svc_file_set_comment("Work:f", hi, 79U) == AAR_OK);
+	CHECK(cl.nreq[AAR_OP_FILE_SET_COMMENT] == 1U);
+	CHECK(strcmp(cl.path, "Work:f") == 0);
+	CHECK(cl.comment_set_len == 79U && memcmp(cl.comment_set, hi, 79U) == 0);
+	CHECK(cl.last[AAR_OP_FILE_SET_COMMENT].buf_len == 7U + 79U);
+	memset(out, 0x5a, sizeof(out));
+	n = 0xdeadU;
+	CHECK(zzapp_svc_file_get_comment("Work:f", out, 96U, &n) == AAR_OK);
+	CHECK(n == 79U && memcmp(out, hi, 79U) == 0 && out[79] == 0x5aU);
+	CHECK(cl.last[AAR_OP_FILE_GET_COMMENT].arg[AAR_A_FILE_COMMENT_CAP] == 79U);
+	CHECK(cl.last[AAR_OP_FILE_GET_COMMENT].buf_len == 79U);
+	/* A caller's room beyond 79 asks for 79 on the wire. */
+	memset(out, 0x5a, sizeof(out));
+	CHECK(zzapp_svc_file_get_comment("Work:f", out, sizeof(out), &n) == AAR_OK);
+	CHECK(n == 79U && memcmp(out, hi, 79U) == 0 && out[79] == 0x5aU);
+	CHECK(cl.last[AAR_OP_FILE_GET_COMMENT].arg[AAR_A_FILE_COMMENT_CAP] == 79U);
+	CHECK(strcmp(cl.path, "Work:f") == 0);
+
+	/* A short room: the prefix, the full length, AAR_E_NOSPC, and nothing
+	 * written past the room. */
+	memset(out, 0x5a, sizeof(out));
+	n = 0U;
+	CHECK(zzapp_svc_file_get_comment("Work:f", out, 10U, &n) == AAR_E_NOSPC);
+	CHECK(n == 79U && memcmp(out, hi, 10U) == 0 && out[10] == 0x5aU);
+	CHECK(cl.last[AAR_OP_FILE_GET_COMMENT].arg[AAR_A_FILE_COMMENT_CAP] == 10U);
+	CHECK(cl.last[AAR_OP_FILE_GET_COMMENT].buf_len == 10U);
+	memset(out, 0x5a, sizeof(out));
+	CHECK(zzapp_svc_file_get_comment("Work:f", out, 78U, &n) == AAR_E_NOSPC);
+	CHECK(n == 79U && memcmp(out, hi, 78U) == 0 && out[78] == 0x5aU);
+	/* A room longer than the path and shorter than the comment. */
+	memset(out, 0x5a, sizeof(out));
+	CHECK(zzapp_svc_file_get_comment("Work:f", out, 1U, &n) == AAR_E_NOSPC);
+	CHECK(n == 79U && out[0] == hi[0] && out[1] == 0x5aU);
+	CHECK(cl.last[AAR_OP_FILE_GET_COMMENT].buf_len == 7U);	/* the path */
+
+	/* Zero room: the length alone, with no buffer. */
+	n = 7U;
+	CHECK(zzapp_svc_file_get_comment("Work:f", NULL, 0U, &n) == AAR_E_NOSPC);
+	CHECK(n == 79U);
+	CHECK(cl.last[AAR_OP_FILE_GET_COMMENT].arg[AAR_A_FILE_COMMENT_CAP] == 0U);
+	memset(out, 0x5a, sizeof(out));
+	CHECK(zzapp_svc_file_get_comment("Work:f", out, 0U, &n) == AAR_E_NOSPC);
+	CHECK(n == 79U && out[0] == 0x5aU);
+
+	/* An empty comment is a success of length 0, with or without room. */
+	CHECK(zzapp_svc_file_set_comment("Work:f", NULL, 0U) == AAR_OK);
+	CHECK(cl.comment_set_len == 0U && cl.last[AAR_OP_FILE_SET_COMMENT].buf_len == 7U);
+	n = 9U;
+	CHECK(zzapp_svc_file_get_comment("Work:f", NULL, 0U, &n) == AAR_OK && n == 0U);
+	memset(out, 0x5a, sizeof(out));
+	n = 9U;
+	CHECK(zzapp_svc_file_get_comment("Work:f", out, 8U, &n) == AAR_OK);
+	CHECK(n == 0U && out[0] == 0x5aU);
+	CHECK(zzapp_svc_file_set_comment("Work:f", out, 0U) == AAR_OK);
+
+	/* The longest path with the longest comment fits the scratch area. */
+	memset(p255, 'a', 255);
+	p255[255] = '\0';
+	CHECK(zzapp_svc_file_set_comment(p255, hi, 79U) == AAR_OK);
+	CHECK(cl.last[AAR_OP_FILE_SET_COMMENT].buf_len == 256U + 79U);
+	CHECK(strlen(cl.path) == 255U && cl.comment_len == 79U);
+	CHECK(zzapp_svc_file_get_comment(p255, out, 79U, &n) == AAR_OK);
+	CHECK(n == 79U && memcmp(out, hi, 79U) == 0);
+	CHECK(cl.last[AAR_OP_FILE_GET_COMMENT].buf_len == 256U);
+
+	/* Arguments are checked before the client hears of the call. */
+	memset(p256, 'b', 256);
+	p256[256] = '\0';
+	before_get = cl.nreq[AAR_OP_FILE_GET_COMMENT];
+	before_set = cl.nreq[AAR_OP_FILE_SET_COMMENT];
+	CHECK(zzapp_svc_file_set_comment("Work:f", hi, 80U) == AAR_E_INVAL);
+	CHECK(zzapp_svc_file_set_comment("Work:f", hi, 0xffffffffU) == AAR_E_INVAL);
+	CHECK(zzapp_svc_file_set_comment("Work:f", nul, 5U) == AAR_E_INVAL);
+	CHECK(zzapp_svc_file_set_comment("Work:f", nul, 3U) == AAR_E_INVAL);
+	CHECK(zzapp_svc_file_set_comment("Work:f", nul, 2U) == AAR_OK);
+	CHECK(zzapp_svc_file_set_comment("Work:f", NULL, 1U) == AAR_E_INVAL);
+	CHECK(zzapp_svc_file_set_comment(NULL, hi, 1U) == AAR_E_INVAL);
+	CHECK(zzapp_svc_file_set_comment("", hi, 1U) == AAR_E_INVAL);
+	CHECK(zzapp_svc_file_set_comment(p256, hi, 1U) == AAR_E_INVAL);
+	CHECK(cl.nreq[AAR_OP_FILE_SET_COMMENT] == before_set + 1U);
+	memset(out, 0x5a, sizeof(out));
+	n = 5U;
+	CHECK(zzapp_svc_file_get_comment("Work:f", out, 8U, NULL) == AAR_E_INVAL);
+	CHECK(zzapp_svc_file_get_comment("Work:f", NULL, 8U, &n) == AAR_E_INVAL && n == 0U);
+	CHECK(zzapp_svc_file_get_comment(NULL, out, 8U, &n) == AAR_E_INVAL);
+	CHECK(zzapp_svc_file_get_comment("", out, 8U, &n) == AAR_E_INVAL);
+	CHECK(zzapp_svc_file_get_comment(p256, out, 8U, &n) == AAR_E_INVAL);
+	CHECK(cl.nreq[AAR_OP_FILE_GET_COMMENT] == before_get && out[0] == 0x5aU);
+
+	/* A client that does not serve the request, or refuses it, is passed
+	 * through; no length and no bytes. */
+	CHECK(zzapp_svc_file_set_comment("Work:f", hi, 79U) == AAR_OK);
+	cl.result = AAR_E_NOSYS;
+	memset(out, 0x5a, sizeof(out));
+	n = 5U;
+	CHECK(zzapp_svc_file_get_comment("Work:f", out, 96U, &n) == AAR_E_NOSYS);
+	CHECK(n == 0U && out[0] == 0x5aU);
+	CHECK(zzapp_svc_file_set_comment("Work:f", hi, 3U) == AAR_E_NOSYS);
+	cl.result = AAR_E_NOENT;
+	n = 5U;
+	CHECK(zzapp_svc_file_get_comment("Work:g", out, 96U, &n) == AAR_E_NOENT && n == 0U);
+	CHECK(zzapp_svc_file_set_comment("Work:g", hi, 3U) == AAR_E_NOENT);
+	cl.result = AAR_E_ACCES;
+	CHECK(zzapp_svc_file_set_comment("Work:g", hi, 3U) == AAR_E_ACCES);
+	cl.result = AAR_OK;
+	CHECK(cl.comment_len == 79U);	/* a refused set changed nothing */
+
+	/* A completion that cannot be true is a broken client: AAR_E_IO, the
+	 * caller's bytes and length untouched. */
+	memset(out, 0x5a, sizeof(out));
+	cl.comment_lie = 1;
+	cl.comment_lie_len = AAR_FILE_COMMENT_MAX + 1U;	/* more than a comment */
+	n = 5U;
+	CHECK(zzapp_svc_file_get_comment("Work:f", out, sizeof(out), &n) == AAR_E_IO);
+	CHECK(n == 0U && out[0] == 0x5aU);
+	cl.comment_lie_len = 0xffffffffU;
+	CHECK(zzapp_svc_file_get_comment("Work:f", out, 10U, &n) == AAR_E_IO);
+	CHECK(n == 0U && out[0] == 0x5aU);
+	/* OK with a length above the room. */
+	cl.comment_ok_short = 1;
+	cl.comment_lie = 0;
+	CHECK(zzapp_svc_file_get_comment("Work:f", out, 10U, &n) == AAR_E_IO);
+	CHECK(n == 0U && out[0] == 0x5aU);
+	cl.comment_ok_short = 0;
+	/* AAR_E_NOSPC with a length that fits the room. */
+	cl.result = AAR_E_NOSPC;
+	cl.comment_lie = 1;
+	cl.comment_lie_len = 5U;
+	CHECK(zzapp_svc_file_get_comment("Work:f", out, 10U, &n) == AAR_E_IO);
+	CHECK(n == 0U && out[0] == 0x5aU);
+	CHECK(zzapp_svc_file_get_comment("Work:f", NULL, 0U, &n) == AAR_E_NOSPC && n == 5U);
+	cl.comment_lie_len = 0U;
+	CHECK(zzapp_svc_file_get_comment("Work:f", NULL, 0U, &n) == AAR_E_IO);
+	cl.result = AAR_OK;
+	cl.comment_lie = 0;
+
+	/* A stop ends the wait. */
+	cl.ignore = 1;
+	cl.stop_at_yield = cl.yields + 2U;
+	memset(out, 0x5a, sizeof(out));
+	CHECK(zzapp_svc_file_get_comment("Work:f", out, 96U, &n) == AAR_E_IO);
+	CHECK(n == 0U && out[0] == 0x5aU);
+	CHECK(mbox(ZZAPP_OP_RELEASE, handle, 0U, 0U, NULL, NULL) == SDK_STATUS_OK);
+
+	reset_all();
+	(void)claim(&c, &handle);
+	cl.ignore = 1;
+	cl.clock_step = 10000000U;
+	CHECK(zzapp_svc_file_get_comment("Work:slow", out, sizeof(out), &n) == AAR_E_TIMEDOUT);
+	CHECK(zzapp_svc_file_set_comment("Work:f", NULL, 0U) == AAR_E_BUSY);
+	CHECK(mbox(ZZAPP_OP_RELEASE, handle, 0U, 0U, NULL, NULL) == SDK_STATUS_OK);
+}
+
 /* The clipboard the scripted client received (clip_sink, above). */
 
 static void test_time_locale_env(void)
@@ -4255,6 +4473,7 @@ int main(void)
 	test_display_latest();
 	test_display_bad_tokens();
 	test_files_v06();
+	test_file_comments();
 	test_time_locale_env();
 	test_clipboard();
 	test_display_caps_v06();

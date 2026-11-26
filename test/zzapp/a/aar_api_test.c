@@ -142,6 +142,7 @@ static void test_header(void)
     assert(api->event_poll && api->msg_send && api->msg_poll &&
            api->msg_wait);
     assert(api->ext && api->map_file && api->unmap_file);
+    assert(api->file_get_comment && api->file_set_comment);
     /* Every call of a group the table advertises is present. */
     if (api->groups & AAR_GROUP_DISPLAY)
         assert(api->display_open && api->display_flip &&

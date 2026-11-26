@@ -876,6 +876,9 @@ static const zzapp_svc_descriptor_t api_descriptors[API_VENEERS] = {
     [API_SLOT(ext)] = D(2, ZZAPP_SVC_RETURN_POINTER, N, N, N),
     [API_SLOT(map_file)] = D(3, ZZAPP_SVC_RETURN_INT, IN_STRING_OPT(0), OUT_PTR(1), OUT_U64(2)),
     [API_SLOT(unmap_file)] = D(1, ZZAPP_SVC_RETURN_VOID, N, N, N),
+    [API_SLOT(file_get_comment)] = { 4, 0U, ZZAPP_SVC_RETURN_INT, 0U, ZZAPP_SVC_COPY_OUT_ON_NOSPC,
+                                     { IN_STRING_OPT(0), OUT_ARG_OPT(1, 2), OUT_U32(3) } },
+    [API_SLOT(file_set_comment)] = D(3, ZZAPP_SVC_RETURN_INT, IN_STRING_OPT(0), IN_ARG_OPT(1, 2), N),
     /* display */
     [API_SLOT(display_open)] = D(5, ZZAPP_SVC_RETURN_INT, OUT_OPTIONAL(4, sizeof(aar_surface), 1U), N, N),
     [API_SLOT(display_flip)] = D(1, ZZAPP_SVC_RETURN_INT, N, N, N),

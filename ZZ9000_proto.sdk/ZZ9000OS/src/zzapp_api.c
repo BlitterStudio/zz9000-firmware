@@ -124,6 +124,12 @@ WEAK int zzapp_svc_clip_read(uint32_t unit, uint32_t type, void *buf,
 WEAK int zzapp_svc_clip_write(uint32_t unit, uint32_t type, const void *data,
                               uint32_t bytes)
 { (void)unit; (void)type; (void)data; (void)bytes; return AAR_E_NOSYS; }
+WEAK int zzapp_svc_file_get_comment(const char *path, void *buf, uint32_t bytes,
+                                    uint32_t *out)
+{ (void)path; (void)buf; (void)bytes; (void)out; return AAR_E_NOSYS; }
+WEAK int zzapp_svc_file_set_comment(const char *path, const void *data,
+                                    uint32_t bytes)
+{ (void)path; (void)data; (void)bytes; return AAR_E_NOSYS; }
 WEAK int zzapp_svc_display_info(uint32_t id, aar_display_info *out)
 { (void)id; (void)out; return AAR_E_NOSYS; }
 WEAK int zzapp_svc_display_modes(aar_display_mode *out, uint32_t max, uint32_t *count)
@@ -1194,6 +1200,25 @@ static int api_volume_info(const char *path, aar_volume_info *out)
     return rc;
 }
 
+static int api_file_get_comment(const char *path, void *buf, uint32_t bytes,
+                                uint32_t *out)
+{
+    int rc;
+    zzapp_api_enter();
+    rc = zzapp_svc_file_get_comment(path, buf, bytes, out);
+    zzapp_api_leave();
+    return rc;
+}
+
+static int api_file_set_comment(const char *path, const void *data, uint32_t bytes)
+{
+    int rc;
+    zzapp_api_enter();
+    rc = zzapp_svc_file_set_comment(path, data, bytes);
+    zzapp_api_leave();
+    return rc;
+}
+
 static int api_env_get(const char *name, char *buf, uint32_t bytes, uint32_t *out)
 {
     int rc;
@@ -1362,6 +1387,7 @@ static const aar_api g_api_full = {
     .env_get = api_env_get, .clip_read = api_clip_read, .clip_write = api_clip_write,
     /* optional */
     .ext = api_ext, .map_file = api_map_file, .unmap_file = api_unmap_file,
+    .file_get_comment = api_file_get_comment, .file_set_comment = api_file_set_comment,
     /* display */
     .display_open = api_display_open, .display_flip = api_display_flip,
     .display_flip_async = api_display_flip_async,
