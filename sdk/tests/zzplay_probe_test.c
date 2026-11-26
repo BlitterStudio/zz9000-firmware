@@ -7,6 +7,7 @@
 
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 static int check_file_probe(void)
@@ -1132,6 +1133,319 @@ static int check_webp_file_probe(void)
   return 1;
 }
 
+/* ---- MPEG Transport Stream ------------------------------------------ */
+
+typedef struct TsBuild {
+  uint8_t data[8192];
+  size_t len;
+  uint32_t stride;
+  uint8_t cc[0x2000];
+} TsBuild;
+
+typedef struct TsEs {
+  uint8_t type;
+  uint16_t pid;
+} TsEs;
+
+static uint32_t ts_crc32(const uint8_t *p, size_t n)
+{
+  uint32_t crc = 0xffffffffU;
+  size_t i;
+  int bit;
+
+  for (i = 0U; i < n; i++) {
+    crc ^= (uint32_t)p[i] << 24;
+    for (bit = 0; bit < 8; bit++) {
+      crc = (crc & 0x80000000U) != 0U ? (crc << 1) ^ 0x04c11db7U : crc << 1;
+    }
+  }
+  return crc;
+}
+
+static void ts_put(TsBuild *b, uint32_t pid, int pusi, const uint8_t *payload,
+                   size_t n)
+{
+  uint8_t *p = b->data + b->len;
+  size_t at = 4U;
+
+  memset(p, 0, b->stride);
+  if (b->stride == 192U) {
+    p[1] = 0x01U;
+    p += 4;
+  }
+  p[0] = 0x47U;
+  p[1] = (uint8_t)((pusi ? 0x40U : 0U) | (pid >> 8));
+  p[2] = (uint8_t)pid;
+  if (n < 184U) {
+    size_t field = 183U - n;
+
+    p[3] = (uint8_t)(0x30U | (b->cc[pid] & 15U));
+    p[4] = (uint8_t)field;
+    if (field != 0U) {
+      memset(p + 6, 0xff, field - 1U);
+    }
+    at = 5U + field;
+  } else {
+    p[3] = (uint8_t)(0x10U | (b->cc[pid] & 15U));
+  }
+  b->cc[pid]++;
+  memcpy(p + at, payload, n);
+  b->len += b->stride;
+}
+
+static void ts_section(TsBuild *b, uint32_t pid, uint8_t *sec, size_t body)
+{
+  uint8_t buf[184];
+  uint32_t crc;
+
+  sec[1] = (uint8_t)(0xb0U | (((body + 4U - 3U) >> 8) & 15U));
+  sec[2] = (uint8_t)(body + 4U - 3U);
+  crc = ts_crc32(sec, body);
+  sec[body] = (uint8_t)(crc >> 24);
+  sec[body + 1U] = (uint8_t)(crc >> 16);
+  sec[body + 2U] = (uint8_t)(crc >> 8);
+  sec[body + 3U] = (uint8_t)crc;
+  buf[0] = 0U;
+  memcpy(buf + 1, sec, body + 4U);
+  ts_put(b, pid, 1, buf, body + 5U);
+}
+
+/* PAT naming PMT PID 0x100 for program 1, and that PMT. */
+static void ts_psi(TsBuild *b, const TsEs *es, size_t n)
+{
+  uint8_t sec[128];
+  size_t at = 12U;
+  size_t i;
+
+  memset(sec, 0, sizeof(sec));
+  sec[3] = 0x00U; sec[4] = 0x01U; sec[5] = 0xc1U;
+  sec[8] = 0x00U; sec[9] = 0x01U; sec[10] = 0xe1U; sec[11] = 0x00U;
+  ts_section(b, 0U, sec, 12U);
+  memset(sec, 0, sizeof(sec));
+  sec[0] = 0x02U;
+  sec[3] = 0x00U; sec[4] = 0x01U; sec[5] = 0xc1U;
+  sec[8] = 0xe1U; sec[9] = 0x01U; sec[10] = 0xf0U; sec[11] = 0x00U;
+  for (i = 0U; i < n; i++) {
+    sec[at++] = es[i].type;
+    sec[at++] = (uint8_t)(0xe0U | (es[i].pid >> 8));
+    sec[at++] = (uint8_t)es[i].pid;
+    sec[at++] = 0xf0U;
+    sec[at++] = 0x00U;
+  }
+  ts_section(b, 0x100U, sec, at);
+}
+
+/* A PES over packets, the first carrying `first` bytes of it. */
+static void ts_pes(TsBuild *b, uint32_t pid, uint8_t stream_id,
+                   const uint8_t *payload, size_t n, size_t first)
+{
+  uint8_t pes[512];
+  size_t total = probe_put_pes(pes, stream_id, payload, n);
+  size_t sent = 0U;
+
+  while (sent < total) {
+    size_t chunk = sent == 0U ? first : 184U;
+
+    if (chunk > total - sent) {
+      chunk = total - sent;
+    }
+    ts_put(b, pid, sent == 0U, pes + sent, chunk);
+    sent += chunk;
+  }
+}
+
+static size_t ts_video_payload(uint8_t *dst)
+{
+  size_t n = 0U;
+
+  n += probe_put_seq_header(dst + n, 720U, 576U, 3U, 3U);
+  n += probe_put_seq_ext(dst + n);
+  n += probe_put_seq_display_ext(dst + n, 720U, 576U);
+  return n;
+}
+
+static int ts_probe_media(const TsBuild *b, ZZPlayProbeInfo *probe)
+{
+  FILE *file = tmpfile();
+  int ok;
+
+  if (!file) {
+    return -1;
+  }
+  if (fwrite(b->data, 1U, b->len, file) != b->len || fflush(file) != 0 ||
+      fseek(file, 0L, SEEK_SET) != 0) {
+    fclose(file);
+    return -1;
+  }
+  memset(probe, 0, sizeof(*probe));
+  ok = zzplay_probe_media_file(file, probe);
+  if (ftell(file) != 0L) {
+    ok = -1;
+  }
+  fclose(file);
+  return ok;
+}
+
+static int check_transport_probe(void)
+{
+  static const TsEs both[] = {{0x02U, 0x101U}, {0x03U, 0x102U}};
+  uint8_t video[64];
+  uint8_t audio[16];
+  size_t vn = ts_video_payload(video);
+  TsBuild *b = (TsBuild *)calloc(1U, sizeof(*b));
+  ZZPlayProbeInfo probe;
+  uint32_t stride;
+  size_t first;
+  int ok = 1;
+
+  if (!b) {
+    return 0;
+  }
+  memset(audio, 0x55, sizeof(audio));
+  /* Plain and M2TS; the sequence header whole in the first packet, and
+   * split at every offset across the second, which must not matter. */
+  for (stride = 188U; stride <= 192U; stride += 4U) {
+    for (first = 9U; first <= 9U + vn; first++) {
+      memset(b, 0, sizeof(*b));
+      b->stride = stride;
+      ts_psi(b, both, 2U);
+      ts_pes(b, 0x101U, 0xe0U, video, vn, first);
+      ts_pes(b, 0x102U, 0xc0U, audio, sizeof(audio), 184U);
+      if (ts_probe_media(b, &probe) != 1 ||
+          probe.kind != ZZPLAY_MEDIA_KIND_MPEG_TS ||
+          !probe.video.is_transport_stream ||
+          probe.video.is_program_stream || !probe.video.has_video_pes ||
+          !probe.video.has_audio_pes || !probe.video.is_mpeg2 ||
+          probe.video.width != 720U || probe.video.height != 576U ||
+          probe.video.frame_rate_milli != 25000U ||
+          probe.video.audio_codec != ZZPLAY_MEDIA_AUDIO_MP2 ||
+          probe.video.display_width != 1024U ||
+          probe.video.display_height != 576U ||
+          !zzplay_video_info_supported(&probe.video)) {
+        printf("transport probe: stride %u first %u failed\n",
+               (unsigned)stride, (unsigned)first);
+        ok = 0;
+      }
+    }
+  }
+  free(b);
+  return ok;
+}
+
+static int check_transport_probe_edges(void)
+{
+  uint8_t video[64];
+  uint8_t audio[16];
+  size_t vn = ts_video_payload(video);
+  TsBuild *b = (TsBuild *)calloc(1U, sizeof(*b));
+  ZZPlayProbeInfo probe;
+  int ok = 1;
+
+  if (!b) {
+    return 0;
+  }
+  memset(audio, 0x55, sizeof(audio));
+
+  /* Video only: no audio is reported. */
+  {
+    static const TsEs es[] = {{0x02U, 0x101U}};
+
+    b->stride = 188U;
+    ts_psi(b, es, 1U);
+    ts_pes(b, 0x101U, 0xe0U, video, vn, 184U);
+    ts_pes(b, 0x102U, 0xc0U, audio, sizeof(audio), 184U);
+    if (ts_probe_media(b, &probe) != 1 ||
+        probe.kind != ZZPLAY_MEDIA_KIND_MPEG_TS ||
+        probe.video.has_audio_pes) {
+      printf("transport probe: video-only failed\n");
+      ok = 0;
+    }
+  }
+  /* Types the firmware does not demux come first; the first MPEG video
+   * and audio PIDs win, not the first PES seen. */
+  {
+    static const TsEs es[] = {{0x1bU, 0x200U}, {0x0fU, 0x201U},
+                              {0x01U, 0x101U}, {0x04U, 0x102U},
+                              {0x02U, 0x103U}, {0x03U, 0x104U}};
+    uint8_t other[64];
+    size_t on = probe_put_seq_header(other, 320U, 240U, 3U, 3U);
+
+    memset(b, 0, sizeof(*b));
+    b->stride = 188U;
+    ts_psi(b, es, 6U);
+    ts_pes(b, 0x103U, 0xe0U, other, on, 184U);
+    ts_pes(b, 0x200U, 0xe0U, other, on, 184U);
+    ts_pes(b, 0x101U, 0xe0U, video, vn, 184U);
+    /* The PMT's first audio is 0x102; audio only on the later 0x104 is not
+     * followed. */
+    ts_pes(b, 0x104U, 0xc0U, audio, sizeof(audio), 184U);
+    if (ts_probe_media(b, &probe) != 1 ||
+        probe.kind != ZZPLAY_MEDIA_KIND_MPEG_TS ||
+        probe.video.width != 720U || probe.video.height != 576U ||
+        probe.video.has_audio_pes) {
+      printf("transport probe: PID choice failed\n");
+      ok = 0;
+    }
+  }
+  /* H.264 only: a Transport Stream, but not one the card can play. */
+  {
+    static const TsEs es[] = {{0x1bU, 0x101U}, {0x03U, 0x102U}};
+
+    memset(b, 0, sizeof(*b));
+    b->stride = 188U;
+    ts_psi(b, es, 2U);
+    ts_pes(b, 0x101U, 0xe0U, video, vn, 184U);
+    ts_pes(b, 0x102U, 0xc0U, audio, sizeof(audio), 184U);
+    if (ts_probe_media(b, &probe) == 1 ||
+        probe.kind != ZZPLAY_MEDIA_KIND_UNSUPPORTED) {
+      printf("transport probe: unsupported video accepted\n");
+      ok = 0;
+    }
+  }
+  /* A damaged PMT (bad CRC) names no PIDs. */
+  {
+    static const TsEs es[] = {{0x02U, 0x101U}};
+
+    memset(b, 0, sizeof(*b));
+    b->stride = 188U;
+    ts_psi(b, es, 1U);
+    b->data[2U * 188U - 1U] ^= 0x01U;
+    ts_pes(b, 0x101U, 0xe0U, video, vn, 184U);
+    if (ts_probe_media(b, &probe) == 1 ||
+        probe.kind != ZZPLAY_MEDIA_KIND_UNSUPPORTED) {
+      printf("transport probe: bad PMT accepted\n");
+      ok = 0;
+    }
+  }
+  /* No PAT or PMT at all. */
+  {
+    memset(b, 0, sizeof(*b));
+    b->stride = 188U;
+    ts_pes(b, 0x101U, 0xe0U, video, vn, 184U);
+    ts_pes(b, 0x101U, 0xe0U, video, vn, 184U);
+    ts_pes(b, 0x101U, 0xe0U, video, vn, 184U);
+    if (ts_probe_media(b, &probe) == 1 ||
+        probe.kind != ZZPLAY_MEDIA_KIND_UNSUPPORTED) {
+      printf("transport probe: stream without PMT accepted\n");
+      ok = 0;
+    }
+  }
+  /* One sync byte is not a Transport Stream. */
+  {
+    memset(b->data, 0x55, sizeof(b->data));
+    b->data[0] = 0x47U;
+    b->len = 1024U;
+    if (ts_probe_media(b, &probe) == 1 ||
+        probe.kind != ZZPLAY_MEDIA_KIND_UNSUPPORTED ||
+        probe.video.is_transport_stream) {
+      printf("transport probe: lone sync byte accepted\n");
+      ok = 0;
+    }
+  }
+  free(b);
+  return ok;
+}
+
 
 int main(void)
 {
@@ -1264,6 +1578,12 @@ int main(void)
   }
   if (!check_webp_file_probe()) {
     return 16;
+  }
+  if (!check_transport_probe()) {
+    return 38;
+  }
+  if (!check_transport_probe_edges()) {
+    return 39;
   }
   return 0;
 }

@@ -10,7 +10,7 @@ static int failures;
 
 static void check_pattern(int include_playlists, const char *want)
 {
-  char pattern[64];
+  char pattern[128];
 
   if (!zzplay_formats_pattern(pattern, sizeof(pattern), include_playlists)) {
     printf("pattern construction failed\n");
@@ -27,8 +27,8 @@ static void check_pattern(int include_playlists, const char *want)
 
 int main(void)
 {
-  check_pattern(0, "#?.(mpg|mpeg|vob|webm|mkv|mp3|webp|flac|ogg|oga)");
-  check_pattern(1, "#?.(mpg|mpeg|vob|webm|mkv|mp3|webp|flac|ogg|oga|m3u|m3u8)");
+  check_pattern(0, "#?.(mpg|mpeg|vob|ts|m2t|mts|m2ts|webm|mkv|mp3|webp|flac|ogg|oga)");
+  check_pattern(1, "#?.(mpg|mpeg|vob|ts|m2t|mts|m2ts|webm|mkv|mp3|webp|flac|ogg|oga|m3u|m3u8)");
   if (zzplay_formats_pattern(0, 0U, 0)) {
     printf("null output unexpectedly succeeded\n");
     failures++;
@@ -75,6 +75,32 @@ int main(void)
     fmt = zzplay_format_for_path("TITLE.VOB");
     if (!fmt || fmt->kind != ZZPLAY_MEDIA_KIND_MPEG_PS) {
       printf("zzplay_format_for_path(TITLE.VOB) failed\n");
+      failures++;
+    }
+  }
+  {
+    static const char *const names[] = {
+      "clip.ts", "CLIP.TS", "tape.m2t", "cam.mts", "CAM.M2TS"
+    };
+    unsigned i;
+
+    for (i = 0U; i < sizeof(names) / sizeof(names[0]); i++) {
+      const ZZPlayFormat *fmt = zzplay_format_for_path(names[i]);
+
+      if (!fmt || fmt->kind != ZZPLAY_MEDIA_KIND_MPEG_TS ||
+          !(fmt->flags & ZZPLAY_FORMAT_HAS_VIDEO) ||
+          strcmp(fmt->name, "MPEG Transport Stream") != 0) {
+        printf("zzplay_format_for_path(%s) failed\n", names[i]);
+        failures++;
+      }
+    }
+    if (zzplay_format_for_path("clip.tsx") != NULL ||
+        zzplay_format_for_path("clip.m2") != NULL) {
+      printf("a near miss of a Transport Stream extension matched\n");
+      failures++;
+    }
+    if (zzplay_format_for_kind(ZZPLAY_MEDIA_KIND_MPEG_TS) == NULL) {
+      printf("zzplay_format_for_kind(MPEG_TS) returned NULL\n");
       failures++;
     }
   }

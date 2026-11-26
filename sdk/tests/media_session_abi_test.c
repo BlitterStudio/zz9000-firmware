@@ -133,6 +133,19 @@ static int test_request_builders(void)
   if (zz9k_get_be32(bp->width) != 320U ||
       zz9k_get_be32(bp->audio_codec) != ZZ9K_MEDIA_AUDIO_NONE)
     return 3;
+  /* Container ids reach the card as their numbers: 1 Program Stream,
+   * 2 WebM, 3 MPEG Transport Stream. */
+  if (zz9k_get_be32(bp->container) != 1U ||
+      ZZ9K_VIDEO_CONTAINER_WEBM != 2U ||
+      ZZ9K_VIDEO_CONTAINER_MPEG_TS != 3U)
+    return 110;
+  begin.container = ZZ9K_VIDEO_CONTAINER_MPEG_TS;
+  if (zz9k_request_media_session_begin(&request, &begin) != ZZ9K_STATUS_OK)
+    return 111;
+  bp = (const ZZ9KMediaSessionBeginPayload *)request.entry.payload.inline_data;
+  if (zz9k_get_be32(bp->container) != 3U)
+    return 112;
+  begin.container = ZZ9K_VIDEO_CONTAINER_MPEG_PS;
 
   begin.audio_codec = ZZ9K_MEDIA_AUDIO_MP2;
   begin.pcm_ring_handle = 0x40000021UL;
