@@ -379,6 +379,20 @@ control line live with heartbeats while unpaused. `PAUSED` holds decoding
 and staging, and `IDLE_PAUSED` suspends the heartbeat timeout. Release
 and Amiga reset clear the lease.
 
+The credit cursor is the last value the firmware published, and it moves
+only on a formatter tick. A codec lease's decoder copies input from the
+ring on the main loop between ticks; that read-ahead is private and is
+published at the next tick, after the tick has judged the producer's
+marker. So a replacement start equal to the published credit is always
+valid, however far the decoder has read, and the write cursor is held to
+the published credit plus the capacity. The read-ahead cannot be
+reclaimed by the producer early, and the published credit never moves
+back. A flush and a new lease reset the private cursor, an `APPEND` keeps
+it, and an `APPEND` whose start is below the bytes the decoder already
+took is a `BAD_MARKER` (an append is not a rewind). Publish a write cursor
+past the previous stream's end only together with the append marker, or the
+previous decoder may already have consumed those bytes.
+
 `DRAINED` and `ERROR` are sticky until the next marker. Both wait for any
 decoded PCM, including the last scheduled TX period, to play. Check that
 the serial matches before acting on the state. Codec errors do not

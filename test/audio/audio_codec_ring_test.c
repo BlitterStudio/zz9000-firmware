@@ -649,6 +649,155 @@ static void test_mixed_append(void)
 	}
 }
 
+/* ---- advertised credit versus the decoder's private input ----
+ *
+ * The main loop copies input between formatter ticks, but the credit the
+ * producer sees moves only at a tick. A replacement marker and the ring's
+ * capacity are judged against that published credit. */
+static void main_loop_copies(void)
+{
+	for (unsigned i = 0; i < 8U; i++)
+		audio_fabric_lease_poll();
+}
+
+static void test_stale_credit_flush(uint64_t base)
+{
+	static int16_t old_pcm[10U * TICK_BYTES / 2U];
+	static int16_t new_pcm[16U * TICK_BYTES / 2U];
+	const uint64_t old_end = base + sizeof(old_pcm);
+	const uint64_t new_end = old_end + 3U * TICK_BYTES;
+	const struct audio_fabric_slot *s;
+	unsigned old_seen, new_seen, old_after = 0U, new_periods = 0U;
+	uint64_t stale, floor;
+
+	for (uint32_t i = 0; i < sizeof(old_pcm) / sizeof(old_pcm[0]); i++)
+		old_pcm[i] = 7000;
+	for (uint32_t i = 0; i < sizeof(new_pcm) / sizeof(new_pcm[0]); i++)
+		new_pcm[i] = -7000;
+	begin(0U, CODEC_FLAGS);
+	s = fabric_slot(SLOT);
+	write_bytes(base, (const uint8_t *)old_pcm, sizeof(old_pcm));
+	publish(1U, SDK_AUDIO_RING_CODEC_PCM, base, old_end, 0U, 0U, 32767U);
+	audio_fabric_isr();
+	stale = consumed();
+	check(get32(fw->stream_seq) == 1U && stale == base, "first track acknowledged at its start",
+	      fmt("credit %llu base %llu", (unsigned long long)stale, (unsigned long long)base));
+
+	/* The decoder takes input between ticks; nothing is published. */
+	main_loop_copies();
+	check(s->lease.codec.input > stale && s->lease.credited == stale && consumed() == stale,
+	      "private input runs ahead of the advertised credit",
+	      fmt("input %llu credited %llu published %llu", (unsigned long long)s->lease.codec.input,
+		(unsigned long long)s->lease.credited, (unsigned long long)consumed()));
+
+	/* The producer, which sees only the published credit, replaces the
+	 * track from it. */
+	write_bytes(stale, (const uint8_t *)new_pcm, (uint32_t)(new_end - stale));
+	publish(2U, SDK_AUDIO_RING_CODEC_PCM, stale, new_end, 0U,
+		SDK_AUDIO_RING_STREAM_FLAG_END, 32767U);
+	floor = stale;
+	for (unsigned i = 0; i < 22U; i++) {
+		if (i != 0U)
+			publish(2U, SDK_AUDIO_RING_CODEC_PCM, stale, new_end, 0U,
+				SDK_AUDIO_RING_STREAM_FLAG_END, 32767U);
+		polarity(g_fabric_tx + g_dma_count % AUDIO_TX_BUFFER_SIZE, &old_seen, &new_seen);
+		old_after += i > 1U && old_seen > 64U;
+		new_periods += new_seen > 64U;
+		play_tick();
+		if (i == 0U)
+			check(get32(fw->stream_seq) == 2U && get32(fw->status) == SDK_AUDIO_RING_STATUS_OK &&
+			      get32(fw->decode_error) == SDK_AUDIO_RING_DECODE_ERR_NONE,
+			      "replacement at the published credit is acknowledged",
+			      fmt("serial %u status %u error %u", get32(fw->stream_seq),
+				get32(fw->status), get32(fw->decode_error)));
+		check(consumed() >= floor, "advertised credit never moves back", NULL);
+		floor = consumed();
+	}
+	check(old_after == 0U, "old bytes are dropped", fmt("%u old periods", old_after));
+	check(new_periods >= 2U, "replacement bytes play", fmt("%u new periods", new_periods));
+	check(consumed() == new_end, "replacement is credited", fmt("credit %llu end %llu",
+		(unsigned long long)consumed(), (unsigned long long)new_end));
+}
+
+/* Status after the producer writes `extra` bytes past published credit +
+ * capacity while the main loop has copied ahead. `marker` selects a
+ * marker-driven codec lease or a legacy lease that never updates the
+ * marker words. */
+static uint32_t capacity_edge(int marker, uint32_t extra)
+{
+	static int16_t pcm[6U * TICK_BYTES / 2U];
+	uint64_t published;
+
+	for (uint32_t i = 0; i < sizeof(pcm) / sizeof(pcm[0]); i++)
+		pcm[i] = 7000;
+	begin(0U, marker ? CODEC_FLAGS : SDK_AUDIO_RING_ACQUIRE_FLAG_IDLE_PAUSED);
+	write_bytes(0U, (const uint8_t *)pcm, sizeof(pcm));
+	if (marker) {
+		publish(1U, SDK_AUDIO_RING_CODEC_PCM, 0U, sizeof(pcm), 0U, 0U, 32767U);
+		audio_fabric_isr();
+		main_loop_copies();
+	} else {
+		for (unsigned i = 0; i < 5U; i++) {
+			publish(0U, SDK_AUDIO_RING_CODEC_NONE, 0U, sizeof(pcm), 0U, 0U, 32767U);
+			play_tick();
+		}
+	}
+	published = consumed();
+	publish(marker ? 1U : 0U, marker ? SDK_AUDIO_RING_CODEC_PCM : SDK_AUDIO_RING_CODEC_NONE,
+		marker ? 0U : 0U, published + RING_TEST_CAPACITY + extra, 0U, 0U, 32767U);
+	audio_fabric_isr();
+	return get32(fw->status);
+}
+
+static void test_capacity_published_credit(void)
+{
+	for (int marker = 0; marker < 2; marker++) {
+		const char *mode = marker ? "codec lease" : "legacy lease";
+
+		check(capacity_edge(marker, 0U) == SDK_AUDIO_RING_STATUS_OK,
+		      "a full ring from the published credit is valid", mode);
+		check(capacity_edge(marker, 4U) == SDK_AUDIO_RING_STATUS_FAULT_CURSOR,
+		      "writing past the published credit plus capacity is a fault", mode);
+	}
+}
+
+/* An APPEND cannot end the previous stream below the bytes the decoder
+ * already took. */
+static void test_append_not_a_rewind(void)
+{
+	static int16_t pcm[6U * TICK_BYTES / 2U];
+	const struct audio_fabric_slot *s;
+	const uint64_t end = sizeof(pcm);
+
+	for (uint32_t i = 0; i < sizeof(pcm) / sizeof(pcm[0]); i++)
+		pcm[i] = 7000;
+	for (int rewind = 1; rewind >= 0; rewind--) {
+		begin(0U, CODEC_FLAGS);
+		s = fabric_slot(SLOT);
+		write_bytes(0U, (const uint8_t *)pcm, sizeof(pcm));
+		publish(1U, SDK_AUDIO_RING_CODEC_PCM, 0U, end, 0U, 0U, 32767U);
+		audio_fabric_isr();
+		main_loop_copies();
+		check(s->lease.codec.input == end && consumed() == 0U,
+		      "decoder took the whole stream, nothing is published yet",
+		      fmt("input %llu", (unsigned long long)s->lease.codec.input));
+		/* start >= the published credit (0) but below the private input. */
+		for (unsigned i = 0; i < 4U; i++) {
+			publish(2U, SDK_AUDIO_RING_CODEC_PCM, rewind ? end - 8U : end, end + 4096U, 0U,
+				SDK_AUDIO_RING_STREAM_FLAG_APPEND | SDK_AUDIO_RING_STREAM_FLAG_END, 32767U);
+			play_tick();
+		}
+		check(!(s->lease.codec.eof && s->lease.codec.end < s->lease.codec.input),
+		      "no stream ends below the taken bytes", NULL);
+		check(get32(fw->stream_seq) == 2U && get32(fw->status) == SDK_AUDIO_RING_STATUS_OK &&
+		      (get32(fw->decode_error) == SDK_AUDIO_RING_DECODE_ERR_BAD_MARKER) == (rewind != 0),
+		      rewind ? "append below the taken bytes is a bad marker"
+			     : "append at the end of the taken bytes is accepted",
+		      fmt("serial %u status %u error %u", get32(fw->stream_seq), get32(fw->status),
+			get32(fw->decode_error)));
+	}
+}
+
 static uint32_t load(const char *path, uint8_t *data, uint32_t capacity)
 {
 	FILE *f = fopen(path, "rb");
@@ -684,6 +833,10 @@ int main(void)
 	test_loop();
 	test_loop_seam();
 	test_mixed_append();
+	test_stale_credit_flush(0U);
+	test_stale_credit_flush(5000U);
+	test_capacity_published_credit();
+	test_append_not_a_rewind();
 	test_flush_at_credit(SDK_AUDIO_RING_ACQUIRE_FLAG_IDLE_PAUSED, 0U, 0U);
 	test_flush_at_credit(SDK_AUDIO_RING_ACQUIRE_FLAG_IDLE_PAUSED, 0U, 5000U);
 	test_flush_at_credit(SDK_AUDIO_RING_ACQUIRE_FLAG_IDLE_PAUSED |

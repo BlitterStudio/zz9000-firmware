@@ -67,13 +67,20 @@ struct fabric_stream_marker {
 	uint32_t param;
 };
 
-/* Marker acceptance and TX retirement belong to the ISR. The poll commits
- * decoded periods and input credits under the local IRQ guard. */
+/* Marker acceptance, the advertised credit and TX retirement belong to the
+ * ISR. The poll commits decoded periods and its private input progress
+ * under the local IRQ guard. */
 struct fabric_lease_codec {
 	struct fabric_stream_marker current;
 	struct fabric_stream_marker next;
 	uint64_t end;
 	uint64_t next_end;
+	/* Decoder input taken from the ring: private to the main-loop poll
+	 * and the ISR. The credit the producer sees is audio_fabric_lease
+	 * .credited, which only the ISR moves: it judges a replacement marker
+	 * against the credit published at the previous tick, then promotes
+	 * this cursor. Reset by a flush and by a new lease. */
+	uint64_t input;
 	uint32_t state;
 	uint32_t error;
 	uint32_t rate;

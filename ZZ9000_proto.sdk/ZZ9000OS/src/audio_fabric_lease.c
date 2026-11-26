@@ -533,6 +533,7 @@ static void fabric_ring_flush(uint32_t slot, uint64_t start)
 	audio_fabric_request_rebuild(slot);
 	audio_fabric_producer_clear(slot);
 	l->credited = start;
+	l->codec.input = start;
 	l->consumed = l->codec.enabled ? 0U : start;
 	p->staged = 0U;
 	p->consumed = 0U;
@@ -591,6 +592,10 @@ static void fabric_codec_tick(uint32_t slot,
 		    (view->stream_flags & ~SDK_AUDIO_RING_STREAM_FLAG_KNOWN) != 0U ||
 		    (m->codec != SDK_AUDIO_RING_CODEC_PCM && m->param != 0U) ||
 		    (append && (c->next.seq != 0U ||
+		     /* An append is not a rewind: the decoder already took
+		      * bytes up to c->input, so the previous stream cannot end
+		      * below them. */
+		     m->start < c->input ||
 		     (c->eof && c->state != SDK_AUDIO_RING_DECODE_IDLE &&
 		      m->start != c->end))))
 			error = SDK_AUDIO_RING_DECODE_ERR_BAD_MARKER;
@@ -611,6 +616,9 @@ static void fabric_codec_tick(uint32_t slot,
 		} else if (error == 0U && append && m->codec != SDK_AUDIO_RING_CODEC_NONE &&
 		           (c->state == SDK_AUDIO_RING_DECODE_DRAINED || c->done) &&
 		           c->error == 0U) {
+			/* The new stream's first byte is its start, and any bytes
+			 * the old stream left unread are skipped. */
+			c->input = m->start;
 			fabric_codec_start(l, m, eos, view->write);
 		} else {
 			fabric_ring_flush(slot, error == 0U ? m->start : view->write);
@@ -641,6 +649,11 @@ static void fabric_codec_tick(uint32_t slot,
 			c->state = c->error != 0U ? SDK_AUDIO_RING_DECODE_ERROR
 			                          : SDK_AUDIO_RING_DECODE_DRAINED;
 	}
+	/* Promote the decoder's private progress to the credit the producer
+	 * sees only now, after the marker above was judged against the credit
+	 * published at the previous tick. */
+	if (c->input > l->credited)
+		l->credited = c->input;
 	fabric_ring_publish(l, SDK_AUDIO_RING_STATUS_OK);
 }
 
@@ -1054,10 +1067,10 @@ static void fabric_codec_poll(uint32_t slot)
 	}
 	input.ring = l->ring;
 	input.capacity = l->capacity;
-	input.cursor = l->credited;
+	input.cursor = c->input;
 	input.end = c->eof;
 	write = input.end ? c->end : l->write_cursor;
-	input.available = (uint32_t)(write - input.cursor);
+	input.available = write > input.cursor ? (uint32_t)(write - input.cursor) : 0U;
 	flushes = c->flushes;
 	smp_local_irq_restore(irq);
 
@@ -1105,7 +1118,7 @@ static void fabric_codec_poll(uint32_t slot)
 	if (l->generation == generation && l->stream_seq == marker.seq) {
 		uint32_t decoded = p->staged - p->consumed;
 
-		l->credited += v.copied;
+		c->input += v.copied;
 		c->rate = v.native_rate;
 		c->channels = v.channels;
 		if (v.complete && remaining == 0U) {
@@ -1116,6 +1129,9 @@ static void fabric_codec_poll(uint32_t slot)
 					struct fabric_stream_marker next = c->next;
 
 					fabric_codec_start(l, &next, c->next_eof, c->next_end);
+					/* The pending stream starts at its marker; the
+					 * decoder never took bytes past c->end. */
+					c->input = next.start;
 				} else {
 					c->current = c->next;
 					l->stream_seq = c->current.seq;
