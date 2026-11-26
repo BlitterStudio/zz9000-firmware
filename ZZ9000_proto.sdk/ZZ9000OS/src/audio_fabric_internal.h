@@ -75,6 +75,7 @@ struct fabric_lease_codec {
 	uint32_t rate;
 	uint32_t channels;
 	uint32_t gain;
+	uint32_t flushes;     /* output flushes accepted by the ISR */
 	uint8_t enabled;
 	uint8_t eof;
 	uint8_t next_eof;

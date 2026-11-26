@@ -335,9 +335,13 @@ its start. The append becomes the previous stream's implicit `END`.
 Wait until the firmware echoes the current serial before appending to
 it, so there is at most one pending marker. The next decoder starts
 once the current stream has staged its last period, without discarding
-queued output. A final short period is padded with silence (a two-period
-quantum at 11025 Hz). If decoding failed before the append was promoted,
-the failure is reported against the pending serial.
+queued output. The resampler keeps its filter history across the append
+while the decoded rate stays the same, so a track whose decoded length is a
+whole number of 20 ms source periods loops without a seam. A flush or a new
+lease starts the filter from silence, which produces about 10 zero frames at
+the start of the output. A final short period is padded with silence (a
+two-period quantum at 11025 Hz). If decoding failed before the append was
+promoted, the failure is reported against the pending serial.
 
 | Firmware offset | Field | Meaning |
 | ---: | --- | --- |

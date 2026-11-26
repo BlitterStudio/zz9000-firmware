@@ -1,5 +1,6 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
 #include <stdio.h>
+#include <math.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -204,6 +205,60 @@ static void test_loop(void)
 	      "append preserves queued audio", fmt("%u + periods, %u - periods, %u gap", before, after, gaps));
 }
 
+/* A whole-cycle 1 kHz tone looped with APPEND must play as one continuous
+ * tone. The resampler's filter history crosses the seam, so the seam shows
+ * no run of zeros and no step larger than the tone's own slope. */
+static void test_loop_seam(void)
+{
+	enum { FRAMES = 4410, PASSES = 3, PERIODS = 40 };
+	static int16_t tone[FRAMES * 2];
+	static int16_t played[PERIODS * TICK_BYTES / 2U];
+	const uint32_t bytes = sizeof(tone);
+	uint32_t serial = 1U, flags = 0U, first = 0U, limit;
+	unsigned zero_run = 0U, zero_max = 0U;
+	int32_t step_max = 0;
+
+	begin(0U, CODEC_FLAGS);
+	for (uint32_t i = 0; i < FRAMES; i++)
+		tone[2U * i] = tone[2U * i + 1U] =
+			(int16_t)lrint(16000.0 * sin(2.0 * M_PI * (i + 0.25) / 44.1));
+	for (uint32_t p = 0; p < PASSES; p++)
+		write_bytes((uint64_t)p * bytes, (const uint8_t *)tone, bytes);
+	for (unsigned t = 0; t < PERIODS; t++) {
+		if (serial < PASSES && get32(fw->stream_seq) == serial) {
+			serial++;
+			flags = SDK_AUDIO_RING_STREAM_FLAG_APPEND |
+				(serial == PASSES ? SDK_AUDIO_RING_STREAM_FLAG_END : 0U);
+		}
+		publish(serial, SDK_AUDIO_RING_CODEC_PCM, (uint64_t)(serial - 1U) * bytes,
+			(uint64_t)serial * bytes, 0U, flags, 32767U);
+		memcpy(played + (size_t)t * TICK_BYTES / 2U,
+		       g_fabric_tx + g_dma_count % AUDIO_TX_BUFFER_SIZE, TICK_BYTES);
+		play_tick();
+	}
+	check(get32(fw->stream_seq) == PASSES && get32(fw->decode_state) == SDK_AUDIO_RING_DECODE_DRAINED,
+	      "tone loop drains", NULL);
+	while (first < PERIODS * TICK_BYTES / 4U && played[2U * first] == 0)
+		first++;
+	/* Three 100 ms passes are 14400 output frames. Skip the opening
+	 * filter warm-up and stop before the final period's tail. */
+	limit = first + PASSES * (FRAMES * 48000U / 44100U) - 96U;
+	check(first != 0U && limit < PERIODS * TICK_BYTES / 4U, "tone loop starts", NULL);
+	for (uint32_t i = first + 16U; i < limit; i++) {
+		int32_t step = played[2U * i] - played[2U * (i - 1U)];
+
+		zero_run = played[2U * i] == 0 ? zero_run + 1U : 0U;
+		if (zero_run > zero_max)
+			zero_max = zero_run;
+		if (step < 0)
+			step = -step;
+		if (step > step_max)
+			step_max = step;
+	}
+	check(zero_max < 3U && step_max < 3000, "looped tone has no seam",
+	      fmt("zero run %u, largest step %d", zero_max, (int)step_max));
+}
+
 static void test_flush(uint32_t flags, uint32_t rate)
 {
 	static int16_t pcm[12U * TICK_BYTES / 2U];
@@ -308,6 +363,7 @@ int main(void)
 	decode_file(SDK_AUDIO_RING_CODEC_VORBIS, data, len, 44100U, 2U, 32767U);
 	decode_file(SDK_AUDIO_RING_CODEC_VORBIS, data, len, 44100U, 2U, 0U);
 	test_loop();
+	test_loop_seam();
 	test_flush(CODEC_FLAGS, 0U);
 	test_flush(SDK_AUDIO_RING_ACQUIRE_FLAG_IDLE_PAUSED, 0U);
 	test_flush(SDK_AUDIO_RING_ACQUIRE_FLAG_IDLE_PAUSED | SDK_AUDIO_RING_ACQUIRE_FLAG_SOURCE_RATE, 44100U);

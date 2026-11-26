@@ -66,6 +66,7 @@ static const struct fabric_codec_ops *g_codec_ops;
 static struct {
 	uint32_t generation;
 	uint32_t seq;
+	uint32_t flushes;
 	struct zz_audio_convert convert;
 	uint32_t rate;
 } g_codec_owner[AUDIO_FABRIC_LEASE_SLOT_END];
@@ -492,6 +493,9 @@ static void fabric_ring_flush(uint32_t slot, uint64_t start)
 	struct audio_fabric_slot *s = fabric_slot(slot);
 	struct audio_fabric_lease *l = &s->lease;
 	struct fabric_lease_preconvert *p = &s->preconvert;
+
+	/* A flush also ends the resampler's input history. */
+	l->codec.flushes++;
 
 	/* Arm the rebuild before clearing tags so the mixer replays only
 	 * the unaffected producers. Never rewind their shared frontier. */
@@ -1003,6 +1007,7 @@ static void fabric_codec_poll(uint32_t slot)
 	struct fabric_codec_view v;
 	uint64_t write;
 	uint32_t remaining;
+	uint32_t flushes;
 
 	if (l->ring == NULL || !c->enabled || c->state != SDK_AUDIO_RING_DECODE_RUNNING ||
 	    c->done || l->tearing) {
@@ -1021,14 +1026,21 @@ static void fabric_codec_poll(uint32_t slot)
 	input.end = c->eof;
 	write = input.end ? c->end : l->write_cursor;
 	input.available = (uint32_t)(write - input.cursor);
+	flushes = c->flushes;
 	smp_local_irq_restore(irq);
 
 	if (g_codec_owner[slot].generation != generation ||
 	    g_codec_owner[slot].seq != marker.seq) {
 		g_codec_ops->begin(slot, marker.codec, marker.param);
+		/* A stream that follows an APPEND with no flush continues the
+		 * resampler's filter history, so a loop has no seam. A flush
+		 * or a new lease starts the filter from silence. */
+		if (g_codec_owner[slot].generation != generation ||
+		    g_codec_owner[slot].flushes != flushes)
+			g_codec_owner[slot].rate = 0U;
 		g_codec_owner[slot].generation = generation;
 		g_codec_owner[slot].seq = marker.seq;
-		g_codec_owner[slot].rate = 0U;
+		g_codec_owner[slot].flushes = flushes;
 	}
 	v = g_codec_ops->step(slot, &input);
 	remaining = v.frames;
