@@ -530,6 +530,45 @@ static void test_save_roundtrip(void)
 
 /* ---- live CFG splice: preserve non-audio text, replace audio keys ---- */
 
+/* A live CFG that already holds audio_separation must have it replaced,
+ * not kept beside the new line: every save used to append another copy. */
+static void test_repeated_saves_keep_one_separation_key(void)
+{
+	static const char live[] =
+		"audio_separation = 40\r\n"
+		"Audio_Separation = 55\r\n"
+		"unknown_key = keep\r\n"
+		"# audio_separation = 99\r\n";
+	const char *saved;
+	int first_len = 0;
+	int i;
+
+	mock_fs_reset();
+	mock_fs_set_file("0:/ZZ9000.CFG", live);
+	audio_scene_init();
+	check(audio_scene_set_separation(70) == 0, "separation set", NULL);
+	for (i = 0; i < 4; i++) {
+		check(save_scene_sync(0) == AUDIO_SCENE_SAVE_OK,
+			"repeated save succeeds", fmt("save %d", i));
+		saved = mock_fs_file("0:/ZZ9000.CFG");
+		if (!saved)
+			return;
+		if (i == 0)
+			first_len = mock_fs_file_len("0:/ZZ9000.CFG");
+		check(count_substring(saved, "eparation = ") == 2 &&
+			count_substring(saved, "audio_separation = 70\n") == 1,
+			"exactly one live separation key per save",
+			fmt("save %d: live=%u", i,
+				count_substring(saved, "audio_separation = ")));
+	}
+	check(mock_fs_file_len("0:/ZZ9000.CFG") == first_len,
+		"repeated saves do not grow the file",
+		fmt("first=%d now=%d", first_len,
+			mock_fs_file_len("0:/ZZ9000.CFG")));
+	check(strstr(saved, "unknown_key = keep") != NULL,
+		"foreign keys survive", NULL);
+}
+
 static void test_save_splices_live_config(void)
 {
 	static const char live[] =
@@ -1172,6 +1211,7 @@ int main(void)
 	test_absent_and_corrupt_degrade();
 	test_save_roundtrip();
 	test_save_splices_live_config();
+	test_repeated_saves_keep_one_separation_key();
 	test_save_live_file_limit();
 	test_save_no_file_uses_legacy_fallback();
 	test_save_regenerates_every_profile_name();

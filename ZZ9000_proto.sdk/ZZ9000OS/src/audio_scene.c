@@ -147,6 +147,7 @@ enum commit_phase {
 	COMMIT_FADE,         /* verified fade of the output to zero */
 	COMMIT_FAST,         /* differential: the changed parameters only */
 	COMMIT_LPF_RECOVER, /* overwrite abandoned safeload slots first */
+	COMMIT_SEP_RECOVER, /* overwrite abandoned separation slots first */
 	COMMIT_LPF,
 	COMMIT_EQ,           /* eq_band in flight, 0..9 */
 	COMMIT_PREF,
@@ -596,6 +597,7 @@ struct commit_machine {
 	int todo_count;
 	int todo_next;     /* next todo entry to issue */
 	int lpf_recover_sub; /* stage the previous filter after failure */
+	int sep_recover_sub; /* stage the previous separation after failure */
 };
 
 static struct commit_machine commit;
@@ -909,6 +911,16 @@ static void commit_step(void)
 				commit.todo[commit.todo_next].sub++);
 			if (r == 0)
 				return;
+			if (r < 0) {
+				/* Part of the crossfeed group may sit in the
+				 * safeload slots; the next unrelated latch
+				 * would install it. Re-stage the applied
+				 * value before anything else runs. */
+				commit.failed = 1;
+				commit.sep_recover_sub = 0;
+				commit.phase = COMMIT_SEP_RECOVER;
+				return;
+			}
 			rc = (r == 1) ? 0 : -1;
 			break;
 		}
@@ -941,6 +953,25 @@ static void commit_step(void)
 			 * safeload. Retry once per poll until I2C recovers;
 			 * resetting the DSP abandons this machine. */
 			commit.lpf_recover_sub = 0;
+			return;
+		}
+		commit.phase = COMMIT_ABORT_RESTORE;
+		return;
+	}
+	case COMMIT_SEP_RECOVER: {
+		int percent = last_applied_valid ? last_applied_separation :
+			AUDIO_SCENE_DEFAULT_SEPARATION;
+		int r = audio_adau_separation_substep(percent,
+			commit.sep_recover_sub);
+
+		if (r == 0) {
+			commit.sep_recover_sub++;
+			return;
+		}
+		if (r < 0) {
+			/* Same contract as the LPF recovery: keep retrying
+			 * once per poll; a DSP reset abandons the machine. */
+			commit.sep_recover_sub = 0;
 			return;
 		}
 		commit.phase = COMMIT_ABORT_RESTORE;
@@ -1297,7 +1328,8 @@ int audio_scene_poll(void)
 	if (commit_stepping)
 		return 1; /* nested poll from inside a setter: defer */
 	commit_stepping = 1;
-	if (commit.phase != COMMIT_LPF_RECOVER)
+	if (commit.phase != COMMIT_LPF_RECOVER &&
+			commit.phase != COMMIT_SEP_RECOVER)
 		limiter_bench_poll(); /* no other safeload before recovery */
 	/* Commit steps first. A queued save waiting on that commit takes
 	 * its snapshot only after commit_step reaches the terminal state;

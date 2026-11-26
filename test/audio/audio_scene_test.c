@@ -173,11 +173,17 @@ int audio_adau_set_separation(int percent)
 	return fail_next_write ? -1 : 0;
 }
 
+/* One-shot failure seam: fails the group at this safeload substep, after
+ * the earlier substeps already staged slots. */
+static int fail_sep_substep = -1;
+
 int audio_adau_separation_substep(int percent, int substep)
 {
 	record_write(WRITE_SEP_SUB, percent, substep);
-	if (fail_next_write)
+	if (substep == fail_sep_substep) {
+		fail_sep_substep = -1;
 		return -1;
+	}
 	return substep == 8 ? 1 : 0;
 }
 
@@ -1855,14 +1861,29 @@ static void test_separation(void)
 		30) == 0, "stage 30 before a failing commit", NULL);
 	check(!audio_scene_quiescent(),
 		"a staged separation keeps the module non-quiescent", NULL);
-	fail_next_write = 1;
+	/* The group fails after two words are staged: the machine must
+	 * overwrite the abandoned slots with the applied value (a full
+	 * re-stage, latch and verify) before the abort restore, so no later
+	 * single-word latch can install the half-written matrix. */
+	clear_writes();
+	fail_sep_substep = 2;
 	check(audio_scene_commit_staged(0) == 0, "failing commit dispatches",
 		NULL);
 	pump_scene();
 	check(audio_scene_separation() == 0,
 		"failed machine restores the live separation",
 		fmt("sep=%u", audio_scene_separation()));
-	fail_next_write = 0;
+	ok = write_count >= 13;
+	for (i = 0; ok && i < 3; i++)
+		ok = log_at(i, &kind, &a, &b) && kind == WRITE_SEP_SUB &&
+			a == 30 && b == i;
+	for (i = 0; ok && i < 9; i++)
+		ok = log_at(3 + i, &kind, &a, &b) && kind == WRITE_SEP_SUB &&
+			a == 0 && b == i;
+	ok = ok && log_at(12, &kind, &a, &b) && kind == WRITE_VOLPAN;
+	check(ok, "failed group is overwritten by the applied value "
+		"before the abort restore",
+		fmt("writes=%d", write_count));
 	clear_writes();
 	check(audio_scene_commit_staged(0) == 0, "retry accepted", NULL);
 	pump_scene();

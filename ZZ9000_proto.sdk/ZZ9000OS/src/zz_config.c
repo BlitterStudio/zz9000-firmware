@@ -676,6 +676,7 @@ static int audio_key_name(const char *key, unsigned len) {
 
 	if (token_span_eq(key, len, "audio_active") ||
 			token_span_eq(key, len, "audio_baseline") ||
+			token_span_eq(key, len, "audio_separation") ||
 			token_span_eq(key, len, "audio_limiter") ||
 			token_span_eq(key, len, "audio_ceiling_paula") ||
 			token_span_eq(key, len, "audio_ceiling_ax"))
