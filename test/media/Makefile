@@ -43,7 +43,7 @@ build/media_output_test: media_output_test.c \
 	$(FIRMWARE_SRC)/sdk_mailbox.h
 	mkdir -p build
 	$(CC) $(CFLAGS) -Wno-pointer-to-int-cast -Wno-int-to-pointer-cast \
-		-I$(FIRMWARE_SRC) -o $@ media_output_test.c \
+		-I$(FIRMWARE_SRC) -I../../sdk/include -o $@ media_output_test.c \
 		$(FIRMWARE_SRC)/sdk_media_output.c
 
 build/media_shared_output_test: media_shared_output_test.c \

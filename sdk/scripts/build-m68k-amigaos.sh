@@ -207,6 +207,8 @@ m68k-amigaos-gcc $CFLAGS -Itools build/m68k/zz9k_host.o build/m68k/zz9k-fb-commo
   tools/zz9k-fbtest.c -o build/zz9k-fbtest
 m68k-amigaos-gcc $CFLAGS -Itools build/m68k/zz9k_host.o build/m68k/zz9k-fb-common.o \
   tools/zz9k-scaletest.c -o build/zz9k-scaletest
+m68k-amigaos-gcc $CFLAGS -Itools build/m68k/zz9k_host.o \
+  tools/zz9k-mediaout.c -o build/zz9k-mediaout
 m68k-amigaos-gcc $CFLAGS -Itools build/m68k/zz9k_host.o build/m68k/zz9k-fb-common.o \
   build/m68k/zz9k-image-window.o \
   tools/zz9k-surfaceops.c -o build/zz9k-surfaceops

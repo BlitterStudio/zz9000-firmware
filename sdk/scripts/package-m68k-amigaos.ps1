@@ -151,6 +151,7 @@ Copy-One "build/zz9k-surface-info" "C/zz9k-surface-info"
 Copy-One "build/zz9k-palette" "C/zz9k-palette"
 Copy-One "build/zz9k-fbtest" "C/zz9k-fbtest"
 Copy-One "build/zz9k-scaletest" "C/zz9k-scaletest"
+Copy-One "build/zz9k-mediaout" "C/zz9k-mediaout"
 Copy-One "build/zz9k-surfaceops" "C/zz9k-surfaceops"
 Copy-One "build/zz9k-probe" "C/zz9k-probe"
 Copy-One "build/zz9k-step" "C/zz9k-step"
@@ -212,6 +213,7 @@ $GuideSpecs = @(
   "docs/zz9k-library.md:zz9k-library",
   "docs/zz9k-zorro2-services.md:zz9k-zorro2-services",
   "docs/zz9k-voice.md:zz9k-voice",
+  "docs/zz9k-media-output.md:zz9k-media-output",
   "docs/zz9k-picture-datatype.md:zz9k-picture-datatype",
   "docs/zz9k-sound-datatype.md:zz9k-sound-datatype",
   "docs/zzplay.md:ZZPlay",

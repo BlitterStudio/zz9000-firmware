@@ -21,6 +21,24 @@ typedef char png_one_shot_flag_is_bit_30[
   (ZZ9K_SERVICE_FLAG_IMAGE_PNG_ONE_SHOT == (1U << 30)) ? 1 : -1
 ];
 
+/* Shared-buffer media output: the opcode, its payload and the discovery
+ * count are one contract with the firmware (check-abi-mirror.sh compares
+ * the names, these pin the layout). */
+typedef char media_output_payload_is_48_bytes[
+  (sizeof(ZZ9KMediaSessionOutputPayload) == 48U) ? 1 : -1
+];
+typedef char media_output_payload_reserved_is_last_word[
+  (offsetof(ZZ9KMediaSessionOutputPayload, reserved) == 44U) ? 1 : -1
+];
+typedef char media_output_opcode_follows_close[
+  (ZZ9K_OP_MEDIA_SESSION_OUTPUT_CONFIG ==
+   ZZ9K_OP_MEDIA_SESSION_CLOSE + 1U) ? 1 : -1
+];
+typedef char media_output_opcode_count_covers_the_opcode[
+  (ZZ9K_VIDEO_OPCODE_COUNT_SHARED_OUTPUT ==
+   ZZ9K_OP_MEDIA_SESSION_OUTPUT_CONFIG - ZZ9K_SERVICE_VIDEO + 1U) ? 1 : -1
+];
+
 typedef char image_animation_request_payload_is_48_bytes[
   (sizeof(ZZ9KImageAnimationFrameRequestPayload) == 48U) ? 1 : -1
 ];

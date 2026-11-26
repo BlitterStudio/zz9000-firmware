@@ -94,6 +94,7 @@ GUIDE_SPECS="README.md:ZZ9000-SDK \
 docs/zz9k-library.md:zz9k-library \
 docs/zz9k-zorro2-services.md:zz9k-zorro2-services \
 docs/zz9k-voice.md:zz9k-voice \
+docs/zz9k-media-output.md:zz9k-media-output \
 docs/zz9k-picture-datatype.md:zz9k-picture-datatype \
 docs/zz9k-sound-datatype.md:zz9k-sound-datatype \
 docs/zzplay.md:ZZPlay \
@@ -177,6 +178,7 @@ copy_one "build/zz9k-surface-info" "C/zz9k-surface-info"
 copy_one "build/zz9k-palette" "C/zz9k-palette"
 copy_one "build/zz9k-fbtest" "C/zz9k-fbtest"
 copy_one "build/zz9k-scaletest" "C/zz9k-scaletest"
+copy_one "build/zz9k-mediaout" "C/zz9k-mediaout"
 copy_one "build/zz9k-surfaceops" "C/zz9k-surfaceops"
 copy_one "build/zz9k-probe" "C/zz9k-probe"
 copy_one "build/zz9k-step" "C/zz9k-step"

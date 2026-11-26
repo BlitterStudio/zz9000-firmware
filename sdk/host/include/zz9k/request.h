@@ -11,6 +11,7 @@
 #include "zz9k/host.h"
 #include "zz9k/image.h"
 #include "zz9k/audio.h"
+#include "zz9k/media_output.h"
 #include "zz9k/voice.h"
 #include "zz9k/compression.h"
 #include "zz9k/crypto.h"
@@ -1107,6 +1108,49 @@ static inline int zz9k_request_media_session_write(
   return ZZ9K_STATUS_OK;
 }
 
+/* ZZ9K_OP_MEDIA_SESSION_OUTPUT_CONFIG: binds the picture buffer and the
+ * output format of a shared-buffer session. The checks are the firmware's
+ * (zz9k_media_output_check) short of the buffers themselves, so a
+ * configuration the card would refuse as malformed never leaves the host.
+ * A configuration the firmware does not implement comes back as
+ * ZZ9K_STATUS_UNSUPPORTED from this builder too. */
+static inline int zz9k_request_media_session_output(
+    ZZ9KRequest *request,
+    const ZZ9KMediaSessionOutputDesc *desc)
+{
+  ZZ9KMediaSessionOutputPayload *payload;
+  ZZ9KMediaOutputLayout layout;
+  int status;
+
+  if (!request || !desc || desc->session == 0U ||
+      desc->buffer_handle == 0U ||
+      desc->buffer_handle == ZZ9K_INVALID_HANDLE ||
+      desc->palette_handle == ZZ9K_INVALID_HANDLE) {
+    return ZZ9K_STATUS_BAD_REQUEST;
+  }
+  status = zz9k_media_output_check(desc, &layout);
+  if (status != ZZ9K_STATUS_OK) {
+    return status;
+  }
+
+  zz9k_request_init(request, ZZ9K_OP_MEDIA_SESSION_OUTPUT_CONFIG);
+  request->entry.payload_len = sizeof(*payload);
+  payload = (ZZ9KMediaSessionOutputPayload *)
+      request->entry.payload.inline_data;
+  zz9k_put_be32(payload->session, desc->session);
+  zz9k_put_be32(payload->buffer_handle, desc->buffer_handle);
+  zz9k_put_be32(payload->buffer_offset, desc->buffer_offset);
+  zz9k_put_be32(payload->slot_stride, desc->slot_stride);
+  zz9k_put_be32(payload->width, desc->width);
+  zz9k_put_be32(payload->height, desc->height);
+  zz9k_put_be32(payload->format, desc->format);
+  zz9k_put_be32(payload->pitch, desc->pitch);
+  zz9k_put_be32(payload->flags, desc->flags);
+  zz9k_put_be32(payload->palette_handle, desc->palette_handle);
+  zz9k_put_be32(payload->palette_offset, desc->palette_offset);
+  return ZZ9K_STATUS_OK;
+}
+
 static inline int zz9k_media_command_opcode_known(uint16_t opcode)
 {
   return opcode == ZZ9K_OP_MEDIA_SESSION_DECODE ||
@@ -1159,7 +1203,7 @@ static inline int zz9k_request_media_session_status(
   ZZ9KMediaSessionStatusPayload *payload;
 
   if (!request || session == 0U ||
-      page > ZZ9K_MEDIA_STATUS_PROFILE ||
+      page > ZZ9K_MEDIA_STATUS_OUTPUT ||
       flags != 0U) {
     return ZZ9K_STATUS_BAD_REQUEST;
   }

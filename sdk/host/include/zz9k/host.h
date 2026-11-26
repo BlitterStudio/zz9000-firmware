@@ -231,6 +231,15 @@ static inline int zz9k_aperture_range_free(
 }
 int zz9k_query_service(ZZ9KContext *ctx, uint32_t service_id,
                        ZZ9KServiceInfo *service);
+/* True when `video` (the answer for ZZ9K_SERVICE_VIDEO) lists the
+ * shared-buffer output opcode: opcode_count of 15 or more means
+ * ZZ9K_OP_MEDIA_SESSION_OUTPUT_CONFIG exists. */
+static inline int zz9k_video_shared_output_available(
+    const ZZ9KServiceInfo *video)
+{
+  return video != 0 && video->service_id == ZZ9K_SERVICE_VIDEO &&
+         video->opcode_count >= ZZ9K_VIDEO_OPCODE_COUNT_SHARED_OUTPUT;
+}
 int zz9k_module_status(ZZ9KContext *ctx, uint32_t index,
                        ZZ9KModuleStatus *status);
 int zz9k_ping(ZZ9KContext *ctx, const uint8_t *payload,
@@ -364,6 +373,14 @@ int zz9k_media_session_begin(ZZ9KContext *ctx,
 int zz9k_media_session_write(ZZ9KContext *ctx,
                              const ZZ9KMediaSessionWriteDesc *desc,
                              ZZ9KMediaSessionMainResult *result);
+/* Binds the picture buffer and format of a session begun with
+ * ZZ9K_VIDEO_OUTPUT_SHARED_BUFFER. Send it after BEGIN and before the first
+ * PRESENT; it may be sent again between pictures. It answers
+ * ZZ9K_STATUS_BUSY while a picture is being written. The video service
+ * advertises it with opcode_count >= ZZ9K_VIDEO_OPCODE_COUNT_SHARED_OUTPUT. */
+int zz9k_media_session_output(ZZ9KContext *ctx,
+                              const ZZ9KMediaSessionOutputDesc *desc,
+                              ZZ9KMediaSessionMainResult *result);
 int zz9k_media_session_decode(ZZ9KContext *ctx, uint32_t session,
                               uint32_t flags,
                               ZZ9KMediaSessionMainResult *result);

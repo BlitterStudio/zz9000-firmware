@@ -249,7 +249,7 @@ static int test_request_builders(void)
       ZZ9K_STATUS_OK)
     return 18;
   if (zz9k_request_media_session_status(
-          &request, 9U, ZZ9K_MEDIA_STATUS_PROFILE + 1U, 0U) !=
+          &request, 9U, ZZ9K_MEDIA_STATUS_OUTPUT + 1U, 0U) !=
       ZZ9K_STATUS_BAD_REQUEST)
     return 19;
   return 0;
@@ -387,7 +387,7 @@ static int test_reply_decoders(void)
     return 16;
   reply.opcode = ZZ9K_OP_MEDIA_SESSION_STATUS;
   zz9k_put_be32(&reply.payload.inline_data[8],
-                ZZ9K_MEDIA_STATUS_PROFILE + 1U);
+                ZZ9K_MEDIA_STATUS_OUTPUT + 1U);
   if (zz9k_reply_media_session_status(&reply, &status_result) !=
       ZZ9K_STATUS_INTERNAL_ERROR)
     return 17;

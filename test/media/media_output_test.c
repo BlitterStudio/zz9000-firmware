@@ -18,6 +18,7 @@
 #include <time.h>
 
 #include "sdk_media_output.h"
+#include "zz9k/media_output.h"
 
 static int checks;
 static int failures;
@@ -940,6 +941,119 @@ static void test_rejects(void)
 	free_frame(&fb);
 }
 
+/* The SDK header is a second implementation of the validation and of the
+ * fixed palettes, for clients to check a configuration before sending it.
+ * They must never disagree with the firmware. */
+static void test_sdk_mirror(void)
+{
+	static const uint32_t formats[] = {
+		SDK_SURFACE_FORMAT_UNKNOWN, SDK_SURFACE_FORMAT_RGB565,
+		SDK_SURFACE_FORMAT_ARGB8888, SDK_SURFACE_FORMAT_INDEX8,
+		SDK_SURFACE_FORMAT_PLANAR, SDK_SURFACE_FORMAT_RGB555,
+		SDK_SURFACE_FORMAT_YUV422CGX, 77U,
+	};
+	unsigned i, depth;
+
+	CHECK(SDK_MEDIA_OUTPUT_DEPTH_MASK == ZZ9K_MEDIA_OUTPUT_DEPTH_MASK);
+	CHECK(SDK_MEDIA_OUTPUT_PLANAR_INTERLEAVED ==
+	      ZZ9K_MEDIA_OUTPUT_PLANAR_INTERLEAVED);
+	CHECK(SDK_MEDIA_OUTPUT_DITHER_ORDERED == ZZ9K_MEDIA_OUTPUT_DITHER_ORDERED);
+	CHECK(SDK_MEDIA_OUTPUT_DITHER_DIFFUSION ==
+	      ZZ9K_MEDIA_OUTPUT_DITHER_DIFFUSION);
+	CHECK(SDK_MEDIA_OUTPUT_PALETTE_HOST == ZZ9K_MEDIA_OUTPUT_PALETTE_HOST);
+	CHECK(SDK_MEDIA_OUTPUT_SCALE_NEAREST == ZZ9K_MEDIA_OUTPUT_SCALE_NEAREST);
+	CHECK(SDK_MEDIA_OUTPUT_MAX_WIDTH == ZZ9K_MEDIA_OUTPUT_MAX_WIDTH);
+	CHECK(SDK_MEDIA_OUTPUT_MAX_HEIGHT == ZZ9K_MEDIA_OUTPUT_MAX_HEIGHT);
+	CHECK(SDK_MEDIA_OUTPUT_PALETTE_BYTES == ZZ9K_MEDIA_OUTPUT_PALETTE_BYTES);
+	CHECK(SDK_OP_MEDIA_SESSION_OUTPUT_CONFIG ==
+	      ZZ9K_OP_MEDIA_SESSION_OUTPUT_CONFIG);
+	CHECK(SDK_VIDEO_OPCODE_COUNT_SHARED_OUTPUT ==
+	      ZZ9K_VIDEO_OPCODE_COUNT_SHARED_OUTPUT);
+	CHECK(SDK_VIDEO_OUTPUT_SHARED_BUFFER == ZZ9K_VIDEO_OUTPUT_SHARED_BUFFER);
+	CHECK(SDK_MEDIA_SESSION_RESULT_OUTPUT_SLOT1 ==
+	      ZZ9K_MEDIA_SESSION_RESULT_OUTPUT_SLOT1);
+	CHECK(SDK_MEDIA_SESSION_RESULT_OUTPUT_PENDING ==
+	      ZZ9K_MEDIA_SESSION_RESULT_OUTPUT_PENDING);
+	CHECK(SDK_MEDIA_STATUS_OUTPUT == ZZ9K_MEDIA_STATUS_OUTPUT);
+	CHECK(SDK_MEDIA_OUTPUT_STATUS_CONFIGURED ==
+	      ZZ9K_MEDIA_OUTPUT_STATUS_CONFIGURED);
+	CHECK(SDK_MEDIA_OUTPUT_STATUS_COMPLETE ==
+	      ZZ9K_MEDIA_OUTPUT_STATUS_COMPLETE);
+	CHECK(SDK_MEDIA_OUTPUT_STATUS_SLOT1 == ZZ9K_MEDIA_OUTPUT_STATUS_SLOT1);
+	CHECK(SDK_MEDIA_OUTPUT_STATUS_PENDING == ZZ9K_MEDIA_OUTPUT_STATUS_PENDING);
+	CHECK(SDK_STATUS_OK == ZZ9K_STATUS_OK &&
+	      SDK_STATUS_BAD_REQUEST == ZZ9K_STATUS_BAD_REQUEST &&
+	      SDK_STATUS_UNSUPPORTED == ZZ9K_STATUS_UNSUPPORTED);
+	CHECK(sizeof(struct SDKMediaSessionOutputPayload) ==
+	      sizeof(ZZ9KMediaSessionOutputPayload));
+
+	for (depth = 0; depth <= 9; depth++) {
+		uint32_t fw[256], sdk[256];
+
+		CHECK(sdk_media_output_fixed_palette(depth, fw) ==
+		      zz9k_media_output_fixed_palette(depth, sdk));
+		CHECK(memcmp(fw, sdk, sizeof(fw)) == 0);
+	}
+
+	/* random configurations, both sides must give the same answer */
+	rng_state = 987654321U;
+	for (i = 0; i < 200000; i++) {
+		struct SDKMediaOutputConfig cfg;
+		struct SDKMediaOutputLayout fw_layout;
+		ZZ9KMediaSessionOutputDesc desc;
+		ZZ9KMediaOutputLayout sdk_layout;
+		uint16_t fw_status;
+		int sdk_status;
+		unsigned w = 1 + (((unsigned)rnd() << 8) | rnd()) % 2100;
+		unsigned h = 1 + (((unsigned)rnd() << 8) | rnd()) % 1200;
+
+		memset(&cfg, 0, sizeof(cfg));
+		cfg.width = (rnd() & 7) == 0 ? 0 : w;
+		cfg.height = (rnd() & 7) == 0 ? 0 : h;
+		cfg.format = formats[rnd() & 7];
+		cfg.flags = (((uint32_t)rnd() << 2) ^ rnd()) & 0x3ffU;
+		if ((rnd() & 3) != 0)
+			cfg.flags &= ~(uint32_t)SDK_MEDIA_OUTPUT_DITHER_DIFFUSION;
+		cfg.pitch = cfg.format == SDK_SURFACE_FORMAT_PLANAR
+		    ? (cfg.width + 7) / 8 + (rnd() & 3) - 1
+		    : cfg.format == SDK_SURFACE_FORMAT_INDEX8
+		        ? cfg.width + (rnd() & 3) - 1
+		        : 2 * cfg.width + (rnd() & 3) - 1;
+		cfg.buffer_offset = (rnd() & 3) == 0 ? (uint32_t)(rnd() & 7) : 0;
+		cfg.slot_stride = (rnd() & 1) ? 0 : (uint32_t)rnd() * 1024U;
+		memset(&desc, 0, sizeof(desc));
+		desc.width = cfg.width;
+		desc.height = cfg.height;
+		desc.format = cfg.format;
+		desc.pitch = cfg.pitch;
+		desc.flags = cfg.flags;
+		desc.buffer_offset = cfg.buffer_offset;
+		desc.slot_stride = cfg.slot_stride;
+		desc.palette_handle = (cfg.flags & ZZ9K_MEDIA_OUTPUT_PALETTE_HOST)
+		    ? 5U : 0U;
+		fw_status = sdk_media_output_check(&cfg, &fw_layout);
+		sdk_status = zz9k_media_output_check(&desc, &sdk_layout);
+		if (fw_status != (uint16_t)sdk_status) {
+			printf("MIRROR status %u vs %d: fmt %u flags %x %ux%u pitch %u\n",
+			       fw_status, sdk_status, (unsigned)cfg.format,
+			       (unsigned)cfg.flags, (unsigned)cfg.width,
+			       (unsigned)cfg.height, (unsigned)cfg.pitch);
+			CHECK(0);
+			break;
+		}
+		if (fw_status == SDK_STATUS_OK &&
+		    (fw_layout.depth != sdk_layout.depth ||
+		     fw_layout.row_bytes != sdk_layout.row_bytes ||
+		     fw_layout.picture_bytes != sdk_layout.picture_bytes ||
+		     fw_layout.slots != sdk_layout.slots ||
+		     fw_layout.span_bytes != sdk_layout.span_bytes)) {
+			CHECK(0);
+			break;
+		}
+		checks++;
+	}
+}
+
 static double now_ms(void)
 {
 	struct timespec ts;
@@ -1059,6 +1173,7 @@ int main(int argc, char **argv)
 	test_host_palette();
 	arena_used = 0;
 	test_rejects();
+	test_sdk_mirror();
 	if (argc > 1 && strcmp(argv[1], "--bench") == 0) {
 		arena_used = 0;
 		bench();
