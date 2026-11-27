@@ -2368,6 +2368,71 @@ int zzapp_svc_volume_info(const char *path, aar_volume_info *out)
 	return AAR_OK;
 }
 
+/* The request carries the path and reserves room for the comment in the
+ * same scratch area. A malformed completion must not reach the app buffer. */
+int zzapp_svc_file_get_comment(const char *path, void *buf, uint32_t bytes,
+			       uint32_t *out_n)
+{
+	zzapp_xport_buf_t area;
+	aar_completion c;
+	uint32_t args[1];
+	uint32_t len;
+	uint32_t cap;
+	uint32_t full;
+	int rc;
+
+	if (!out_n)
+		return AAR_E_INVAL;
+	*out_n = 0U;
+	if (bytes != 0U && !buf)
+		return AAR_E_INVAL;
+	if (!service_rec())
+		return AAR_E_IO;
+	rc = put_path(path, &area, &len);
+	if (rc != AAR_OK)
+		return rc;
+	cap = bytes < AAR_FILE_COMMENT_MAX ? bytes : AAR_FILE_COMMENT_MAX;
+	args[AAR_A_FILE_COMMENT_CAP] = cap;
+	memset(&c, 0, sizeof(c));
+	rc = file_request(AAR_OP_FILE_GET_COMMENT, args, 1U, &area,
+			  len > cap ? len : cap, &c);
+	if (rc != AAR_OK && rc != AAR_E_NOSPC)
+		return rc;
+	full = c.out[AAR_R_FILE_COMMENT_LEN];
+	if (full > AAR_FILE_COMMENT_MAX ||
+	    (rc == AAR_OK ? full > cap : full <= cap))
+		return AAR_E_IO;
+	len = full < cap ? full : cap;
+	if (len != 0U)
+		memcpy(buf, area.ptr, len);
+	*out_n = full;
+	return rc;
+}
+
+int zzapp_svc_file_set_comment(const char *path, const void *data,
+			       uint32_t bytes)
+{
+	zzapp_xport_buf_t area;
+	uint32_t len;
+	int rc;
+
+	_Static_assert(ZZAPP_SVC_PATH_MAX + 1U + AAR_FILE_COMMENT_MAX <=
+		       ZZAPP_XPORT_SCRATCH_BYTES, "file comment request fits scratch");
+	if (bytes > AAR_FILE_COMMENT_MAX || (bytes != 0U && !data))
+		return AAR_E_INVAL;
+	if (bytes != 0U && memchr(data, 0, bytes) != NULL)
+		return AAR_E_INVAL;
+	if (!service_rec())
+		return AAR_E_IO;
+	rc = put_path(path, &area, &len);
+	if (rc != AAR_OK)
+		return rc;
+	if (bytes != 0U)
+		memcpy((uint8_t *)area.ptr + len, data, bytes);
+	return file_request(AAR_OP_FILE_SET_COMMENT, NULL, 0U, &area,
+			    len + bytes, NULL);
+}
+
 /* ---- Time, locale, environment and clipboard (spec 7.3, 7.4) -------------------- */
 
 /* These park the app until the client completes them: no deadline of their

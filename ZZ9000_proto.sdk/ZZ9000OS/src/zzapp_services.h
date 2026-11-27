@@ -137,6 +137,15 @@ int zzapp_svc_clip_read(uint32_t unit, uint32_t type, void *buf,
 			uint32_t bytes, uint32_t *out_n);
 int zzapp_svc_clip_write(uint32_t unit, uint32_t type, const void *data,
 			 uint32_t bytes);
+/* API 0.6 file comments: parked requests like the above, the comment in the
+ * native bytes (at most AAR_FILE_COMMENT_MAX, no NUL, no terminator written).
+ * get_comment copies min(bytes, length), sets *out_n to the full length and
+ * answers AAR_E_NOSPC when it was cut; a NULL buffer is valid only with 0
+ * bytes. set_comment with 0 bytes clears. */
+int zzapp_svc_file_get_comment(const char *path, void *buf, uint32_t bytes,
+			       uint32_t *out_n);
+int zzapp_svc_file_set_comment(const char *path, const void *data,
+			       uint32_t bytes);
 int zzapp_svc_display_open(uint32_t w, uint32_t h, uint32_t format,
 			   uint32_t flags, struct aar_surface *out);
 int zzapp_svc_display_flip(uint32_t surface_id);
