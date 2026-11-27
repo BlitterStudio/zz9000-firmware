@@ -2598,7 +2598,7 @@ static void line_screen(const Vertex *a, const Vertex *b, float polygon_offset)
     }
 }
 
-static void point_screen(const Vertex *vertex, float polygon_offset)
+static void point_screen(const Vertex *vertex, uint32_t color, float polygon_offset)
 {
     int size = g_state.point_size ? g_state.point_size : 1;
     /* Pixels whose centres lie in the half-open square [c - s/2, c + s/2),
@@ -2623,7 +2623,7 @@ static void point_screen(const Vertex *vertex, float polygon_offset)
 
         for (index = 0U; index < 4U; ++index) {
             corner[index] = *vertex;
-            corner[index].color = vertex->flat_color;
+            corner[index].color = color;
         }
         corner[0].sx = corner[3].sx = (float)x_first;
         corner[1].sx = corner[2].sx = (float)x_last + 1.0f;
@@ -2641,7 +2641,7 @@ static void point_screen(const Vertex *vertex, float polygon_offset)
                      vertex->q0 != 0.0f ? vertex->v0 / vertex->q0 : 0.0f,
                      vertex->q1 != 0.0f ? vertex->u1 / vertex->q1 : 0.0f,
                      vertex->q1 != 0.0f ? vertex->v1 / vertex->q1 : 0.0f,
-                     vertex->fog_coord, vertex->flat_color, NULL, polygon_offset);
+                     vertex->fog_coord, color, NULL, polygon_offset);
 }
 
 static void render_clipped_polygon(const Vertex *clipped, unsigned count, uint32_t flat_color)
@@ -2682,7 +2682,7 @@ static void render_clipped_polygon(const Vertex *clipped, unsigned count, uint32
         switch (g_state.polygon_mode ? g_state.polygon_mode : GL_FILL) {
         case GL_POINT:
             for (i = 0U; i < 3U; ++i)
-                point_screen(&verts[i], polygon_offset);
+                point_screen(&verts[i], verts[i].flat_color, polygon_offset);
             break;
         case GL_LINE:
             for (i = 0U; i < 3U; ++i)
@@ -2704,7 +2704,7 @@ static void render_clipped_polygon(const Vertex *clipped, unsigned count, uint32
     switch (g_state.polygon_mode ? g_state.polygon_mode : GL_FILL) {
     case GL_POINT:
         for (i = 0U; i < count; ++i)
-            point_screen(&verts[i], polygon_offset);
+            point_screen(&verts[i], verts[i].flat_color, polygon_offset);
         break;
     case GL_LINE:
         for (i = 0U; i < count; ++i)
@@ -2833,7 +2833,7 @@ static void primitive_point(const Vertex *vertex)
     if (vertex_outcode(vertex))
         return;
     if (project(&projected))
-        point_screen(&projected, 0.0f);
+        point_screen(&projected, projected.flat_color, 0.0f);
 }
 
 /* Segments are clipped parametrically, not as a 2-gon: polygon clipping of
@@ -2936,7 +2936,8 @@ static void polygon_stream_boundary(const PolygonStream *stream,
                                     const Vertex *a, const Vertex *b)
 {
     if (stream->mode == GL_POINT)
-        point_screen(a, stream->depth_bias);
+        point_screen(a, g_state.shade_model == GL_FLAT ? a->flat_color : a->color,
+                     stream->depth_bias);
     else if (stream->mode == GL_LINE)
         line_screen(a, b, stream->depth_bias);
 }

@@ -1096,6 +1096,37 @@ static void test_app_user_clipping(const aar_gl *draw)
         expect_clip_pixel(draw, x_clip, y_sample, 1);
         expect_clip_pixel(draw, x_middle, y_sample, 0);
     }
+
+    /* Smooth point mode uses the clipped vertex color. Flat point mode
+     * still uses the original triangle's provoking vertex. */
+    draw->PolygonMode(0x0408U, 0x1b00U); /* GL_POINT */
+    for (uint32_t shade = 0x1d00U; shade <= 0x1d01U; ++shade) {
+        uint8_t pixel[4] = { 0 };
+        const int smooth = shade == 0x1d01U;
+
+        draw->ShadeModel(shade);
+        draw->Clear(0x4000U);
+        draw->Begin(4U);
+        draw->Color3f(1.0f, 0.0f, 0.0f);
+        draw->Vertex2f(0.0f, -0.5f);
+        draw->Color3f(0.0f, 1.0f, 0.0f);
+        draw->Vertex2f(0.5f, -0.5f);
+        draw->Color3f(0.0f, 0.0f, 1.0f);
+        draw->Vertex2f(0.5f, 0.5f);
+        draw->End();
+        draw->ReadPixels(x_right, y_lower, 1, 1, 0x1908U, 0x1401U, pixel);
+        assert(pixel[0] == 0U && pixel[1] == (smooth ? 255U : 0U) &&
+               pixel[2] == (smooth ? 0U : 255U));
+        draw->ReadPixels((int)display_width * 5 / 8, y_lower,
+                         1, 1, 0x1908U, 0x1401U, pixel);
+        if (smooth)
+            assert(pixel[0] >= 127U && pixel[0] <= 128U &&
+                   pixel[1] >= 127U && pixel[1] <= 128U && pixel[2] == 0U);
+        else
+            assert(pixel[0] == 0U && pixel[1] == 0U && pixel[2] == 255U);
+    }
+    draw->Color3f(1.0f, 0.0f, 0.0f);
+
     draw->PolygonMode(0x0408U, 0x1b02U); /* GL_FILL */
     draw->PointSize(1.0f);
     draw->LineWidth(1.0f);

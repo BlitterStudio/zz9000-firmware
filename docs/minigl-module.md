@@ -115,6 +115,8 @@ App GL supports six user clip planes, initially disabled.
 current modelview matrix. Use `glEnable` and `glDisable` with
 `GL_CLIP_PLANE0` through `GL_CLIP_PLANE5`. The ARM geometry stage clips
 before either the CPU or RasterIX rasterizer draws the primitive.
+In smooth polygon point mode a new boundary vertex uses its interpolated
+color. Flat shading still uses the original provoking vertex.
 This does not add clip planes to the 68k wire protocol.
 
 App GL reports `GL_STENCIL_BITS` as 0. There is no stencil buffer, and the
