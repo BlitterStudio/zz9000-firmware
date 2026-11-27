@@ -281,7 +281,7 @@ typedef struct {
  */
 #define ZZAPP_XPORT_INBOX_ENTRIES AAR_MSG_CAPACITY      /* 63 */
 #define ZZAPP_XPORT_EVENT_ENTRIES 64U
-#define ZZAPP_XPORT_REQUESTS      4U
+#define ZZAPP_XPORT_REQUESTS      5U
 #define ZZAPP_XPORT_LOG_SLOTS     8U
 
 typedef enum {
@@ -299,6 +299,7 @@ typedef enum {
 	ZZAPP_XPORT_REQ_FLIP,          /* an asynchronous flip */
 	ZZAPP_XPORT_REQ_CONSOLE_OUT,   /* the console output stream */
 	ZZAPP_XPORT_REQ_PALETTE,       /* the coalesced palette updates */
+	ZZAPP_XPORT_REQ_FILE_ASYNC,    /* file data, apart from a parked service */
 	ZZAPP_XPORT_REQ_COUNT = ZZAPP_XPORT_REQUESTS
 } zzapp_xport_req_kind_t;
 

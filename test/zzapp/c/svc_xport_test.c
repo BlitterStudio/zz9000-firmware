@@ -1276,6 +1276,139 @@ static void test_files(void)
 	CHECK(mbox(ZZAPP_OP_RELEASE, handle, 0U, 0U, NULL, NULL) == SDK_STATUS_OK);
 }
 
+static int take_file_request(client_t *c, aar_request *r)
+{
+	const volatile uint8_t *slot;
+
+	if (aar_queue_peek(&c->sq, NULL, &slot) != 1)
+		return 0;
+	aar_entry_get_request(slot, r);
+	aar_queue_pop(&c->sq, NULL);
+	return 1;
+}
+
+static void test_async_file_tickets(void)
+{
+	client_t c;
+	zzapp_rec_t *rec;
+	uint32_t handle, ticket = 0, other = 99U, n = 123U;
+	int32_t status = 44;
+	aar_request req;
+	uint8_t buf[8] = {0};
+	uint8_t *big;
+	int fd, write_fd;
+	unsigned yields;
+
+	reset_all();
+	rec = claim(&c, &handle);
+	cl.file_size = 5;
+	fd = zzapp_svc_file_open("Work:a", AAR_FILE_READ | AAR_FILE_WRITE);
+	write_fd = zzapp_svc_file_open("Work:b", AAR_FILE_WRITE);
+	yields = cl.yields;
+	CHECK(zzapp_svc_file_read_async(write_fd, buf, 1U, &ticket) == AAR_E_BADF);
+	CHECK(zzapp_svc_file_read_async(fd, buf, sizeof buf, &ticket) == AAR_OK && ticket);
+	CHECK(cl.yields == yields);
+	CHECK(take_file_request(&c, &req));
+	CHECK(req.op == AAR_OP_FILE_READ && req.flags == AAR_FILEF_ASYNC);
+	CHECK(zzapp_svc_file_collect(ticket, &status, &n) == AAR_E_BUSY &&
+	      status == 44 && n == 123U);
+	CHECK(zzapp_svc_file_collect(ticket + 1U, &status, &n) == AAR_E_STALE);
+	CHECK(zzapp_svc_file_write_async(write_fd, buf, 1U, &other) == AAR_E_BUSY && other == 99U);
+	CHECK(zzapp_svc_file_close(fd) == AAR_E_BUSY);
+	CHECK(zzapp_svc_file_seek(fd, 0, AAR_SEEK_SET, NULL) == AAR_E_BUSY);
+	CHECK(zzapp_svc_file_truncate(fd, 0U) == AAR_E_BUSY);
+	CHECK(zzapp_svc_file_write(write_fd, "x", 1U, &other) == AAR_E_BUSY);
+	/* An unrelated blocking path request makes progress with the read held. */
+	{
+		aar_stat st;
+
+		CHECK(zzapp_svc_file_stat("Work:b", &st) == AAR_OK);
+	}
+	client_handle(&c, &req);
+	zzapp_services_poll();
+	CHECK(zzapp_svc_file_write_async(write_fd, buf, 1U, &other) == AAR_E_BUSY);
+	CHECK(zzapp_svc_file_collect(ticket, &status, &n) == AAR_OK && status == AAR_OK && n == 5U);
+	CHECK(buf[0] == 3U && buf[4] == 31U && buf[5] == 0U);
+	CHECK(zzapp_svc_file_collect(ticket, &status, &n) == AAR_E_STALE);
+
+	/* First write chunk completes; only collecting it posts the next chunk.
+	 * An error with a nonzero confirmed count preserves both chunks' counts. */
+	big = malloc(ZZAPP_XPORT_DATA_MAX + 3U);
+	CHECK(big != NULL);
+	if (big) {
+		memset(big, 0x5a, ZZAPP_XPORT_DATA_MAX + 3U);
+		big[ZZAPP_XPORT_DATA_MAX] = 'e';
+		CHECK(zzapp_svc_file_write_async(write_fd, big, ZZAPP_XPORT_DATA_MAX + 3U, &other) == AAR_OK);
+		CHECK(other != ticket && take_file_request(&c, &req));
+		CHECK(req.op == AAR_OP_FILE_WRITE && req.flags == AAR_FILEF_ASYNC &&
+		      req.buf_len == ZZAPP_XPORT_DATA_MAX);
+		client_handle(&c, &req);
+		CHECK(zzapp_svc_file_collect(other, &status, &n) == AAR_E_BUSY);
+		CHECK(take_file_request(&c, &req) && req.buf_len == 3U);
+		CHECK(*(const uint8_t *)map_token(req.buf) == 'e');
+		{
+			aar_completion d = {0};
+
+			d.op = req.op;
+			d.id = req.id;
+			d.result = AAR_E_NOSPC;
+			d.out[AAR_R_FILE_COUNT] = 1U;
+			client_post(&c, &d);
+		}
+		CHECK(zzapp_svc_file_collect(other, &status, &n) == AAR_OK &&
+		      status == AAR_E_NOSPC && n == ZZAPP_XPORT_DATA_MAX + 1U);
+		free(big);
+	}
+	CHECK(zzapp_svc_file_close(fd) == AAR_OK);
+	CHECK(zzapp_svc_file_close(write_fd) == AAR_OK);
+	CHECK(mbox(ZZAPP_OP_RELEASE, handle, 0U, 0U, NULL, NULL) == SDK_STATUS_OK);
+	(void)rec;
+}
+
+static void test_async_file_abandon(void)
+{
+	for (int stop = 0; stop <= 1; stop++) {
+		client_t c;
+		zzapp_rec_t *rec;
+		uint32_t handle, ticket = 0, n = 0;
+		int32_t status = 0;
+		aar_request req;
+		aar_completion wrong = {0};
+		uint8_t buf = 0x5a;
+		int fd;
+
+		reset_all();
+		rec = claim(&c, &handle);
+		cl.file_size = 5;
+		fd = zzapp_svc_file_open("Work:a", AAR_FILE_READ);
+		CHECK(zzapp_svc_file_read_async(fd, &buf, 1U, &ticket) == AAR_OK);
+		CHECK(take_file_request(&c, &req));
+		if (stop)
+			rec->host.stop_requested = 1U;
+		else
+			fake_now += 30000001U;
+		zzapp_services_poll();
+		CHECK(zzapp_svc_file_collect(ticket, &status, &n) == AAR_OK &&
+		      status == (stop ? AAR_E_IO : AAR_E_TIMEDOUT) && n == 0U);
+		CHECK(buf == 0x5a);
+		CHECK(zzapp_xport_data_reserve(rec, 1U, NULL) == AAR_E_BUSY);
+		CHECK(zzapp_svc_file_close(fd) == AAR_E_BUSY);
+		wrong.id = req.id;
+		wrong.op = AAR_OP_FILE_WRITE;
+		client_post(&c, &wrong);
+		CHECK(zzapp_svc_file_seek(fd, 0, AAR_SEEK_SET, NULL) == AAR_E_BUSY);
+		client_handle(&c, &req);
+		(void)zzapp_xport_pump(rec);
+		CHECK(buf == 0x5a && zzapp_svc_file_collect(ticket, &status, &n) == AAR_E_STALE);
+		CHECK(zzapp_xport_block_free(rec, ZZAPP_XPORT_BLOCK_DATA) == AAR_OK);
+		if (stop)
+			CHECK(zzapp_svc_file_read_async(fd, NULL, 0U, &ticket) == AAR_E_IO);
+		else
+			CHECK(zzapp_svc_file_close(fd) == AAR_OK);
+		CHECK(mbox(ZZAPP_OP_RELEASE, handle, 0U, 0U, NULL, NULL) == SDK_STATUS_OK);
+	}
+}
+
 /* A request the client never answers times out after 30 s and its late
  * completion is dropped by id; the next request is unaffected. */
 static void test_file_timeout(void)
@@ -4459,6 +4592,8 @@ int main(void)
 	test_release_running();
 	test_files();
 	test_file_timeout();
+	test_async_file_tickets();
+	test_async_file_abandon();
 	test_sq_full();
 	test_console();
 	test_console_after_exit();

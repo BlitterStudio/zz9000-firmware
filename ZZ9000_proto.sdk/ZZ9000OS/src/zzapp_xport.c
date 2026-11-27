@@ -487,6 +487,11 @@ int zzapp_xport_buffer_held(const zzapp_rec_t *rec, uint32_t names)
 
 	if (!rec)
 		return 0;
+	/* Hold even a completed read until the app copies it in its own
+	 * address space. Core 0 only checks data ownership after handoff. */
+	if ((names & ZZAPP_XPORT_NAMES_DATA) &&
+	    rec->xport.req[ZZAPP_XPORT_REQ_FILE_ASYNC].state != ZZAPP_XPORT_REQ_FREE)
+		return 1;
 	for (k = 0U; k < ZZAPP_XPORT_REQUESTS; k++)
 		if ((__atomic_load_n(&rec->xport.req[k].abandoned_names,
 				     __ATOMIC_ACQUIRE) & names) != 0U)

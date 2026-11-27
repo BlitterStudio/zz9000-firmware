@@ -272,10 +272,9 @@ int zzapp_xport_block_get(const zzapp_rec_t *rec,
 			  zzapp_xport_buf_t *out);
 /* The data block, at least `bytes` (at most ZZAPP_XPORT_DATA_MAX): allocated
  * on first use at the request rounded to the step, grown by free and
- * allocate. A grown block loses its contents. While an abandoned request still
- * names an existing block it is neither reused nor replaced (AAR_E_BUSY): an
- * old FILE_WRITE would write the new bytes, a late FILE_READ would overwrite
- * them. */
+ * allocate. A grown block loses its contents. While an active async file
+ * request or an abandoned request still owns the block, it is neither reused
+ * nor replaced (AAR_E_BUSY). */
 int zzapp_xport_data_reserve(zzapp_rec_t *rec, uint32_t bytes,
 			     zzapp_xport_buf_t *out);
 /* An area of the service block; the block is allocated, zeroed, on the first
@@ -284,9 +283,8 @@ int zzapp_xport_data_reserve(zzapp_rec_t *rec, uint32_t bytes,
 int zzapp_xport_service_area(zzapp_rec_t *rec, zzapp_xport_area_t area,
 			     zzapp_xport_buf_t *out);
 
-/* Nonzero while an abandoned request of any entry still names one of the
- * buffers in `names` (ZZAPP_XPORT_NAMES_*): the client may still read or write
- * it. */
+/* Nonzero while an active async file read or write owns the data block, or an
+ * abandoned request still names one of the buffers in `names`. */
 int zzapp_xport_buffer_held(const zzapp_rec_t *rec, uint32_t names);
 
 /* ---- Control block words ------------------------------------------------ */
