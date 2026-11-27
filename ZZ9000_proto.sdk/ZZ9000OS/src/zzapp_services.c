@@ -20,6 +20,7 @@
 #include "zzapp_proto.h"
 #include "zzapp_runtime.h"
 #include "zzapp_rec.h"
+#include "zzapp_svc.h"
 #include "zzapp_xport.h"
 void zzapp_host_yield_wait(void);
 void __attribute__((weak)) zzapp_host_latch_stop(uint32_t slot)
@@ -234,6 +235,18 @@ struct zzapp_deferred {
 	uint32_t start_argc;
 };
 
+/* Core 1 only. The service pass can retire a posted request, but only the
+ * calling app's context accesses its private buffer. */
+struct zzapp_file_io {
+	void *buf;
+	uint32_t ticket, serial;
+	uint32_t len, count, chunk;
+	int fd;
+	int32_t result;
+	uint16_t op;
+	uint8_t finished;
+};
+
 /* The services' per-record state, in the services part of the record. */
 struct zzapp_service_runtime {
 	struct zzapp_deferred defer;
@@ -242,6 +255,7 @@ struct zzapp_service_runtime {
 	 * read through an id opened without READ, or a write through one
 	 * opened without WRITE, is AAR_E_BADF (spec 7.1). */
 	uint8_t file_access[ZZAPP_FD_COUNT];
+	struct zzapp_file_io file_io;
 	int list_open[ZZAPP_FD_COUNT];
 	volatile int display_bound;
 	int display_back_owned;
@@ -1641,6 +1655,8 @@ void zzapp_services_on_app_end(void)
 	zzapp_xport_abandon(rec, ZZAPP_XPORT_REQ_BLOCKING);
 	zzapp_xport_abandon(rec, ZZAPP_XPORT_REQ_FLIP);
 	zzapp_xport_abandon(rec, ZZAPP_XPORT_REQ_PALETTE);
+	zzapp_xport_abandon(rec, ZZAPP_XPORT_REQ_FILE_ASYNC);
+	memset(&state->file_io, 0, sizeof(state->file_io));
 	wait_end();
 	memset(state->file_open, 0, sizeof(state->file_open));
 	memset(state->file_access, 0, sizeof(state->file_access));
@@ -1946,6 +1962,212 @@ static int file_request(uint32_t op, const uint32_t *args, uint32_t nargs,
 				buf, buf_len, c);
 }
 
+/* An ended ticket no longer owns app memory, but the DOS packet may still
+ * own the native fd and transport block. */
+static int file_async_abandoned(zzapp_rec_t *rec)
+{
+	const uint8_t *names = &rec->xport.req[ZZAPP_XPORT_REQ_FILE_ASYNC].abandoned_names;
+
+	if (__atomic_load_n(names, __ATOMIC_ACQUIRE) == 0U)
+		return 0;
+	(void)zzapp_xport_pump(rec);
+	return __atomic_load_n(names, __ATOMIC_ACQUIRE) != 0U;
+}
+
+static int file_async_fd_busy(zzapp_rec_t *rec, int fd)
+{
+	const struct zzapp_file_io *io = &runtime_of(rec)->file_io;
+
+	return io->fd == fd && (io->ticket != 0U || file_async_abandoned(rec));
+}
+
+/* Unlike an ordinary SVC argument, this address can outlive a return to
+ * userspace. Recheck it before copying to or from it on a later SVC. */
+static int file_async_check_buffer(zzapp_rec_t *rec, const void *buf, uint32_t len,
+				   int write)
+{
+#ifndef ZZAPP_HOST_TEST
+	return zzapp_svc_check_user(&rec->proc.as, (uint32_t)(uintptr_t)buf, len, write);
+#else
+	(void)rec;
+	(void)buf;
+	(void)len;
+	(void)write;
+	return AAR_OK; /* fixture buffers are ordinary host memory */
+#endif
+}
+
+static int file_async_post(zzapp_rec_t *rec, struct zzapp_file_io *io)
+{
+	aar_request req = {0};
+	zzapp_xport_buf_t data;
+	uint32_t chunk = io->len - io->count;
+	int rc = zzapp_xport_sq_space(rec);
+
+	if (rc <= 0)
+		return rc < 0 ? rc : AAR_E_BUSY;
+	if (chunk > ZZAPP_XPORT_DATA_MAX)
+		chunk = ZZAPP_XPORT_DATA_MAX;
+	if (io->op == AAR_OP_FILE_WRITE && io->count != 0U &&
+	    file_async_check_buffer(rec, (const uint8_t *)io->buf + io->count,
+				    chunk, 0) != AAR_OK)
+		return AAR_E_FAULT;
+	rc = zzapp_xport_data_reserve(rec, chunk, &data);
+	if (rc != AAR_OK)
+		return rc;
+	if (io->op == AAR_OP_FILE_WRITE)
+		memcpy(data.ptr, (const uint8_t *)io->buf + io->count, chunk);
+	req.op = io->op;
+	req.flags = AAR_FILEF_ASYNC;
+	req.arg[AAR_A_FILE_FD] = (uint32_t)io->fd;
+	req.arg[AAR_A_FILE_LEN] = chunk;
+	req.buf = data.token;
+	req.buf_off = data.off;
+	req.buf_len = chunk;
+	rc = zzapp_xport_post_request(rec, ZZAPP_XPORT_REQ_FILE_ASYNC, &req,
+				      now_us() + ZZAPP_FILE_TIMEOUT_US, NULL);
+	if (rc == AAR_OK) {
+		io->chunk = chunk;
+		slot_state_lock_acquire();
+		set_add(&set_svc, service_pid());
+		slot_state_lock_release();
+	}
+	return rc;
+}
+
+static int file_async_begin(int fd, void *buf, uint32_t len, uint32_t *ticket,
+			    uint16_t op, uint8_t access)
+{
+	zzapp_rec_t *rec = service_rec();
+	struct zzapp_service_runtime *state;
+	struct zzapp_file_io next = {0};
+	int rc;
+
+	if (!ticket || (!buf && len != 0U))
+		return AAR_E_INVAL;
+	if (!rec || zzapp_services_stop_requested())
+		return AAR_E_IO;
+	state = runtime_of(rec);
+	if (!slot_live(state->file_open, fd) ||
+	    (state->file_access[fd_index(fd)] & access) == 0U)
+		return AAR_E_BADF;
+	if (state->file_io.ticket != 0U || file_async_abandoned(rec))
+		return AAR_E_BUSY;
+	if (state->file_io.serial == UINT32_MAX)
+		return AAR_E_NOSPC;
+	next.serial = state->file_io.serial + 1U;
+	next.ticket = next.serial;
+	next.fd = fd;
+	next.op = op;
+	next.buf = buf;
+	next.len = len;
+	next.finished = len == 0U;
+	if (len != 0U) {
+		rc = file_async_post(rec, &next);
+		if (rc != AAR_OK)
+			return rc;
+	}
+	state->file_io = next;
+	*ticket = next.ticket;
+	return AAR_OK;
+}
+
+int zzapp_svc_file_read_async(int fd, void *buf, uint32_t len, uint32_t *ticket)
+{
+	return file_async_begin(fd, buf, len, ticket, AAR_OP_FILE_READ, AAR_FILE_READ);
+}
+
+int zzapp_svc_file_write_async(int fd, const void *buf, uint32_t len, uint32_t *ticket)
+{
+	return file_async_begin(fd, (void *)buf, len, ticket, AAR_OP_FILE_WRITE,
+				AAR_FILE_WRITE);
+}
+
+static int file_async_pending(const zzapp_rec_t *rec)
+{
+	return zzapp_xport_req_state(rec, ZZAPP_XPORT_REQ_FILE_ASYNC) ==
+	       ZZAPP_XPORT_REQ_POSTED;
+}
+
+/* The pump runs first; a queued completion wins over the deadline. */
+static void file_async_check(zzapp_rec_t *rec, int pump_rc)
+{
+	struct zzapp_file_io *io = &runtime_of(rec)->file_io;
+	int result;
+
+	if (!file_async_pending(rec))
+		return;
+	if (pump_rc < 0 || stop_requested_rec(rec))
+		result = AAR_E_IO;
+	else if (now_us() >= zzapp_xport_req_deadline(rec, ZZAPP_XPORT_REQ_FILE_ASYNC))
+		result = AAR_E_TIMEDOUT;
+	else
+		return;
+	zzapp_xport_abandon(rec, ZZAPP_XPORT_REQ_FILE_ASYNC);
+	io->result = result;
+	io->finished = 1;
+}
+
+int zzapp_svc_file_collect(uint32_t ticket, int32_t *status, uint32_t *out_n)
+{
+	zzapp_rec_t *rec = service_rec();
+	struct zzapp_file_io *io;
+
+	if (!ticket || !status || !out_n)
+		return AAR_E_INVAL;
+	if (!rec)
+		return AAR_E_IO;
+	io = &runtime_of(rec)->file_io;
+	if (ticket != io->ticket)
+		return AAR_E_STALE;
+
+	if (!io->finished) {
+		aar_completion c;
+		int pump_rc = zzapp_xport_pump(rec);
+
+		file_async_check(rec, pump_rc);
+		if (!io->finished && zzapp_xport_take_completion(
+			    rec, ZZAPP_XPORT_REQ_FILE_ASYNC, &c) == 1) {
+			uint32_t n = c.out[AAR_R_FILE_COUNT];
+			zzapp_xport_buf_t data = {0};
+
+			if (n > io->chunk || c.result > AAR_OK ||
+			    (n && io->op == AAR_OP_FILE_READ &&
+			     !zzapp_xport_block_get(rec, ZZAPP_XPORT_BLOCK_DATA, &data))) {
+				io->result = AAR_E_IO;
+				io->finished = 1;
+			} else if (n && io->op == AAR_OP_FILE_READ &&
+				   file_async_check_buffer(rec, (uint8_t *)io->buf + io->count,
+							   n, 1) != AAR_OK) {
+				io->result = AAR_E_FAULT;
+				io->finished = 1;
+			} else {
+				if (n && io->op == AAR_OP_FILE_READ)
+					memcpy((uint8_t *)io->buf + io->count, data.ptr, n);
+				io->count += n;
+				io->result = c.result;
+				io->finished = c.result < 0 || n < io->chunk || io->count == io->len;
+			}
+		}
+		if (!io->finished && !file_async_pending(rec)) {
+			int rc = pump_rc < 0 || zzapp_services_stop_requested()
+				 ? AAR_E_IO : file_async_post(rec, io);
+
+			if (rc < 0 && rc != AAR_E_BUSY) {
+				io->result = rc;
+				io->finished = 1;
+			}
+		}
+	}
+	if (!io->finished)
+		return AAR_E_BUSY;
+	*status = io->result;
+	*out_n = io->count;
+	io->buf = NULL;
+	io->ticket = 0U;
+	return AAR_OK;
+}
+
 /* The path goes to the scratch area as bytes with a NUL. */
 static int put_path(const char *path, zzapp_xport_buf_t *buf, uint32_t *len)
 {
@@ -2021,6 +2243,8 @@ int zzapp_svc_file_close(int fd)
 
 	if (!slot_live(state->file_open, fd))
 		return AAR_E_BADF;
+	if (file_async_fd_busy(service_rec(), fd))
+		return AAR_E_BUSY;
 	rc = file_request(AAR_OP_FILE_CLOSE, &arg, 1U, NULL, 0U, NULL);
 	release_slot(state->file_open, fd, rc == AAR_E_TIMEDOUT);
 	return rc;
@@ -2044,6 +2268,8 @@ int zzapp_svc_file_read(int fd, void *buf, uint32_t len, uint32_t *out_n)
 	/* The id was opened without READ (spec 7.1). */
 	if ((state->file_access[fd_index(fd)] & AAR_FILE_READ) == 0U)
 		return AAR_E_BADF;
+	if (file_async_fd_busy(rec, fd))
+		return AAR_E_BUSY;
 	while (got < len) {
 		zzapp_xport_buf_t data;
 		aar_completion c;
@@ -2090,6 +2316,8 @@ int zzapp_svc_file_write(int fd, const void *buf, uint32_t len, uint32_t *out_n)
 	/* The id was opened without WRITE (spec 7.1). */
 	if ((state->file_access[fd_index(fd)] & AAR_FILE_WRITE) == 0U)
 		return AAR_E_BADF;
+	if (file_async_fd_busy(rec, fd))
+		return AAR_E_BUSY;
 	while (got < len) {
 		zzapp_xport_buf_t data;
 		aar_completion c;
@@ -2129,6 +2357,8 @@ int zzapp_svc_file_seek(int fd, int64_t off, int whence, int64_t *out_pos)
 
 	if (!slot_live(state->file_open, fd))
 		return AAR_E_BADF;
+	if (file_async_fd_busy(service_rec(), fd))
+		return AAR_E_BUSY;
 	if (whence != AAR_SEEK_SET && whence != AAR_SEEK_CUR &&
 	    whence != AAR_SEEK_END)
 		return AAR_E_INVAL;
@@ -2330,6 +2560,8 @@ int zzapp_svc_file_truncate(int fd, uint64_t size)
 	if (!slot_live(state->file_open, fd) ||
 	    (state->file_access[fd_index(fd)] & AAR_FILE_WRITE) == 0U)
 		return AAR_E_BADF;
+	if (file_async_fd_busy(service_rec(), fd))
+		return AAR_E_BUSY;
 	args[AAR_A_FILE_TRUNC_FD] = (uint32_t)fd;
 	args[AAR_A_FILE_TRUNC_SIZE_HI] = (uint32_t)(size >> 32);
 	args[AAR_A_FILE_TRUNC_SIZE_LO] = (uint32_t)size;
@@ -5271,10 +5503,13 @@ static int service_one_locked(zzapp_rec_t *rec)
 		return 0;
 	kicked = zzapp_xport_kick_take(rec) != 0U;
 	if (kicked || state->wait_kind != ZZAPP_WAIT_NONE || console_pending(rec) ||
-	    palette_pending(rec)) {
-		if (zzapp_xport_pump(rec) < 0)
+	    palette_pending(rec) || file_async_pending(rec)) {
+		int pump_rc = zzapp_xport_pump(rec);
+
+		if (pump_rc < 0)
 			/* The waiter finds the indices corrupt and ends. */
 			ready = 1;
+		file_async_check(rec, pump_rc);
 	}
 	console_service(rec);
 	palette_service(rec);
@@ -5332,7 +5567,7 @@ static int service_one_locked(zzapp_rec_t *rec)
 static int service_wanted(zzapp_rec_t *rec)
 {
 	return runtime_of(rec)->wait_kind != ZZAPP_WAIT_NONE ||
-	       console_pending(rec) || palette_pending(rec);
+	       console_pending(rec) || palette_pending(rec) || file_async_pending(rec);
 }
 
 static void service_pass(void)

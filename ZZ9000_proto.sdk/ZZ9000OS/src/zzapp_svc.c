@@ -918,6 +918,10 @@ static const zzapp_svc_descriptor_t api_descriptors[API_VENEERS] = {
     [API_SLOT(audio_decode_open)] = D(2, ZZAPP_SVC_RETURN_INT, OUT_U32(1), N, N),
     [API_SLOT(audio_decode)] = D(7, ZZAPP_SVC_RETURN_INT, IN_ARG_OPT(1, 2), OUT_COUNT_OPT(4, 5, 4U), OUT_OPTIONAL(6, sizeof(aar_audio_decode_result), 1U)),
     [API_SLOT(audio_decode_close)] = D(1, ZZAPP_SVC_RETURN_INT, N, N, N),
+    /* optional async files */
+    [API_SLOT(file_read_async)] = D(4, ZZAPP_SVC_RETURN_INT, OUT_ARG_OPT(1, 2), OUT_U32(3), N),
+    [API_SLOT(file_write_async)] = D(4, ZZAPP_SVC_RETURN_INT, IN_ARG_OPT(1, 2), OUT_U32(3), N),
+    [API_SLOT(file_collect)] = D(3, ZZAPP_SVC_RETURN_INT, OUT_U32(1), OUT_U32(2), N),
     /* aar_ext_zz9000.gl_bind_flags: not a table slot, the next veneer */
     [ZZAPP_SVC_EXT_GL_BIND_FLAGS] = D(2, ZZAPP_SVC_RETURN_POINTER, N, N, N)
 };

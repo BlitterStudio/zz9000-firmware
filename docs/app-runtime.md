@@ -860,6 +860,17 @@ nothing. The palette stage, the console output ring and the log slots have
 their own in-flight rules and are not held this way. `RELEASE` and an Amiga
 reset return everything. A request that could not be posted names nothing.
 
+Asynchronous file I/O has a separate request slot and uses the same data
+block. The ARM runtime posts one chunk of up to 256 KiB without parking.
+`aar_file_collect` copies a completed read chunk in the calling app's
+address space and posts the next chunk if needed. The Amiga client handles
+flagged requests with a DOS reply port so the serving loop can process
+input and display meanwhile. The block stays reserved through a read's
+completion until collection. On stop or timeout the ticket can return an
+error, but the native fd and data block stay borrowed until the matching
+late completion or release after client quiescence. Other services need
+not wait for that async file slot.
+
 All of these blocks count against the app's shared limit: `AAR_CB_SHARED_USED`
 is the sum of the transport blocks and the app's own `aar_shared_alloc` blocks
 (`zzapp_xport_publish_shared`), and an allocation is refused when the total

@@ -98,6 +98,12 @@ WEAK int zzapp_svc_event_poll(aar_event *o,uint32_t n,uint32_t *out) { (void)o;(
 WEAK int zzapp_svc_audio_open(uint32_t r,uint32_t c,aar_audio *o) { (void)r;(void)c;(void)o; return AAR_E_NOSYS; }
 WEAK int zzapp_svc_audio_close(void) { return AAR_E_NOSYS; }
 #ifdef ZZAPP_HOST_TEST
+WEAK int zzapp_svc_file_read_async(int fd, void *p, uint32_t n, uint32_t *t)
+{ (void)fd; (void)p; (void)n; (void)t; return AAR_E_NOSYS; }
+WEAK int zzapp_svc_file_write_async(int fd, const void *p, uint32_t n, uint32_t *t)
+{ (void)fd; (void)p; (void)n; (void)t; return AAR_E_NOSYS; }
+WEAK int zzapp_svc_file_collect(uint32_t t, int32_t *status, uint32_t *n)
+{ (void)t; (void)status; (void)n; return AAR_E_NOSYS; }
 WEAK int zzapp_svc_file_delete(const char *path)
 { (void)path; return AAR_E_NOSYS; }
 WEAK int zzapp_svc_file_rename(const char *from, const char *to, uint32_t flags)
@@ -1138,6 +1144,37 @@ WRAP0(api_audio_close,zzapp_svc_audio_close())
 static int api_file_open(const char *p,uint32_t f){zzapp_api_enter();int r=zzapp_svc_file_open(p,f);zzapp_api_leave();return r;}
 static int api_file_read(int f,void*p,uint32_t n,uint32_t*o){zzapp_api_enter();int r=zzapp_svc_file_read(f,p,n,o);zzapp_api_leave();return r;}
 static int api_file_write(int f,const void*p,uint32_t n,uint32_t*o){zzapp_api_enter();int r=zzapp_svc_file_write(f,p,n,o);zzapp_api_leave();return r;}
+
+static int api_file_read_async(int fd, void *buf, uint32_t len, uint32_t *ticket)
+{
+    int rc;
+
+    zzapp_api_enter();
+    rc = zzapp_svc_file_read_async(fd, buf, len, ticket);
+    zzapp_api_leave();
+    return rc;
+}
+
+static int api_file_write_async(int fd, const void *buf, uint32_t len, uint32_t *ticket)
+{
+    int rc;
+
+    zzapp_api_enter();
+    rc = zzapp_svc_file_write_async(fd, buf, len, ticket);
+    zzapp_api_leave();
+    return rc;
+}
+
+static int api_file_collect(uint32_t ticket, int32_t *status, uint32_t *out_n)
+{
+    int rc;
+
+    zzapp_api_enter();
+    rc = zzapp_svc_file_collect(ticket, status, out_n);
+    zzapp_api_leave();
+    return rc;
+}
+
 static int api_file_seek(int f,int64_t o,int w,int64_t*out){zzapp_api_enter();int r=zzapp_svc_file_seek(f,o,w,out);zzapp_api_leave();return r;}
 static int api_file_stat(const char*p,aar_stat*out){zzapp_api_enter();int r=zzapp_svc_file_stat(p,out);zzapp_api_leave();return r;}
 static int api_list_next(int l,aar_dirent*out){zzapp_api_enter();int r=zzapp_svc_file_list_next(l,out);zzapp_api_leave();return r;}
@@ -1410,7 +1447,10 @@ static const aar_api g_api_full = {
     .image_close = api_image_close,
     .audio_decode_open = api_audio_open_decode,
     .audio_decode = api_audio_decode_app,
-    .audio_decode_close = api_audio_close_decode
+    .audio_decode_close = api_audio_close_decode,
+    .file_read_async = api_file_read_async,
+    .file_write_async = api_file_write_async,
+    .file_collect = api_file_collect,
 };
 
 /* The table the apps see: `groups` follows the runtime's group mask, and
