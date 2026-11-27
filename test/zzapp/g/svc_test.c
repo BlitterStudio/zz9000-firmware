@@ -1465,6 +1465,52 @@ static void test_minor6_gl_pointer_extents(void)
     teardown_dispatch();
 }
 
+static uint32_t clip_plane_name;
+static uintptr_t clip_plane_pointer;
+#if UINTPTR_MAX == UINT32_MAX
+static double clip_plane_equation[4];
+#endif
+
+static void mock_clip_plane(uint32_t plane, const double *equation)
+{
+    clip_plane_name = plane;
+    clip_plane_pointer = (uintptr_t)equation;
+    /* The host suite otherwise uses A32 words on a 64-bit stack. */
+#if UINTPTR_MAX == UINT32_MAX
+    if (equation && clip_plane_pointer != user_va + 0xfe0U &&
+        clip_plane_pointer != user_va + 0xfe8U)
+        memcpy(clip_plane_equation, equation, sizeof(clip_plane_equation));
+#endif
+}
+
+static void test_clip_plane_copies_four_doubles(void)
+{
+    const double equation[4] = { -0.25, 1.5, 0.0, -3.0 };
+    const uint32_t clip = ZZAPP_SVC_GL_FIRST + gl_slot(offsetof(aar_gl, ClipPlane));
+    zzapp_svc_frame_t frame;
+
+    setup_dispatch();
+    if (!user_page) {
+        teardown_dispatch();
+        return;
+    }
+    gl.ClipPlane = mock_clip_plane;
+    clip_plane_name = 0U;
+    dispatch(api_slot(offsetof(aar_api, gl_bind)), &frame, (uint32_t[9]){ 1U });
+
+    /* Only three doubles remain mapped here. The callback must not run. */
+    dispatch(clip, &frame, (uint32_t[9]){ 0x3000U, user_va + 0xfe8U });
+    CHECK(frame.r[0] == (uint32_t)AAR_E_FAULT && clip_plane_name == 0U);
+    memcpy(user_page + 0xfe0U, equation, sizeof(equation));
+    dispatch(clip, &frame, (uint32_t[9]){ 0x3005U, user_va + 0xfe0U });
+    CHECK(clip_plane_name == 0x3005U);
+    CHECK(clip_plane_pointer != 0U && clip_plane_pointer != user_va + 0xfe0U);
+#if UINTPTR_MAX == UINT32_MAX
+    CHECK(memcmp(equation, clip_plane_equation, sizeof(equation)) == 0);
+#endif
+    teardown_dispatch();
+}
+
 static void test_minor6_present_timestamp_uses_both_registers(void)
 {
     zzapp_svc_frame_t frame;
@@ -2186,6 +2232,7 @@ int main(void)
     test_gl_getters_copy_full_outputs();
     test_gl_strings_survive_other_queries();
     test_minor6_gl_pointer_extents();
+    test_clip_plane_copies_four_doubles();
     test_minor6_present_timestamp_uses_both_registers();
     test_svc_number_comes_from_r12();
     test_fast_no_lock_calls();

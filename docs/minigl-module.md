@@ -110,6 +110,13 @@ from user mode.
 even after queries for other names. `GL_EXTENSIONS` returns an empty string:
 the AAR binding does not advertise the 68k MiniGL guest extensions.
 
+App GL supports six user clip planes, initially disabled.
+`glClipPlane` takes four doubles and captures the equation using the
+current modelview matrix. Use `glEnable` and `glDisable` with
+`GL_CLIP_PLANE0` through `GL_CLIP_PLANE5`. The ARM geometry stage clips
+before either the CPU or RasterIX rasterizer draws the primitive.
+This does not add clip planes to the 68k wire protocol.
+
 App GL reports `GL_STENCIL_BITS` as 0. There is no stencil buffer, and the
 app's `glStencil*` calls have no effect.
 

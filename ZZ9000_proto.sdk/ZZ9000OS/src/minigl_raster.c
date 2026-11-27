@@ -125,10 +125,20 @@ typedef struct Vertex {
     float y;
     float z;
     float w;
-    float inv_w;
-    float sx;
-    float sy;
-    float sz;
+    /* Pre-projection scratch.  project() writes inv_w/sx/sy/sz from the clip
+     * coordinates; until then no stage reads them.  A wire-v9 draw with user
+     * clip planes enabled (g_user_clip_mask != 0) parks the homogeneous eye
+     * position here so clipping crossings interpolate it without growing
+     * Vertex.  With no planes enabled nothing writes or reads eye. */
+    union {
+        struct {
+            float inv_w;
+            float sx;
+            float sy;
+            float sz;
+        };
+        float eye[4];
+    };
     float u0;
     float v0;
     float q0;
@@ -179,6 +189,8 @@ static int g_mvp_neon_ok;
 #endif
 static const mw_state *g_mw_state = NULL;
 static uint32_t g_clip_start_cycle;
+/* Nonzero only during a wire-v9 assembly. Legacy draws use the frustum. */
+static unsigned g_user_clip_mask;
 
 /* Charges the clip stage once per primitive_triangle start.  Points and
  * lines reach triangle_fill without one; 0 means nothing is pending. */
@@ -747,6 +759,8 @@ int minigl_raster_finish(void)
 
 void minigl_raster_abandon(void)
 {
+    g_user_clip_mask = 0U;
+    g_mw_state = NULL;
     g_rix_abandoned = 1;
     minigl_rix_backend_abandon(&g_rix);
 }
@@ -1530,8 +1544,14 @@ static Vertex lerp_vertex(const Vertex *a, const Vertex *b, float amount)
     out.y = a->y + (b->y - a->y) * amount;
     out.z = a->z + (b->z - a->z) * amount;
     out.w = a->w + (b->w - a->w) * amount;
-    out.inv_w = 0.0f;
-    out.sx = out.sy = out.sz = 0.0f;
+    if (g_user_clip_mask) {
+        unsigned i;
+
+        for (i = 0U; i < 4U; ++i)
+            out.eye[i] = a->eye[i] + (b->eye[i] - a->eye[i]) * amount;
+    } else {
+        out.inv_w = out.sx = out.sy = out.sz = 0.0f;
+    }
     out.u0 = a->u0 + (b->u0 - a->u0) * amount;
     out.v0 = a->v0 + (b->v0 - a->v0) * amount;
     out.q0 = a->q0 + (b->q0 - a->q0) * amount;
@@ -1546,6 +1566,14 @@ static Vertex lerp_vertex(const Vertex *a, const Vertex *b, float amount)
     return out;
 }
 
+static inline float user_clip_distance(const Vertex *vertex, unsigned index)
+{
+    const float *equation = g_mw_state->user_clip_plane[index];
+
+    return equation[0] * vertex->eye[0] + equation[1] * vertex->eye[1] +
+           equation[2] * vertex->eye[2] + equation[3] * vertex->eye[3];
+}
+
 static float plane(const Vertex *vertex, unsigned index)
 {
     switch (index) {
@@ -1554,7 +1582,8 @@ static float plane(const Vertex *vertex, unsigned index)
     case 2U: return vertex->y + vertex->w;
     case 3U: return vertex->w - vertex->y;
     case 4U: return vertex->z + vertex->w;
-    default: return vertex->w - vertex->z;
+    case 5U: return vertex->w - vertex->z;
+    default: return user_clip_distance(vertex, index - 6U);
     }
 }
 static inline unsigned vertex_outcode(const Vertex *v)
@@ -1570,6 +1599,12 @@ static inline unsigned vertex_outcode(const Vertex *v)
     if (w - y < 0.0f) code |= 1U << 3;
     if (z + w < 0.0f) code |= 1U << 4;
     if (w - z < 0.0f) code |= 1U << 5;
+    for (unsigned mask = g_user_clip_mask; mask; mask &= mask - 1U) {
+        unsigned index = (unsigned)__builtin_ctz(mask);
+
+        if (!(user_clip_distance(v, index) >= 0.0f))
+            code |= 1U << (6U + index);
+    }
     return code;
 }
 
@@ -1578,30 +1613,31 @@ static unsigned clip_polygon(const Vertex *in, unsigned count, Vertex *out)
 {
     Vertex first[CLIP_MAX_VERTICES];
     Vertex second[CLIP_MAX_VERTICES];
-    unsigned plane_index;
+    const Vertex *source = in;
+    Vertex *target = first;
+    unsigned any = 0U;
+    unsigned all = 63U | (g_user_clip_mask << 6U);
     unsigned index;
 
     if (count < 2U || count + 6U > CLIP_MAX_VERTICES) {
         g_error |= RASTER_ERR_MEMORY;
         return 0U;
     }
-    {
-        unsigned any = 0U;
-        unsigned all = 63U;
-        for (index = 0U; index < count; ++index) {
-            unsigned code = vertex_outcode(&in[index]);
-            any |= code;
-            all &= code;
-        }
-        if (all) return 0U;
-        if (!any) { memcpy(out, in, count * sizeof(*out)); return count; }
+    for (index = 0U; index < count; ++index) {
+        unsigned code = vertex_outcode(&in[index]);
+        any |= code;
+        all &= code;
     }
-    memcpy(first, in, count * sizeof(*in));
-    for (plane_index = 0U; plane_index < 6U; ++plane_index) {
+    if (all)
+        return 0U;
+    while (any) {
+        unsigned plane_index = (unsigned)__builtin_ctz(any);
         unsigned result_count = 0U;
+
+        any &= any - 1U;
         for (index = 0U; index < count; ++index) {
-            const Vertex *start = &first[index];
-            const Vertex *end = &first[(index + 1U) % count];
+            const Vertex *start = &source[index];
+            const Vertex *end = &source[(index + 1U) % count];
             float start_distance = plane(start, plane_index);
             float end_distance = plane(end, plane_index);
             int start_inside = start_distance >= 0.0f;
@@ -1612,24 +1648,26 @@ static unsigned clip_polygon(const Vertex *in, unsigned count, Vertex *out)
                     g_error |= RASTER_ERR_MEMORY;
                     return 0U;
                 }
-                second[result_count++] = *start;
+                target[result_count++] = *start;
             }
             if (start_inside != end_inside) {
                 if (result_count >= CLIP_MAX_VERTICES) {
                     g_error |= RASTER_ERR_MEMORY;
                     return 0U;
                 }
-                second[result_count++] = lerp_vertex(start, end, start_distance / (start_distance - end_distance));
+                target[result_count++] = lerp_vertex(start, end, start_distance / (start_distance - end_distance));
             }
         }
-        memcpy(first, second, result_count * sizeof(*first));
+        source = target;
+        target = target == first ? second : first;
         count = result_count;
         if (!count)
             break;
     }
-    memcpy(out, first, count * sizeof(*out));
+    memcpy(out, source, count * sizeof(*out));
     return count;
 }
+
 
 static int project(Vertex *vertex)
 {
@@ -1939,10 +1977,12 @@ static uint32_t polygon_offset_flag(uint16_t mode)
     }
 }
 
-static float polygon_offset_bias(const Vertex *a, const Vertex *b, const Vertex *c)
+static float polygon_offset_bias(const Vertex *a, const Vertex *b, const Vertex *c,
+                                 uint16_t mode)
 {
-    uint16_t mode = g_state.polygon_mode ? g_state.polygon_mode : GL_FILL;
-    uint32_t flag = polygon_offset_flag(mode);
+    uint32_t flag = mode ? polygon_offset_flag(mode) :
+        (ZZ9K_MGL_STATE_POLYGON_OFFSET_FILL | ZZ9K_MGL_STATE_POLYGON_OFFSET_LINE |
+         ZZ9K_MGL_STATE_POLYGON_OFFSET_POINT);
     float units;
     float area;
     float scale;
@@ -1983,7 +2023,7 @@ static float polygon_offset_polygon(const Vertex *vertices, unsigned count)
         return g_polygon_offset_units;
     for (index = 2U; index < count; ++index)
         if (edge(&vertices[0], &vertices[index - 1U], vertices[index].sx, vertices[index].sy) != 0.0f)
-            return polygon_offset_bias(&vertices[0], &vertices[index - 1U], &vertices[index]);
+            return polygon_offset_bias(&vertices[0], &vertices[index - 1U], &vertices[index], mode);
     return g_polygon_offset_units;
 }
 static inline int clamp_coord(int value, int max_val)
@@ -2789,13 +2829,67 @@ static void primitive_line(const Vertex *first, const Vertex *second)
 static void primitive_point(const Vertex *vertex)
 {
     Vertex projected = *vertex;
-    unsigned index;
 
-    for (index = 0U; index < 6U; ++index)
-        if (plane(&projected, index) < 0.0f)
-            return;
+    if (vertex_outcode(vertex))
+        return;
     if (project(&projected))
         point_screen(&projected, 0.0f);
+}
+
+/* Segments are clipped parametrically, not as a 2-gon: polygon clipping of
+ * a segment whose first endpoint is outside returns two copies of the same
+ * crossing. */
+static void primitive_line_user(const Vertex *first, const Vertex *second)
+{
+    Vertex clipped[2];
+    unsigned any = vertex_outcode(first);
+    unsigned second_code = vertex_outcode(second);
+    float t0 = 0.0f;
+    float t1 = 1.0f;
+
+    if (any & second_code)
+        return;
+    any |= second_code;
+    while (any) {
+        unsigned stage = (unsigned)__builtin_ctz(any);
+        float d0;
+        float d1;
+        float t;
+        int inside0;
+        int inside1;
+
+        any &= any - 1U;
+        d0 = plane(first, stage);
+        d1 = plane(second, stage);
+        inside0 = d0 >= 0.0f;
+        inside1 = d1 >= 0.0f;
+        if (inside0 && inside1)
+            continue;
+        if (!inside0 && !inside1)
+            return;
+        t = d0 / (d0 - d1);
+        if (!isfinite(t))
+            return;
+        if (!inside0) {
+            if (t > t0) t0 = t;
+        } else if (t < t1) {
+            t1 = t;
+        }
+        if (t0 > t1)
+            return;
+    }
+    clipped[0] = t0 > 0.0f ? lerp_vertex(first, second, t0) : *first;
+    clipped[1] = t1 < 1.0f ? lerp_vertex(first, second, t1) : *second;
+    clipped[0].flat_color = clipped[1].flat_color = second->color;
+    if (!project(&clipped[0]) || !project(&clipped[1]))
+        return;
+    line_screen(&clipped[0], &clipped[1], 0.0f);
+}
+
+static void v9_line(const Vertex *first, const Vertex *second)
+{
+    if (g_user_clip_mask) primitive_line_user(first, second);
+    else primitive_line(first, second);
 }
 
 static uint32_t index_at(const uint8_t *indices, uint32_t first, uint32_t index)
@@ -2820,9 +2914,12 @@ static int fetch_indexed(uint16_t stride, uint32_t base, const uint8_t *indices,
 }
 
 typedef struct PolygonStream {
-    Vertex first[6];
-    Vertex last[6];
-    uint8_t seen[6];
+    Vertex *first;
+    Vertex *last;
+    unsigned planes;
+    unsigned seen, first_edges, last_edges;
+    int anchor_edge, previous_edge;
+    uint16_t mode;
     Vertex anchor;
     Vertex previous;
     unsigned count;
@@ -2835,87 +2932,132 @@ typedef struct PolygonStream {
     int measure;
 } PolygonStream;
 
-static void polygon_stream_emit(PolygonStream *stream, unsigned stage, const Vertex *input)
+static void polygon_stream_boundary(const PolygonStream *stream,
+                                    const Vertex *a, const Vertex *b)
 {
-    Vertex vertex = *input;
-    if (stage < 6U) {
-        if (!stream->seen[stage]) {
-            stream->first[stage] = vertex;
-            stream->last[stage] = vertex;
-            stream->seen[stage] = 1U;
-            return;
-        }
-        {
-            Vertex *last = &stream->last[stage];
+    if (stream->mode == GL_POINT)
+        point_screen(a, stream->depth_bias);
+    else if (stream->mode == GL_LINE)
+        line_screen(a, b, stream->depth_bias);
+}
+
+static void polygon_stream_emit(PolygonStream *stream, unsigned planes,
+                                const Vertex *input, int boundary)
+{
+    if (planes) {
+        unsigned stage = (unsigned)__builtin_ctz(planes);
+        unsigned bit = 1U << stage;
+        Vertex *last = &stream->last[stage];
+
+        if (stream->seen & bit) {
             float da = plane(last, stage);
-            float db = plane(&vertex, stage);
-            if (da >= 0.0f)
-                polygon_stream_emit(stream, stage + 1U, last);
-            if ((da >= 0.0f) != (db >= 0.0f)) {
-                Vertex crossing = lerp_vertex(last, &vertex, da / (da - db));
-                polygon_stream_emit(stream, stage + 1U, &crossing);
+            float db = plane(input, stage);
+            int inside = da >= 0.0f;
+            int last_boundary = (stream->last_edges & bit) != 0U;
+
+            planes &= planes - 1U;
+            if (inside)
+                polygon_stream_emit(stream, planes, last, last_boundary);
+            if (inside != (db >= 0.0f)) {
+                Vertex crossing = lerp_vertex(last, input, da / (da - db));
+
+                /* Leaving the half-space starts a new boundary edge.
+                 * Entering it continues the original edge. */
+                polygon_stream_emit(stream, planes, &crossing, inside || last_boundary);
             }
-            *last = vertex;
+        } else {
+            stream->first[stage] = *input;
+            stream->seen |= bit;
+            if (boundary)
+                stream->first_edges |= bit;
         }
+        *last = *input;
+        stream->last_edges = (stream->last_edges & ~bit) | (boundary ? bit : 0U);
         return;
     }
+
+    Vertex vertex = *input;
     if (!project(&vertex)) { stream->rejected = 1; return; }
     vertex.flat_color = stream->flat_color;
-    if (stream->count == 0U) stream->anchor = vertex;
-    else if (stream->count >= 2U) {
+    if (stream->count == 0U) {
+        stream->anchor = vertex;
+        stream->anchor_edge = boundary;
+    } else if (stream->count >= 2U) {
         float area = edge(&stream->anchor, &stream->previous, vertex.sx, vertex.sy);
         stream->area += area;
         if (!stream->depth_bias_ready &&
             (g_state.polygon_offset_factor == 0.0f ||
-             !(g_state.enabled_flags & polygon_offset_flag(g_state.polygon_mode ?
-                                                      g_state.polygon_mode : GL_FILL)) ||
+             (stream->mode && !(g_state.enabled_flags & polygon_offset_flag(stream->mode))) ||
              area != 0.0f)) {
-            stream->depth_bias = polygon_offset_bias(&stream->anchor, &stream->previous, &vertex);
+            stream->depth_bias = polygon_offset_bias(&stream->anchor, &stream->previous,
+                                                     &vertex, stream->mode);
             stream->depth_bias_ready = 1;
         }
         if (stream->count == 2U) {
-
             stream->anchor.color = stream->front ? stream->anchor.front_color : stream->anchor.back_color;
             stream->previous.color = stream->front ? stream->previous.front_color : stream->previous.back_color;
-            if (!stream->measure && !stream->rejected) {
-                if (g_state.polygon_mode == GL_POINT) { point_screen(&stream->anchor, stream->depth_bias); point_screen(&stream->previous, stream->depth_bias); }
-                else if (g_state.polygon_mode == GL_LINE) line_screen(&stream->anchor, &stream->previous, stream->depth_bias);
-            }
+            if (!stream->measure && !stream->rejected && stream->anchor_edge)
+                polygon_stream_boundary(stream, &stream->anchor, &stream->previous);
         }
         vertex.color = stream->front ? vertex.front_color : vertex.back_color;
         if (!stream->measure && !stream->rejected) {
-            if (g_state.polygon_mode == GL_POINT) point_screen(&vertex, stream->depth_bias);
-            else if (g_state.polygon_mode == GL_LINE) line_screen(&stream->previous, &vertex, stream->depth_bias);
-            else triangle_fill(&stream->anchor, &stream->previous, &vertex, stream->depth_bias);
+            if (stream->mode == GL_FILL)
+                triangle_fill(&stream->anchor, &stream->previous, &vertex, stream->depth_bias);
+            else if (stream->previous_edge)
+                polygon_stream_boundary(stream, &stream->previous, &vertex);
         }
     }
     stream->previous = vertex;
+    stream->previous_edge = boundary;
     ++stream->count;
 }
 
 static void polygon_stream_finish(PolygonStream *stream)
 {
-    unsigned stage;
-    for (stage = 0U; stage < 6U; ++stage)
-        if (stream->seen[stage]) {
-            Vertex first = stream->first[stage];
-            polygon_stream_emit(stream, stage, &first);
-        }
-    if (!stream->measure && !stream->rejected && stream->count >= 3U && g_state.polygon_mode == GL_LINE)
-        line_screen(&stream->previous, &stream->anchor, stream->depth_bias);
+    for (unsigned planes = stream->planes; planes; planes &= planes - 1U) {
+        unsigned stage = (unsigned)__builtin_ctz(planes);
+        unsigned bit = 1U << stage;
+
+        if (stream->seen & bit)
+            polygon_stream_emit(stream, planes, &stream->first[stage],
+                                (stream->first_edges & bit) != 0U);
+    }
+    if (!stream->measure && !stream->rejected && stream->count >= 3U &&
+        stream->previous_edge)
+        polygon_stream_boundary(stream, &stream->previous, &stream->anchor);
+}
+
+static int polygon_stream_visible(const PolygonStream *stream, int *front)
+{
+    uint16_t face = g_state.cull_face_mode ? g_state.cull_face_mode : GL_BACK;
+
+    if (stream->rejected || stream->count < 3U ||
+        fabsf(stream->area) < 2.0f * g_state.min_triangle_area)
+        return 0;
+    *front = (g_state.front_face ? g_state.front_face : GL_CCW) == GL_CCW ?
+             stream->area < 0.0f : stream->area > 0.0f;
+    return !(g_state.enabled_flags & ZZ9K_MGL_STATE_CULL_FACE) ||
+           (face != GL_FRONT_AND_BACK && !(*front && face == GL_FRONT) &&
+            !(!*front && face == GL_BACK));
 }
 
 static void large_polygon(uint16_t stride, uint32_t base, const uint8_t *indices,
                           uint32_t first, uint32_t count)
 {
     PolygonStream stream;
+    Vertex first_clip[6], last_clip[6];
     uint32_t index;
     unsigned pass;
     float depth_bias = 0.0f;
     int depth_bias_ready = 0;
     int front = 0;
+    uint16_t mode = g_state.polygon_mode ? g_state.polygon_mode : GL_FILL;
     for (pass = 0U; pass < 2U; ++pass) {
         memset(&stream, 0, sizeof(stream));
+        stream.first = first_clip;
+        stream.last = last_clip;
+        stream.planes = 63U;
+        stream.mode = mode;
         stream.measure = pass == 0U;
         stream.front = front;
         stream.depth_bias = depth_bias;
@@ -2924,22 +3066,19 @@ static void large_polygon(uint16_t stride, uint32_t base, const uint8_t *indices
             Vertex vertex;
             if (!fetch_indexed(stride, base, indices, first, index, &vertex)) return;
             if (index == 0U) stream.flat_color = vertex.color;
-            polygon_stream_emit(&stream, 0U, &vertex);
+            polygon_stream_emit(&stream, stream.planes, &vertex, 1);
         }
         polygon_stream_finish(&stream);
         if (pass == 0U && !stream.depth_bias_ready && stream.count >= 2U) {
-            stream.depth_bias = polygon_offset_bias(&stream.anchor, &stream.previous, &stream.previous);
+            stream.depth_bias = polygon_offset_bias(&stream.anchor, &stream.previous,
+                                                    &stream.previous, stream.mode);
             stream.depth_bias_ready = 1;
         }
         if (pass == 0U) {
-            uint16_t face = g_state.cull_face_mode ? g_state.cull_face_mode : GL_BACK;
             depth_bias = stream.depth_bias;
             depth_bias_ready = stream.depth_bias_ready;
-            if (stream.rejected || stream.count < 3U ||
-                fabsf(stream.area) < 2.0f * g_state.min_triangle_area) return;
-            front = (g_state.front_face ? g_state.front_face : GL_CCW) == GL_CCW ? stream.area < 0.0f : stream.area > 0.0f;
-            if ((g_state.enabled_flags & ZZ9K_MGL_STATE_CULL_FACE) &&
-                (face == GL_FRONT_AND_BACK || (front && face == GL_FRONT) || (!front && face == GL_BACK))) return;
+            if (!polygon_stream_visible(&stream, &front))
+                return;
         }
     }
 }
@@ -3048,6 +3187,9 @@ static void assemble(uint16_t mode, uint16_t stride, uint32_t base, const uint8_
 void minigl_raster_init(void)
 {
     unsigned index;
+
+    g_user_clip_mask = 0U;
+    g_mw_state = NULL;
 
     /* Wire-v9 contexts supply all renderer storage before initialization.
      * Never resurrect the retired MGL5 fixed DDR staging window here. */
@@ -4013,13 +4155,15 @@ static void v9_vert_convert(const float *v, Vertex *out)
     out->w = clip[3];
 
     float eye[4] = {0};
-    if (g_need_eye) {
+    if (g_need_eye || g_user_clip_mask) {
         const float *mv = g_matrix[0];
         eye[0] = v[0] * mv[0] + v[1] * mv[4] + v[2] * mv[8] + v[3] * mv[12];
         eye[1] = v[0] * mv[1] + v[1] * mv[5] + v[2] * mv[9] + v[3] * mv[13];
         eye[2] = v[0] * mv[2] + v[1] * mv[6] + v[2] * mv[10] + v[3] * mv[14];
         eye[3] = v[0] * mv[3] + v[1] * mv[7] + v[2] * mv[11] + v[3] * mv[15];
-        out->fog_coord = (eye[3] != 0.0f) ? fabsf(eye[2] / eye[3]) : 0.0f;
+        out->fog_coord = (g_need_eye && eye[3] != 0.0f) ? fabsf(eye[2] / eye[3]) : 0.0f;
+        if (g_user_clip_mask)
+            memcpy(out->eye, eye, sizeof(out->eye));
     } else {
         out->fog_coord = 0.0f;
     }
@@ -4136,14 +4280,91 @@ static int v9_mask_edge(const uint32_t *mask, size_t i)
     return (mw_be32((const uint8_t *)mask + (i / 32) * 4) & (1U << (i % 32))) != 0;
 }
 
-static void assemble_wire_v9(uint16_t mode, const float *object_vertices,
-                             uint32_t count, uint32_t flags,
-                             const uint32_t *edge_mask)
+#define V9_POLYGON_STYLE_MASK ((3U << MW_LOWERED_FRONT_SHIFT) | (3U << MW_LOWERED_BACK_SHIFT))
+
+/* A lowered polygon must reach the clipper before its boundary becomes
+ * points or lines. Streaming keeps large GL_POLYGON chunks bounded and
+ * carries their edge masks across both original and newly clipped edges. */
+static void v9_clipped_polygon(const float *vertices, const uint32_t *indices,
+                               unsigned count, uint32_t provoking, uint32_t flags,
+                               const uint32_t *edge_mask)
+{
+    Vertex first[6U + MW_USER_CLIP_PLANES], last[6U + MW_USER_CLIP_PLANES];
+    uint32_t flat_color = 0;
+    uint16_t mode = 0;
+    float depth_bias = 0.0f;
+    int front = 0;
+
+    for (unsigned pass = 0; pass < 2; ++pass) {
+        PolygonStream stream = {
+            .first = first, .last = last, .planes = 63U | (g_user_clip_mask << 6U),
+            .mode = mode, .front = front, .measure = pass == 0U,
+            .flat_color = flat_color, .depth_bias = depth_bias,
+            .depth_bias_ready = pass != 0U
+        };
+
+        for (unsigned i = 0; i < count; ++i) {
+            uint32_t index = indices ? indices[i] : i;
+            Vertex vertex;
+
+            v9_vert_convert(vertices + index * MW_OBJECT_WORDS, &vertex);
+            if (stream.measure && index == provoking)
+                flat_color = vertex.color;
+            polygon_stream_emit(&stream, stream.planes, &vertex, v9_mask_edge(edge_mask, index));
+        }
+        polygon_stream_finish(&stream);
+        if (stream.measure) {
+            unsigned style;
+
+            if (!polygon_stream_visible(&stream, &front))
+                return;
+            style = (flags >> (front ? MW_LOWERED_FRONT_SHIFT : MW_LOWERED_BACK_SHIFT)) & 3U;
+            mode = style == 1U ? GL_POINT : style == 2U ? GL_LINE : GL_FILL;
+            if (g_state.enabled_flags & polygon_offset_flag(mode))
+                depth_bias = stream.depth_bias_ready ? stream.depth_bias : g_polygon_offset_units;
+        }
+    }
+}
+
+static void v9_clipped_lowered(uint16_t mode, const float *vertices, uint32_t count,
+                              uint32_t flags, const uint32_t *edge_mask)
+{
+    if (mode == GL_POLYGON) {
+        v9_clipped_polygon(vertices, NULL, count, 0U, flags, edge_mask);
+        return;
+    }
+    uint32_t group = mode == GL_QUADS || mode == GL_QUAD_STRIP ? 4U : 3U;
+    uint32_t step = mode == GL_QUAD_STRIP ? 2U :
+        mode == GL_TRIANGLE_STRIP || mode == GL_TRIANGLE_FAN ? 1U : group;
+    for (uint32_t i = 0; i + group <= count; i += step) {
+        uint32_t indices[4] = { i, i + 1U, i + 2U, i + 3U };
+
+        if (mode == GL_TRIANGLE_STRIP && (i & 1U)) {
+            indices[0] = i + 1U;
+            indices[1] = i;
+        } else if (mode == GL_TRIANGLE_FAN) {
+            indices[0] = 0;
+        } else if (mode == GL_QUAD_STRIP) {
+            indices[2] = i + 3U;
+            indices[3] = i + 2U;
+        }
+        v9_clipped_polygon(vertices, indices, group, i + group - 1U, flags, edge_mask);
+    }
+}
+
+static void assemble_wire_v9_prims(uint16_t mode, const float *object_vertices,
+                                   uint32_t count, uint32_t flags,
+                                   const uint32_t *edge_mask)
 {
     uint32_t i;
     Vertex a, b, c, d;
     g_need_eye = vert_needs_eye();
     g_need_normal = vert_needs_normal();
+
+    if (g_user_clip_mask && (flags & V9_POLYGON_STYLE_MASK) && mode >= GL_TRIANGLES) {
+        v9_clipped_lowered(mode, object_vertices, count, flags, edge_mask);
+        return;
+    }
 
     if (flags != 0 && count >= 3 && mode >= GL_TRIANGLES) {
         float area = mw_clipped_area(g_mvp, (float)g_state.viewport_w, (float)g_state.viewport_h,
@@ -4173,17 +4394,17 @@ static void assemble_wire_v9(uint16_t mode, const float *object_vertices,
                     if (v9_mask_edge(edge_mask, i)) {
                         v9_vert_convert(object_vertices + i * MW_OBJECT_WORDS, &a);
                         v9_vert_convert(object_vertices + (i + 1) * MW_OBJECT_WORDS, &b);
-                        primitive_line(&a, &b);
+                        v9_line(&a, &b);
                     }
                     if (v9_mask_edge(edge_mask, i + 1)) {
                         v9_vert_convert(object_vertices + (i + 1) * MW_OBJECT_WORDS, &a);
                         v9_vert_convert(object_vertices + (i + 2) * MW_OBJECT_WORDS, &b);
-                        primitive_line(&a, &b);
+                        v9_line(&a, &b);
                     }
                     if (v9_mask_edge(edge_mask, i + 2)) {
                         v9_vert_convert(object_vertices + (i + 2) * MW_OBJECT_WORDS, &a);
                         v9_vert_convert(object_vertices + i * MW_OBJECT_WORDS, &b);
-                        primitive_line(&a, &b);
+                        v9_line(&a, &b);
                     }
                 }
             } else if (mode == GL_TRIANGLE_STRIP) {
@@ -4193,17 +4414,17 @@ static void assemble_wire_v9(uint16_t mode, const float *object_vertices,
                     if (v9_mask_edge(edge_mask, p)) {
                         v9_vert_convert(object_vertices + p * MW_OBJECT_WORDS, &a);
                         v9_vert_convert(object_vertices + q * MW_OBJECT_WORDS, &b);
-                        primitive_line(&a, &b);
+                        v9_line(&a, &b);
                     }
                     if (v9_mask_edge(edge_mask, q)) {
                         v9_vert_convert(object_vertices + q * MW_OBJECT_WORDS, &a);
                         v9_vert_convert(object_vertices + i * MW_OBJECT_WORDS, &b);
-                        primitive_line(&a, &b);
+                        v9_line(&a, &b);
                     }
                     if (v9_mask_edge(edge_mask, i)) {
                         v9_vert_convert(object_vertices + i * MW_OBJECT_WORDS, &a);
                         v9_vert_convert(object_vertices + p * MW_OBJECT_WORDS, &b);
-                        primitive_line(&a, &b);
+                        v9_line(&a, &b);
                     }
                 }
             } else if (mode == GL_TRIANGLE_FAN) {
@@ -4211,17 +4432,17 @@ static void assemble_wire_v9(uint16_t mode, const float *object_vertices,
                     if (v9_mask_edge(edge_mask, 0)) {
                         v9_vert_convert(object_vertices, &a);
                         v9_vert_convert(object_vertices + (i - 1) * MW_OBJECT_WORDS, &b);
-                        primitive_line(&a, &b);
+                        v9_line(&a, &b);
                     }
                     if (v9_mask_edge(edge_mask, i - 1)) {
                         v9_vert_convert(object_vertices + (i - 1) * MW_OBJECT_WORDS, &a);
                         v9_vert_convert(object_vertices + i * MW_OBJECT_WORDS, &b);
-                        primitive_line(&a, &b);
+                        v9_line(&a, &b);
                     }
                     if (v9_mask_edge(edge_mask, i)) {
                         v9_vert_convert(object_vertices + i * MW_OBJECT_WORDS, &a);
                         v9_vert_convert(object_vertices, &b);
-                        primitive_line(&a, &b);
+                        v9_line(&a, &b);
                     }
                 }
             } else if (mode == GL_QUADS) {
@@ -4229,22 +4450,22 @@ static void assemble_wire_v9(uint16_t mode, const float *object_vertices,
                     if (v9_mask_edge(edge_mask, i)) {
                         v9_vert_convert(object_vertices + i * MW_OBJECT_WORDS, &a);
                         v9_vert_convert(object_vertices + (i + 1) * MW_OBJECT_WORDS, &b);
-                        primitive_line(&a, &b);
+                        v9_line(&a, &b);
                     }
                     if (v9_mask_edge(edge_mask, i + 1)) {
                         v9_vert_convert(object_vertices + (i + 1) * MW_OBJECT_WORDS, &a);
                         v9_vert_convert(object_vertices + (i + 2) * MW_OBJECT_WORDS, &b);
-                        primitive_line(&a, &b);
+                        v9_line(&a, &b);
                     }
                     if (v9_mask_edge(edge_mask, i + 2)) {
                         v9_vert_convert(object_vertices + (i + 2) * MW_OBJECT_WORDS, &a);
                         v9_vert_convert(object_vertices + (i + 3) * MW_OBJECT_WORDS, &b);
-                        primitive_line(&a, &b);
+                        v9_line(&a, &b);
                     }
                     if (v9_mask_edge(edge_mask, i + 3)) {
                         v9_vert_convert(object_vertices + (i + 3) * MW_OBJECT_WORDS, &a);
                         v9_vert_convert(object_vertices + i * MW_OBJECT_WORDS, &b);
-                        primitive_line(&a, &b);
+                        v9_line(&a, &b);
                     }
                 }
             } else if (mode == GL_QUAD_STRIP) {
@@ -4252,22 +4473,22 @@ static void assemble_wire_v9(uint16_t mode, const float *object_vertices,
                     if (v9_mask_edge(edge_mask, i)) {
                         v9_vert_convert(object_vertices + i * MW_OBJECT_WORDS, &a);
                         v9_vert_convert(object_vertices + (i + 1) * MW_OBJECT_WORDS, &b);
-                        primitive_line(&a, &b);
+                        v9_line(&a, &b);
                     }
                     if (v9_mask_edge(edge_mask, i + 1)) {
                         v9_vert_convert(object_vertices + (i + 1) * MW_OBJECT_WORDS, &a);
                         v9_vert_convert(object_vertices + (i + 3) * MW_OBJECT_WORDS, &b);
-                        primitive_line(&a, &b);
+                        v9_line(&a, &b);
                     }
                     if (v9_mask_edge(edge_mask, i + 3)) {
                         v9_vert_convert(object_vertices + (i + 3) * MW_OBJECT_WORDS, &a);
                         v9_vert_convert(object_vertices + (i + 2) * MW_OBJECT_WORDS, &b);
-                        primitive_line(&a, &b);
+                        v9_line(&a, &b);
                     }
                     if (v9_mask_edge(edge_mask, i + 2)) {
                         v9_vert_convert(object_vertices + (i + 2) * MW_OBJECT_WORDS, &a);
                         v9_vert_convert(object_vertices + i * MW_OBJECT_WORDS, &b);
-                        primitive_line(&a, &b);
+                        v9_line(&a, &b);
                     }
                 }
             } else if (mode == GL_POLYGON) {
@@ -4276,7 +4497,7 @@ static void assemble_wire_v9(uint16_t mode, const float *object_vertices,
                     if (v9_mask_edge(edge_mask, i)) {
                         v9_vert_convert(object_vertices + i * MW_OBJECT_WORDS, &a);
                         v9_vert_convert(object_vertices + next * MW_OBJECT_WORDS, &b);
-                        primitive_line(&a, &b);
+                        v9_line(&a, &b);
                     }
                 }
             }
@@ -4309,7 +4530,7 @@ static void assemble_wire_v9(uint16_t mode, const float *object_vertices,
         for (i = 1; i < count; i += 2) {
             v9_vert_convert(object_vertices + (i - 1) * MW_OBJECT_WORDS, &a);
             v9_vert_convert(object_vertices + i * MW_OBJECT_WORDS, &b);
-            primitive_line(&a, &b);
+            v9_line(&a, &b);
         }
         return;
     }
@@ -4318,12 +4539,12 @@ static void assemble_wire_v9(uint16_t mode, const float *object_vertices,
         for (i = 1; i < count; ++i) {
             v9_vert_convert(object_vertices + (i - 1) * MW_OBJECT_WORDS, &a);
             v9_vert_convert(object_vertices + i * MW_OBJECT_WORDS, &b);
-            primitive_line(&a, &b);
+            v9_line(&a, &b);
         }
         if (mode == GL_LINE_LOOP && count > 2) {
             v9_vert_convert(object_vertices + (count - 1) * MW_OBJECT_WORDS, &a);
             v9_vert_convert(object_vertices, &b);
-            primitive_line(&a, &b);
+            v9_line(&a, &b);
         }
         return;
     }
@@ -4411,6 +4632,17 @@ static void assemble_wire_v9(uint16_t mode, const float *object_vertices,
     }
 }
 
+/* RasterIX collection and CPU fallback both go through this assembly. */
+static void assemble_wire_v9(uint16_t mode, const float *object_vertices,
+                             uint32_t count, uint32_t flags,
+                             const uint32_t *edge_mask)
+{
+    g_user_clip_mask = g_mw_state ?
+        g_mw_state->user_clip_mask & ((1U << MW_USER_CLIP_PLANES) - 1U) : 0U;
+    assemble_wire_v9_prims(mode, object_vertices, count, flags, edge_mask);
+    g_user_clip_mask = 0U;
+}
+
 void minigl_raster_draw_wire_v9(uint16_t mode, const float *object_vertices,
                                 uint32_t count, uint32_t flags,
                                 const uint32_t *edge_mask)
@@ -4426,7 +4658,12 @@ void minigl_raster_draw_wire_v9(uint16_t mode, const float *object_vertices,
         minigl_rix_backend_log_context_backend(&g_rix);
     }
 
-    if (flags != 0 && count >= 3 && mode >= GL_TRIANGLES) {
+    if (g_mw_state && g_mw_state->user_clip_mask && (flags & V9_POLYGON_STYLE_MASK) &&
+        mode >= GL_TRIANGLES) {
+        /* Select front/back mode after clipping. A mixed-mode draw may
+         * contain outlines, which RasterIX cannot render as polygons. */
+        style = 1U;
+    } else if (flags != 0 && count >= 3 && mode >= GL_TRIANGLES) {
         float area = mw_clipped_area(g_mvp, (float)g_state.viewport_w, (float)g_state.viewport_h,
                                      object_vertices, object_vertices + MW_OBJECT_WORDS,
                                      object_vertices + 2 * MW_OBJECT_WORDS);

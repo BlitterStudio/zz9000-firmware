@@ -68,6 +68,8 @@ typedef struct mw_texgen_state {
     float    eye_plane_t[4];
 } mw_texgen_state;
 
+#define MW_USER_CLIP_PLANES 6U
+
 typedef struct mw_state {
     mw_target_state target;
 
@@ -77,6 +79,10 @@ typedef struct mw_state {
     int32_t  scissor_x, scissor_y;
     uint32_t scissor_w, scissor_h;
     uint8_t  scissor_enabled;
+
+    /* Eye-space planes for the native app binding; not part of wire v9. */
+    float    user_clip_plane[MW_USER_CLIP_PLANES][4];
+    uint8_t  user_clip_mask;
 
     /* Clear values */
     float    clear_color[4];

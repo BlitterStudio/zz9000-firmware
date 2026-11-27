@@ -5,6 +5,7 @@
  * The front end is compiled in from MINIGL_LIB_DIR with -DMGL_PLATFORM_ZZARM.
  * This file does not include amiberry_backend.c, amiberry_glu_quad.c, or vendor/.
  */
+#include <math.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
@@ -22,7 +23,7 @@
 #include "minigl_renderer.h"
 #include "mw_ctx.h"
 #include "mw_types.h"
-#include "amiberry_types.h"
+#include "amiberry_private.h"
 #include "zzm_minigl_host.h"
 
 
@@ -35,11 +36,6 @@
 extern int amiberry_inproc_open(uint32_t width, uint32_t height);
 extern void amiberry_inproc_close(void);
 extern mw_ctx *amiberry_transport_inproc_ctx(void);
-extern GLcontext mini_CurrentContext;
-struct AmiberryContext;
-extern struct AmiberryContext *amiberry_context(GLcontext context);
-extern int amiberry_flush(struct AmiberryContext *context);
-extern UBYTE *amiberry_command(struct AmiberryContext *context, ULONG opcode, ULONG payload);
 extern GLboolean amiberry_has_pending_command(struct AmiberryContext *context, ULONG opcode);
 
 extern void GLBegin(GLcontext, GLenum);
@@ -353,6 +349,122 @@ static uint32_t g_present_frame;
 #define CTX 1u
 #define ENTER() zzapp_api_enter()
 #define LEAVE() zzapp_api_leave()
+#define ZZAPP_GL_MAX_CLIP_PLANES 0x0d32U
+
+/* Solve modelview^T * eye_plane = equation in the front end's precision. */
+static int clip_plane_to_eye(float out[4], const double *matrix,
+                            const double equation[4])
+{
+    double a[4][5], eye[4], scale = 0.0;
+    unsigned row, col, k;
+
+    for (row = 0; row < 4U; ++row) {
+        for (col = 0; col < 4U; ++col)
+            a[row][col] = matrix[row * 4U + col];
+        a[row][4] = equation[row];
+    }
+    for (col = 0; col < 4U; ++col) {
+        unsigned pivot = col;
+
+        for (row = col + 1U; row < 4U; ++row)
+            if (fabs(a[row][col]) > fabs(a[pivot][col]))
+                pivot = row;
+        /* OpenGL leaves the plane undefined for a singular modelview. */
+        if (a[pivot][col] == 0.0)
+            return 0;
+        if (pivot != col) {
+            for (k = col; k < 5U; ++k) {
+                double tmp = a[pivot][k];
+                a[pivot][k] = a[col][k];
+                a[col][k] = tmp;
+            }
+        }
+        for (row = col + 1U; row < 4U; ++row) {
+            double factor = a[row][col] / a[col][col];
+
+            for (k = col + 1U; k < 5U; ++k)
+                a[row][k] -= factor * a[col][k];
+        }
+    }
+    for (row = 4U; row-- != 0U;) {
+        double rhs = a[row][4];
+
+        for (col = row + 1U; col < 4U; ++col)
+            rhs -= a[row][col] * eye[col];
+        eye[row] = rhs / a[row][row];
+        if (!isfinite(eye[row]))
+            return 0;
+        if (fabs(eye[row]) > scale)
+            scale = fabs(eye[row]);
+    }
+    /* Positive scaling preserves the half-space; zero never clips. */
+    for (row = 0; row < 4U; ++row)
+        out[row] = scale > 0.0 ? (float)(eye[row] / scale) : 0.0f;
+    return 1;
+}
+
+static struct AmiberryContext *clip_context(void)
+{
+    struct AmiberryContext *c = amiberry_context(CTX);
+
+    if (c && c->in_begin) {
+        amiberry_error(c, GL_INVALID_OPERATION);
+        return NULL;
+    }
+    return c;
+}
+
+static void w_ClipPlane(uint32_t plane, const double *equation)
+{
+    struct AmiberryContext *c;
+    uint32_t index = plane - GL_CLIP_PLANE0;
+    float eye[4];
+
+    ENTER();
+    c = clip_context();
+    if (c) {
+        if (index >= MW_USER_CLIP_PLANES)
+            amiberry_error(c, GL_INVALID_ENUM);
+        else if (clip_plane_to_eye(eye, c->modelview[c->model_top], equation)) {
+            mw_state *s = &amiberry_transport_inproc_ctx()->state;
+
+            /* Queued draws see the old equation until they submit. */
+            if (!(s->user_clip_mask & (1U << index)) || amiberry_flush(c))
+                memcpy(s->user_clip_plane[index], eye, sizeof(eye));
+        }
+    }
+    LEAVE();
+}
+
+static void set_clip_enabled(uint32_t index, int enable)
+{
+    struct AmiberryContext *c = clip_context();
+    mw_state *s;
+    uint8_t bit;
+
+    if (!c)
+        return;
+    s = &amiberry_transport_inproc_ctx()->state;
+    bit = (uint8_t)(1U << index);
+    if (((s->user_clip_mask & bit) != 0U) != enable && amiberry_flush(c))
+        s->user_clip_mask ^= bit;
+}
+
+enum { CLIP_QUERY_OTHER = -1, CLIP_QUERY_INVALID = -2 };
+
+static int32_t clip_query(uint32_t pname)
+{
+    uint32_t index = pname - GL_CLIP_PLANE0;
+
+    if (pname != ZZAPP_GL_MAX_CLIP_PLANES && index >= MW_USER_CLIP_PLANES)
+        return CLIP_QUERY_OTHER;
+    if (!clip_context())
+        return CLIP_QUERY_INVALID;
+    if (pname == ZZAPP_GL_MAX_CLIP_PLANES)
+        return (int32_t)MW_USER_CLIP_PLANES;
+    return (amiberry_transport_inproc_ctx()->state.user_clip_mask &
+            (1U << index)) != 0U;
+}
 
 static void w_Begin(uint32_t mode) { ENTER(); GLBegin(CTX, mode); LEAVE(); }
 static void w_End(void) { ENTER(); GLEnd(CTX); LEAVE(); }
@@ -368,9 +480,38 @@ static void w_Color4f(float r, float g, float b, float a) { ENTER(); GLColor4f(C
 static void w_Color4fv(const float *v) { ENTER(); if (v) GLColor4f(CTX, v[0], v[1], v[2], v[3]); LEAVE(); }
 static void w_Color4ub(uint8_t r, uint8_t g, uint8_t b, uint8_t a) { ENTER(); GLColor4ub(CTX, r, g, b, a); LEAVE(); }
 static void w_Color4ubv(const uint8_t *v) { ENTER(); GLColor4ubv(CTX, (GLubyte *)v); LEAVE(); }
-static void w_Enable(uint32_t cap) { ENTER(); MGLSetState(CTX, cap, 1); LEAVE(); }
-static void w_Disable(uint32_t cap) { ENTER(); MGLSetState(CTX, cap, 0); LEAVE(); }
-static uint8_t w_IsEnabled(uint32_t cap) { uint8_t r; ENTER(); r = GLIsEnabled(CTX, cap); LEAVE(); return r; }
+static void w_Enable(uint32_t cap)
+{
+    uint32_t index = cap - GL_CLIP_PLANE0;
+
+    ENTER();
+    if (index < MW_USER_CLIP_PLANES)
+        set_clip_enabled(index, 1);
+    else
+        MGLSetState(CTX, cap, 1);
+    LEAVE();
+}
+static void w_Disable(uint32_t cap)
+{
+    uint32_t index = cap - GL_CLIP_PLANE0;
+
+    ENTER();
+    if (index < MW_USER_CLIP_PLANES)
+        set_clip_enabled(index, 0);
+    else
+        MGLSetState(CTX, cap, 0);
+    LEAVE();
+}
+static uint8_t w_IsEnabled(uint32_t cap)
+{
+    uint8_t result;
+
+    ENTER();
+    result = cap - GL_CLIP_PLANE0 < MW_USER_CLIP_PLANES ?
+             clip_query(cap) > 0 : GLIsEnabled(CTX, cap);
+    LEAVE();
+    return result;
+}
 static void w_AlphaFunc(uint32_t func, float ref) { ENTER(); GLAlphaFunc(CTX, func, ref); LEAVE(); }
 static void w_BlendFunc(uint32_t s, uint32_t d) { ENTER(); GLBlendFunc(CTX, s, d); LEAVE(); }
 static void w_DepthFunc(uint32_t func) { ENTER(); GLDepthFunc(CTX, func); LEAVE(); }
@@ -457,16 +598,33 @@ static const uint8_t *w_GetString(uint32_t name)
  * front-end GL_INVALID_ENUM; other names still go through the front end. */
 static void w_GetIntegerv(uint32_t pname, int32_t *params)
 {
+    int32_t value;
+
     ENTER();
     if (pname == ZZAPP_GL_STENCIL_BITS) {
         if (params)
             *params = 0;
     } else {
-        GLGetIntegerv(CTX, pname, params);
+        value = clip_query(pname);
+        if (value == CLIP_QUERY_OTHER)
+            GLGetIntegerv(CTX, pname, params);
+        else if (value >= 0 && params)
+            *params = value;
     }
     LEAVE();
 }
-static void w_GetFloatv(uint32_t pname, float *params) { ENTER(); GLGetFloatv(CTX, pname, params); LEAVE(); }
+static void w_GetFloatv(uint32_t pname, float *params)
+{
+    int32_t value;
+
+    ENTER();
+    value = clip_query(pname);
+    if (value == CLIP_QUERY_OTHER)
+        GLGetFloatv(CTX, pname, params);
+    else if (value >= 0 && params)
+        *params = (float)value;
+    LEAVE();
+}
 static uint32_t w_GetError(void) { uint32_t r; ENTER(); r = GLGetError(CTX); LEAVE(); return r; }
 static void w_Hint(uint32_t target, uint32_t mode) { ENTER(); GLHint(CTX, target, mode); LEAVE(); }
 static void w_PixelStorei(uint32_t pname, int32_t param) { ENTER(); GLPixelStorei(CTX, pname, param); LEAVE(); }
@@ -496,8 +654,30 @@ static void w_PolygonOffset(float factor, float units) { ENTER(); GLPolygonOffse
 static void w_MultMatrixf(const float *m) { ENTER(); GLMultMatrixf(CTX, m); LEAVE(); }
 static void w_LoadMatrixd(const double *m) { ENTER(); GLLoadMatrixd(CTX, m); LEAVE(); }
 static void w_MultMatrixd(const double *m) { ENTER(); GLMultMatrixd(CTX, m); LEAVE(); }
-static void w_GetDoublev(uint32_t pname, double *out) { ENTER(); GLGetDoublev(CTX, pname, out); LEAVE(); }
-static void w_GetBooleanv(uint32_t pname, uint8_t *out) { ENTER(); GLGetBooleanv(CTX, pname, out); LEAVE(); }
+static void w_GetDoublev(uint32_t pname, double *out)
+{
+    int32_t value;
+
+    ENTER();
+    value = clip_query(pname);
+    if (value == CLIP_QUERY_OTHER)
+        GLGetDoublev(CTX, pname, out);
+    else if (value >= 0 && out)
+        *out = (double)value;
+    LEAVE();
+}
+static void w_GetBooleanv(uint32_t pname, uint8_t *out)
+{
+    int32_t value;
+
+    ENTER();
+    value = clip_query(pname);
+    if (value == CLIP_QUERY_OTHER)
+        GLGetBooleanv(CTX, pname, out);
+    else if (value >= 0 && out)
+        *out = value != 0;
+    LEAVE();
+}
 static void w_ActiveTextureARB(uint32_t texture) { ENTER(); GLActiveTextureARB(CTX, texture); LEAVE(); }
 static void w_MultiTexCoord2fARB(uint32_t target, float s, float t) { ENTER(); GLMultiTexCoord2fARB(CTX, target, s, t); LEAVE(); }
 static void w_MultiTexCoord2fvARB(uint32_t target, const float *v) { ENTER(); GLMultiTexCoord2fvARB(CTX, target, (GLfloat *)v); LEAVE(); }
@@ -633,8 +813,8 @@ static void fill_table(void)
     g_table.LockArrays = w_LockArrays;
     g_table.UnlockArrays = w_UnlockArrays;
 
-    /* The GL 1.1 tail is optional. Leave stencil, user clip planes, display
-     * lists, attribute stacks and unavailable queries/commands NULL. */
+    /* Leave unsupported operations NULL, including stencil, display
+     * lists and attribute stacks. */
     g_table.ClearDepth = w_ClearDepth;
     g_table.ColorMask = w_ColorMask;
     g_table.PolygonOffset = w_PolygonOffset;
@@ -669,6 +849,7 @@ static void fill_table(void)
     g_table.IsTexture = w_IsTexture;
     g_table.CopyTexImage2D = w_CopyTexImage2D;
     g_table.CopyTexSubImage2D = w_CopyTexSubImage2D;
+    g_table.ClipPlane = w_ClipPlane;
     g_table.TexEnvfv = w_TexEnvfv;
 }
 
