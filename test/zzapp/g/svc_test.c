@@ -148,6 +148,20 @@ static const aar_gl *mock_gl_bind(uint32_t surface_id)
 {
     return surface_id ? &gl : NULL;
 }
+
+static const char *mock_renderer;
+
+static const uint8_t *mock_get_string(uint32_t name)
+{
+    switch (name) {
+    case 0x1f00U: return (const uint8_t *)"test vendor";
+    case 0x1f01U: return (const uint8_t *)mock_renderer;
+    case 0x1f02U: return (const uint8_t *)"1.1";
+    case 0x1f03U: return (const uint8_t *)"";
+    default: return NULL;
+    }
+}
+
 static void mock_vertex2f(float x, float y)
 {
     memcpy(&vertex2f_words[0], &x, sizeof(x));
@@ -844,6 +858,58 @@ static void test_large_and_section_pointer_checks(void)
     CHECK(zzapp_svc_check_user(&as, WINDOW + 0x00011ff0U, 32U, 1) == AAR_E_FAULT);
     CHECK(zzapp_svc_check_user(&as, WINDOW + 0x00080000U, 4U, 0) == AAR_E_FAULT);
     zzapp_as_destroy(&as);
+}
+
+static const char *app_gl_string(uint32_t alias, uint32_t name)
+{
+    zzapp_svc_frame_t frame;
+    uint32_t offset;
+
+    dispatch(ZZAPP_SVC_GL_FIRST + gl_slot(offsetof(aar_gl, GetString)),
+             &frame, (uint32_t[9]){ name });
+    if (!frame.r[0])
+        return NULL;
+    offset = frame.r[0] - alias;
+    CHECK(offset < ZZAPP_REC_GL_PAGE_OFFSET);
+    if (offset >= ZZAPP_REC_GL_PAGE_OFFSET)
+        return NULL;
+    return (const char *)zzapp_svc_gl_for_slot(0U) + offset;
+}
+
+static void test_gl_strings_survive_other_queries(void)
+{
+    const uint32_t alias = 0xd8001000U;
+    zzapp_svc_frame_t frame;
+    const char *vendor, *renderer, *version, *extensions;
+
+    setup_dispatch();
+    if (!user_page) {
+        teardown_dispatch();
+        return;
+    }
+    gl.GetString = mock_get_string;
+    mock_renderer = "renderer A";
+    CHECK(zzapp_svc_set_table_aliases(0U, alias - 4096U, alias) == AAR_OK);
+    dispatch(api_slot(offsetof(aar_api, gl_bind)), &frame, (uint32_t[9]){ 1U });
+    CHECK(frame.r[0] == alias);
+
+    vendor = app_gl_string(alias, 0x1f00U);
+    renderer = app_gl_string(alias, 0x1f01U);
+    version = app_gl_string(alias, 0x1f02U);
+    extensions = app_gl_string(alias, 0x1f03U);
+    CHECK(vendor && strcmp(vendor, "test vendor") == 0);
+    CHECK(renderer && strcmp(renderer, "renderer A") == 0);
+    CHECK(version && strcmp(version, "1.1") == 0);
+    CHECK(extensions && *extensions == '\0');
+    CHECK(app_gl_string(alias, 0x1f04U) == NULL);
+
+    dispatch(api_slot(offsetof(aar_api, gl_unbind)), &frame, (uint32_t[9]){ 0U });
+    mock_renderer = "renderer B";
+    dispatch(api_slot(offsetof(aar_api, gl_bind)), &frame, (uint32_t[9]){ 1U });
+    CHECK(frame.r[0] == alias);
+    renderer = app_gl_string(alias, 0x1f01U);
+    CHECK(renderer && strcmp(renderer, "renderer B") == 0);
+    teardown_dispatch();
 }
 
 static void test_gl_deferred_pointer_checks(void)
@@ -2118,6 +2184,7 @@ int main(void)
 #endif
     test_svc_uses_core_aware_slot_resolver();
     test_gl_getters_copy_full_outputs();
+    test_gl_strings_survive_other_queries();
     test_minor6_gl_pointer_extents();
     test_minor6_present_timestamp_uses_both_registers();
     test_svc_number_comes_from_r12();

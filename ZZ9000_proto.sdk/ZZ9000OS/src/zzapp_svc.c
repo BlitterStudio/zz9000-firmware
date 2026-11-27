@@ -76,6 +76,9 @@ __attribute__((weak)) zzapp_proc_t *zzapp_proc_slot(uint32_t pid)
 __attribute__((weak)) const aar_api *zzapp_api_table(void) { return NULL; }
 #endif
 
+#define GL_STRING_FIRST 0x1f00U /* GL_VENDOR through GL_EXTENSIONS */
+#define GL_STRING_COUNT 4U
+
 struct user_api_table {
     aar_api table;
     aar_ext_zz9000 ext;
@@ -83,8 +86,8 @@ struct user_api_table {
 } __attribute__((aligned(VENEER_PAGE_BYTES)));
 struct user_gl_table {
     aar_gl table;
-    /* glGetString results: a NUL-terminated copy the app can read. */
-    char string[128];
+    /* One app-readable string per name; later queries must not change it. */
+    char strings[GL_STRING_COUNT][128];
 } __attribute__((aligned(VENEER_PAGE_BYTES)));
 
 typedef struct {
@@ -211,6 +214,7 @@ typedef struct {
     uint32_t error;
     uint8_t in_begin;
     uint8_t lock_held;
+    uint8_t strings_cached;
 } gl_client_state_t;
 
 /*
@@ -1051,11 +1055,12 @@ int zzapp_svc_is_veneer(uintptr_t address)
     return address >= first && address < end && (address - first) % VENEER_BYTES == 0U;
 }
 
-static void copy_build_id(char *destination, const char *source)
+static void copy_table_string(char *destination, size_t capacity,
+                              const char *source)
 {
     uint32_t i;
     if (!source) { destination[0] = '\0'; return; }
-    for (i = 0U; i + 1U < 128U && source[i]; ++i)
+    for (i = 0U; i + 1U < capacity && source[i]; ++i)
         destination[i] = source[i];
     destination[i] = '\0';
 }
@@ -1123,7 +1128,8 @@ static void fill_user_ext(const svc_state_t *st, struct user_api_table *table,
         table->ext.gl_bind_flags = (const aar_gl *(*)(uint32_t, uint32_t))
             user_veneer(st, ZZAPP_SVC_EXT_GL_BIND_FLAGS);
     if (AAR_EXT_ZZ9000_COVERS(runtime, build_id) && runtime->build_id) {
-        copy_build_id(table->build_id, runtime->build_id);
+        copy_table_string(table->build_id, sizeof(table->build_id),
+                          runtime->build_id);
         table->ext.build_id = (const char *)user_table_address(st,
             table->build_id, offsetof(struct user_api_table, build_id));
     }
@@ -1964,16 +1970,26 @@ static int dispatch_gl(svc_state_t *st, uint32_t pid, const zzapp_svc_frame_t *f
         goto done;
     }
     if (number == GL_SLOT(GetString)) {
-        const uint8_t *string = gl->GetString(args[0]);
+        uint32_t index = args[0] - GL_STRING_FIRST;
 
-        if (!string) {
+        if (index >= GL_STRING_COUNT) {
             *result = 0U;
             goto done;
         }
-        copy_build_id(table->string, (const char *)string);
-        *result = (uint32_t)(st->gl_alias ?
-            (uintptr_t)st->gl_alias + offsetof(struct user_gl_table, string) :
-            (uintptr_t)table->string);
+        if (!(st->gl_client.strings_cached & (1U << index))) {
+            const uint8_t *string = gl->GetString(args[0]);
+
+            if (!string) {
+                *result = 0U;
+                goto done;
+            }
+            copy_table_string(table->strings[index], sizeof(table->strings[index]),
+                              (const char *)string);
+            st->gl_client.strings_cached |= 1U << index;
+        }
+        *result = st->gl_alias ? st->gl_alias +
+            (uint32_t)(table->strings[index] - (char *)table) :
+            (uint32_t)(uintptr_t)table->strings[index];
         goto done;
     }
     if (call_gl_float(gl, number, frame, args, result))
