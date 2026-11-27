@@ -433,6 +433,8 @@ static const uint8_t *w_GetString(uint32_t name)
 {
     static const uint8_t vendor[] = "ZZ9000";
     static const uint8_t version[] = "1.1";
+    /* The AAR table does not expose the MiniGL guest extensions. */
+    static const uint8_t extensions[] = "";
     static const uint8_t rix[] = "ZZ9000 RasterIX";
     static const uint8_t cpu[] = "ZZ9000 CPU";
     mw_ctx *mw;
@@ -441,6 +443,7 @@ static const uint8_t *w_GetString(uint32_t name)
     switch (name) {
     case 0x1F00u: r = vendor; break;
     case 0x1F02u: r = version; break;
+    case 0x1F03u: r = extensions; break;
     case 0x1F01u:
         mw = amiberry_transport_inproc_ctx();
         r = (mw && mw->rix_enabled) ? rix : cpu;

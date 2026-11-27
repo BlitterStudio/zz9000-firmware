@@ -106,6 +106,10 @@ reclaim release the binding and its module reference. The runtime exposes
 the GL table through SVC veneers rather than making module addresses callable
 from user mode.
 
+`glGetString` returns an app-readable string that stays valid until GL unbind,
+even after queries for other names. `GL_EXTENSIONS` returns an empty string:
+the AAR binding does not advertise the 68k MiniGL guest extensions.
+
 App GL reports `GL_STENCIL_BITS` as 0. There is no stencil buffer, and the
 app's `glStencil*` calls have no effect.
 

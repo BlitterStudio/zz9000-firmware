@@ -1070,10 +1070,12 @@ int main(void)
     assert(amiberry_transport_inproc_ctx()->state.target.buffer_count == 3U);
     {
         const aar_gl *draw = gl;
+        const uint8_t *extensions = draw->GetString(0x1f03U); /* GL_EXTENSIONS */
         double depth;
         uint8_t mask[4];
 
         assert(draw->version == AAR_GL_VERSION_11);
+        assert(extensions != NULL && extensions[0] == '\0');
         assert(draw->StencilFunc == NULL);
         draw->ClearDepth(0.25);
         draw->GetDoublev(0x0b73U, &depth); /* GL_DEPTH_CLEAR_VALUE */
