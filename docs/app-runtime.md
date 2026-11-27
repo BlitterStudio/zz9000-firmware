@@ -647,11 +647,10 @@ pacing hint. Unbind GL before calling `aar_display_resize`: an active GL
 binding owns render targets sized for the old surface and returns
 `AAR_E_BUSY` on resize.
 
-**GL.** The optional MiniGL module exposes its supported GL 1.1 additions
-through the AAR table, including lighting, fog, matrix operations and
-texture copies. Unavailable operations are NULL, including stencil,
-display lists, clip planes and the attribute stack. Test the table slot
-before calling it.
+**GL.** The optional [MiniGL module](minigl-module.md#contexts-and-aar-apps)
+exposes its supported GL 1.1 additions through the AAR table. Unavailable
+operations, including stencil, display lists and the attribute stack, are
+NULL. Test the table slot before calling an optional operation.
 
 **Image rules.** The loader reads an ELF32 ARM `ET_DYN` image. `e_flags` must
 say EABI version 5 and hard float, and must not say soft float; any other

@@ -1016,6 +1016,7 @@ static const zzapp_svc_descriptor_t gl_descriptors[GL_COUNT] = {
     [GL_SLOT(Vertex2fv)] = D(1, ZZAPP_SVC_RETURN_VOID, IN_FIXED(0, 8U, 1U), N, N),
     G2(TexCoord2i, ZZAPP_SVC_RETURN_VOID), G1(IsTexture, ZZAPP_SVC_RETURN_INT),
     G8(CopyTexImage2D, ZZAPP_SVC_RETURN_VOID), G8(CopyTexSubImage2D, ZZAPP_SVC_RETURN_VOID),
+    [GL_SLOT(ClipPlane)] = D(2, ZZAPP_SVC_RETURN_VOID, IN_FIXED(1, 32U, 1U), N, N),
     [GL_SLOT(TexEnvfv)] = D(3, ZZAPP_SVC_RETURN_VOID, IN_GL_VECTOR(2, 1), N, N)
 };
 

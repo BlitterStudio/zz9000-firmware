@@ -297,6 +297,7 @@ static int test_rix_fifo_read(uint32_t offset, uint32_t *value)
 static unsigned long g_test_rix_tlf_bytes;
 static uint32_t g_test_rix_packet[2];
 static uint32_t g_test_rix_packet_words;
+static unsigned g_test_rix_triangles;
 
 static void test_rix_fsc_word(uint32_t word)
 {
@@ -329,6 +330,7 @@ static void test_rix_fsc_word(uint32_t word)
         }
         break;
     case 3U:
+        ++g_test_rix_triangles;
         g_fsc.skip = (word & 0x3ffU) / sizeof(uint32_t);
         break;
     case 4U:
@@ -1000,6 +1002,164 @@ static void test_gl_swap_presents(const zzm_minigl_ops_v1_t *ops, void *context,
     zzapp_gl_test_set_p96(NULL, 0U);
 }
 
+static void expect_clip_pixel(const aar_gl *draw, int x, int y, int red)
+{
+    uint8_t pixel[4] = { 1U, 2U, 3U, 4U };
+
+    draw->ReadPixels(x, y, 1, 1, 0x1908U, 0x1401U, pixel); /* RGBA8 */
+    assert(pixel[0] == (red ? 255U : 0U));
+    assert(pixel[1] == 0U && pixel[2] == 0U && pixel[3] == 255U);
+}
+
+static void test_app_user_clipping(const aar_gl *draw)
+{
+    const float vertices[8] = { -1.0f, -1.0f, 1.0f, -1.0f, 1.0f, 1.0f, -1.0f, 1.0f };
+    const uint16_t indices[6] = { 0U, 1U, 2U, 0U, 2U, 3U };
+    const double right[4] = { 1.0, 0.0, 0.0, 0.0 };
+    const double upper[4] = { 0.0, 1.0, 0.0, 0.0 };
+    const uint32_t plane0 = 0x3000U, plane5 = 0x3005U;
+    int32_t max_planes = -1, enabled = -1;
+    int x_middle = (int)display_width * 9 / 16;
+    int x_right = (int)display_width * 3 / 4;
+    int y_lower = (int)display_height / 4;
+    int y_upper = (int)display_height * 3 / 4;
+    int y_point = (int)display_height * 7 / 8;
+
+    assert(draw->ClipPlane != NULL);
+    draw->GetIntegerv(0x0d32U, &max_planes); /* GL_MAX_CLIP_PLANES */
+    assert(max_planes == 6 && !draw->IsEnabled(plane0));
+
+    /* The right half-space starts at NDC x = +1/4, even after the
+     * modelview used to define the plane goes away. */
+    draw->Translatef(0.25f, 0.0f, 0.0f);
+    draw->ClipPlane(plane0, right);
+    draw->LoadIdentity();
+    draw->ClipPlane(plane5, upper);
+    draw->Enable(plane0);
+    draw->Enable(plane5);
+    draw->GetIntegerv(plane5, &enabled);
+    assert(draw->IsEnabled(plane0) && enabled == 1);
+    draw->ClipPlane(plane5 + 1U, upper);
+    assert(draw->GetError() == 0x0500U); /* GL_INVALID_ENUM */
+    draw->Begin(4U);
+    draw->ClipPlane(plane0, upper);
+    draw->Disable(plane0);
+    draw->End();
+    assert(draw->GetError() == 0x0502U); /* GL_INVALID_OPERATION */
+
+    draw->ClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+    draw->Clear(0x4000U);
+    draw->Color3f(1.0f, 0.0f, 0.0f);
+    draw->VertexPointer(2, 0x1406U, 0, vertices);
+    draw->EnableClientState(0x8074U);
+    draw->DrawElements(4U, 6, 0x1403U, indices);
+    expect_clip_pixel(draw, x_middle, y_upper, 0);
+    expect_clip_pixel(draw, x_right, y_lower, 0);
+    expect_clip_pixel(draw, x_right, y_upper, 1);
+
+    /* A segment can cross the plane even when its first endpoint is
+     * clipped. Points outside the same half-space must not rasterize. */
+    draw->Clear(0x4000U);
+    draw->LineWidth(3.0f);
+    draw->Begin(1U); /* GL_LINES */
+    draw->Vertex2f(-0.75f, 0.5f);
+    draw->Vertex2f(0.75f, 0.5f);
+    draw->End();
+    expect_clip_pixel(draw, x_middle, y_upper, 0);
+    expect_clip_pixel(draw, x_right, y_upper, 1);
+    draw->LineWidth(1.0f);
+    draw->PointSize(3.0f);
+    draw->Begin(0U); /* GL_POINTS */
+    draw->Vertex2f(0.125f, 0.75f);
+    draw->Vertex2f(0.5f, 0.75f);
+    draw->End();
+    expect_clip_pixel(draw, x_middle, y_point, 0);
+    expect_clip_pixel(draw, x_right, y_point, 1);
+    draw->PointSize(1.0f);
+
+    /* A clipped polygon's outline includes the new edge. Point mode
+     * also draws the new vertex, not just surviving input vertices. */
+    draw->Disable(plane5);
+    for (uint32_t mode = 0x1b00U; mode <= 0x1b01U; ++mode) {
+        int x_clip = (int)display_width * 5 / 8;
+        int y_sample = mode == 0x1b00U ? y_lower : (int)display_height / 2;
+
+        draw->Clear(0x4000U);
+        draw->PolygonMode(0x0408U, mode); /* GL_FRONT_AND_BACK */
+        draw->PointSize(3.0f);
+        draw->LineWidth(3.0f);
+        draw->Begin(4U);
+        draw->Vertex2f(-0.75f, -0.5f);
+        draw->Vertex2f(0.75f, -0.5f);
+        draw->Vertex2f(0.75f, 0.5f);
+        draw->End();
+        expect_clip_pixel(draw, x_clip, y_sample, 1);
+        expect_clip_pixel(draw, x_middle, y_sample, 0);
+    }
+
+    /* Smooth point mode uses the clipped vertex color. Flat point mode
+     * still uses the original triangle's provoking vertex. */
+    draw->PolygonMode(0x0408U, 0x1b00U); /* GL_POINT */
+    for (uint32_t shade = 0x1d00U; shade <= 0x1d01U; ++shade) {
+        uint8_t pixel[4] = { 0 };
+        const int smooth = shade == 0x1d01U;
+
+        draw->ShadeModel(shade);
+        draw->Clear(0x4000U);
+        draw->Begin(4U);
+        draw->Color3f(1.0f, 0.0f, 0.0f);
+        draw->Vertex2f(0.0f, -0.5f);
+        draw->Color3f(0.0f, 1.0f, 0.0f);
+        draw->Vertex2f(0.5f, -0.5f);
+        draw->Color3f(0.0f, 0.0f, 1.0f);
+        draw->Vertex2f(0.5f, 0.5f);
+        draw->End();
+        draw->ReadPixels(x_right, y_lower, 1, 1, 0x1908U, 0x1401U, pixel);
+        assert(pixel[0] == 0U && pixel[1] == (smooth ? 255U : 0U) &&
+               pixel[2] == (smooth ? 0U : 255U));
+        draw->ReadPixels((int)display_width * 5 / 8, y_lower,
+                         1, 1, 0x1908U, 0x1401U, pixel);
+        if (smooth)
+            assert(pixel[0] >= 127U && pixel[0] <= 128U &&
+                   pixel[1] >= 127U && pixel[1] <= 128U && pixel[2] == 0U);
+        else
+            assert(pixel[0] == 0U && pixel[1] == 0U && pixel[2] == 255U);
+    }
+    draw->Color3f(1.0f, 0.0f, 0.0f);
+
+    draw->PolygonMode(0x0408U, 0x1b02U); /* GL_FILL */
+    draw->PointSize(1.0f);
+    draw->LineWidth(1.0f);
+
+    draw->Disable(plane0);
+    draw->Disable(plane5);
+    draw->DrawElements(4U, 6, 0x1403U, indices);
+    expect_clip_pixel(draw, x_middle, y_upper, 1);
+    expect_clip_pixel(draw, x_right, y_lower, 1);
+    draw->DisableClientState(0x8074U);
+    draw->VertexPointer(2, 0x1406U, 0, NULL);
+    assert(draw->GetError() == 0U);
+}
+
+static void test_rix_user_clipping(const aar_gl *draw)
+{
+    const double right[4] = { 1.0, 0.0, 0.0, 0.0 };
+    unsigned before = g_test_rix_triangles;
+
+    /* One outside and two inside: clipping must send two triangles to
+     * RasterIX, not draw the original triangle or go CPU. */
+    draw->ClipPlane(0x3000U, right);
+    draw->Enable(0x3000U);
+    draw->Begin(4U);
+    draw->Vertex2f(-0.25f, -0.78f);
+    draw->Vertex2f(0.25f, -0.78f);
+    draw->Vertex2f(0.25f, -0.76f);
+    draw->End();
+    draw->Finish();
+    assert(g_test_rix_triangles - before == 2U);
+    draw->Disable(0x3000U);
+}
+
 
 int main(void)
 {
@@ -1101,6 +1261,7 @@ int main(void)
             assert(draw->GetError() == 0x0500U); /* GL_INVALID_ENUM */
         }
     }
+    test_app_user_clipping((const aar_gl *)gl);
     {
         const aar_gl *draw = (const aar_gl *)gl;
         uint32_t textures[3];
@@ -1240,6 +1401,7 @@ int main(void)
         assert(mw_service_get_transport_descriptor(&desc) == 0);
         ctrl = (volatile ZZ9KMiniGLControlBlockV9 *)(void *)(desc.window_address + desc.ctrl_offset);
         assert(minigl_raster_drain());
+        test_rix_user_clipping(draw);
         g_fetch_hold = 1;
         g_fetch_release_us = ~(uint64_t)0;
 
