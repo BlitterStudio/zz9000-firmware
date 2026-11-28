@@ -414,11 +414,13 @@ final number in each pair or triplet.
 With the counters on, an app's end also prints one `[app] sched slot=N` line
 next to its `svc` line (`zzapp_kernel_sched_report`). It shows where the app's
 time went since `START`, from `zzapp_kernel_now_us`. Times are milliseconds
-with three decimals, and every microsecond of the app's life is in exactly one
-of `run`, `wait_sys`, `wait_app` or a `park_*` total.
+with three decimals. The report includes the time up to the snapshot; a
+stopped app's counters end at the stop. Idle core time is neither system nor
+app time and does not count toward a runnable app's wait.
 
-- `run`: on the core. `wait_sys`: runnable while the system thread had the
-  core (service passes). `wait_app`: runnable while another app had it.
+- `run`: on the core until the app parks, is switched away, or stops.
+  `wait_sys`: runnable while the system thread had the core (service
+  passes). `wait_app`: runnable while another app had it.
   `picks`: times a dispatch gave the app the core.
 - `preempt=sys/lag/quantum/other`: times the app was runnable and lost the
   core. `sys` counts the switches to the system thread. `lag`, `quantum` and
@@ -455,8 +457,10 @@ of `run`, `wait_sys`, `wait_app` or a `park_*` total.
   and `sleep`.
 
 The counters use two running totals of the core's time, in system and in app
-context, and a thread's wait is the difference of the totals when it began
-and ended, so a switch does no division and walks nothing.
+context. An app's wait is the change in those totals from when it becomes
+runnable to when it runs, parks again, or stops. A timeout wake found during
+dispatch uses the same timestamp as the pick, so a sleeper that runs at once
+gets no runnable wait for that dispatch.
 
 `ZZAPP_SVC_PROBES=1` adds the `svcprobe` veneers used to characterize bare SVC
 paths. It defaults to off and is measurement tooling, not an application ABI.
