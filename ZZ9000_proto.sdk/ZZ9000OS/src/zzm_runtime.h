@@ -45,6 +45,7 @@ enum zzm_service_id {
 #define ZZM_SERVICE_PALETTE_V3 ZZM_SERVICE_VERSION(3U, 0U)
 /* V4: display_flags became display_latest (1 while the display is card-owned). */
 #define ZZM_SERVICE_APP_GL_HOST_V4 ZZM_SERVICE_VERSION(4U, 0U)
+#define ZZM_SERVICE_APP_GL_HOST_V4_1 ZZM_SERVICE_VERSION(4U, 1U)
 #define ZZM_SERVICE_PROFILE_V3 ZZM_SERVICE_VERSION(3U, 0U)
 #define ZZM_SERVICE_TRANSPORT_V3 ZZM_SERVICE_VERSION(3U, 0U)
 #define ZZM_SERVICE_GRAPHICS_HW_V3 ZZM_SERVICE_VERSION(3U, 0U)
@@ -189,6 +190,15 @@ typedef struct zzm_app_gl_host_service {
      * acknowledged, as a wait the core-1 service pass wakes.  0 when idle;
      * nonzero for a stale generation, a stop or a lost display. */
     int (*wait_flip)(uint32_t generation);
+    /* AAR_OK transfers the sealed frame's ID to the display service.
+     * An error leaves the module responsible for finishing that ID. */
+    int (*flip_bound_tracked)(uint32_t generation, uint64_t frame_id);
+    /* Finish a still module-owned ID as unconfirmed for the given reason. */
+    void (*finish_tracked)(uint32_t generation, uint64_t frame_id,
+                           uint32_t reason);
+    /* Run one nonblocking module presentation step with its app selected.
+     * Only the core-1 system thread may enter the callback. */
+    int (*poll_present)(uint32_t generation, int (*poll)(void));
 } zzm_app_gl_host_service_t;
 
 typedef struct zzm_profile_service {

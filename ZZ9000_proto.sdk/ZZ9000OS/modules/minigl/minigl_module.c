@@ -26,6 +26,9 @@ int zzapp_gl_set_module_host(const zzm_app_gl_host_service_t *host);
 int zzapp_gl_bind(uint32_t surface_id, uint32_t flags,
                   const struct aar_gl **out);
 void zzapp_gl_swap(void);
+int zzapp_gl_swap_tracked(uint64_t frame_id);
+int zzapp_gl_has_present_work(void);
+int zzapp_gl_poll_present(void);
 void zzapp_gl_unbind(void);
 void zzapp_gl_reclaim(void);
 
@@ -62,7 +65,8 @@ static void minigl_doorbell(void *context)
 static int minigl_has_work(void *context)
 {
     (void)context;
-    return mw_service_has_work() || minigl_raster_feed_pending();
+    return mw_service_has_work() || minigl_raster_feed_pending() ||
+           zzapp_gl_has_present_work();
 }
 
 extern void zzm_module_set_worker_context(int active);
@@ -104,8 +108,10 @@ static int minigl_poll(void *context, uint32_t budget)
                      minigl_raster_work_outstanding() ||
                      minigl_raster_feed_pending();
         }
-    } else if (mw_service_has_work()) {
-        worked = mw_service_poll();
+    } else {
+        worked = zzapp_gl_poll_present();
+        if (!worked && mw_service_has_work())
+            worked = mw_service_poll();
     }
     if (!worked && minigl_raster_feed_pending()) {
         minigl_profile_feed_deadline_wake();
@@ -300,6 +306,12 @@ static int minigl_app_swap(void *context)
     return 0;
 }
 
+static int minigl_app_swap_tracked(void *context, uint64_t frame_id)
+{
+    (void)context;
+    return zzapp_gl_swap_tracked(frame_id);
+}
+
 static void minigl_app_unbind(void *context)
 {
     minigl_release_app(context);
@@ -320,7 +332,7 @@ static const zzm_minigl_ops_v1_t g_ops = {
     minigl_begin_reset, minigl_reset_poll, minigl_abort_reset,
     minigl_begin_unload, minigl_fini,
     minigl_app_bind, minigl_app_swap, minigl_app_unbind, minigl_app_reclaim,
-    minigl_app_bind_flags, ZZM_MINIGL_RESET_PROTOCOL_V2
+    minigl_app_bind_flags, ZZM_MINIGL_RESET_PROTOCOL_V2, minigl_app_swap_tracked
 };
 
 static const zzm_minigl_worker_ops_t g_worker_ops = {
@@ -373,7 +385,8 @@ int zzm_module_init(const zzm_services_t *services)
         !reclaim->quarantine_owner ||
         !minigl_table_compatible(app_host->version, app_host->size,
                                  ZZM_SERVICE_APP_GL_HOST_V4,
-                                 sizeof(*app_host)) ||
+                                 offsetof(zzm_app_gl_host_service_t, wait_flip) +
+                                 sizeof(app_host->wait_flip)) ||
         !minigl_table_compatible(palette->version, palette->size,
                                  ZZM_SERVICE_PALETTE_V3,
                                  sizeof(*palette)) ||

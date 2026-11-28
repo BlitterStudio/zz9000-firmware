@@ -16,6 +16,7 @@
 #include <stdint.h>
 #include <string.h>
 #include "aar/app.h"
+#include "aar/detail/present_feedback.h"
 #include "aar/transport.h"
 #include "zzapp_proto.h"
 #include "zzapp_runtime.h"
@@ -67,6 +68,12 @@ struct zzapp_present_flush_record {
 struct zzapp_present_flush_record zzapp_test_present_flushes[32];
 unsigned zzapp_test_present_flush_count;
 __attribute__((weak)) int scheduler_core1_available(void) { return 1; }
+__attribute__((weak)) int zzapp_minigl_swap_tracked(uint32_t id, uint64_t frame_id)
+{
+	(void)id;
+	(void)frame_id;
+	return AAR_E_NOSYS;
+}
 #else
 #undef SDK_STATUS_OK
 #undef SDK_STATUS_QUEUED
@@ -273,7 +280,6 @@ struct zzapp_service_runtime {
 	uint32_t display_front;
 	uint32_t display_back;
 	uint32_t display_spare;
-	uint32_t display_present;
 	uint32_t display_alias_phys[3];
 	uint32_t display_alias[3];
 	/* The flip handshake: core 1 posts and completes, core 0's vblank ISR
@@ -285,7 +291,12 @@ struct zzapp_service_runtime {
 	/* The completion's result of the flip in flight, 0 until it is in: a
 	 * failed flip leaves the scanout alone, so no page is handed over. */
 	volatile int32_t display_flip_result;
+	/* When the flip was posted, or when the client submitted the scanout. */
 	uint64_t display_flip_submit_us;
+	/* Client flip ticket, under g_slot_state_lock. */
+	uint64_t display_flip_frame;
+	uint32_t display_reply_expired;
+	int display_wait_feedback;
 	/* The aar_time_us value at which the last flip or GL swap was seen
 	 * shown, 0 before the first. Written and read under g_slot_state_lock
 	 * (a 64-bit word is not atomic on this core). */
@@ -313,6 +324,9 @@ struct zzapp_service_runtime {
 	volatile int display_mailbox_active;
 	uint32_t display_mailbox_shown;
 	uint32_t display_mailbox_pending;
+	/* Changes hands with display_mailbox_pending, under its lock. */
+	uint64_t display_mailbox_frame;
+	uint64_t display_mailbox_started_us;
 	uint32_t display_mailbox_buffers[3];
 	uint32_t display_mailbox_bytes;
 	uint32_t display_grant_base[3];
@@ -370,6 +384,10 @@ struct zzapp_service_runtime {
 	 * entry n), so a resize that replaces the client's screen can send the
 	 * colours again. */
 	uint32_t palette_set[ZZAPP_XPORT_PALETTE_ENTRIES / 32U];
+	/* App-scoped, under g_slot_state_lock. A submission can park before
+	 * committing, so a stop must not publish its tentative reservation. */
+	aar_present_queue present_feedback;
+	int present_submitting;
 #ifdef ZZAPP_HOST_TEST
 	uint32_t audio_detach_count;
 #endif
@@ -866,6 +884,7 @@ static void display_mailbox_disable(void)
 	display_mailbox_lock_acquire();
 	__atomic_store_n(&current_runtime()->display_mailbox_active, 0, __ATOMIC_RELEASE);
 	current_runtime()->display_mailbox_pending = 0U;
+	current_runtime()->display_mailbox_frame = 0U;
 	current_runtime()->display_mailbox_latch_pending = 0;
 	display_mailbox_lock_release();
 }
@@ -1627,6 +1646,9 @@ void zzapp_services_on_launch(void)
 #endif
 	slot_state_lock_acquire();
 	state->display_present_us = 0U;
+	if (state->present_feedback.sequence != 0U)
+		memset(&state->present_feedback, 0, sizeof(state->present_feedback));
+	state->present_submitting = 0;
 	slot_state_lock_release();
 }
 
@@ -1643,13 +1665,12 @@ void zzapp_services_on_app_end(void)
 	if (!state || !rec)
 		return;
 	audio_post_teardown();
+	display_unbind(rec);
 	revoke_surface_grants();
 	zzapp_kernel_surface_unbind(zzapp_runtime_kernel(), service_pid());
 	if (state->display_back_owned && state->display_back != 0U)
 		zzapp_loader_free_back(state->display_back);
 	state->display_back_owned = 0;
-	display_mailbox_disable();
-	display_unbind(rec);
 	/* What the app was waiting for is no longer wanted: a completion that
 	 * still arrives is dropped by id. */
 	zzapp_xport_abandon(rec, ZZAPP_XPORT_REQ_BLOCKING);
@@ -1665,6 +1686,9 @@ void zzapp_services_on_app_end(void)
 	/* Console output the app wrote before it ended still goes out. */
 	console_service(rec);
 	slot_state_lock_acquire();
+	if (state->present_feedback.sequence != 0U)
+		memset(&state->present_feedback, 0, sizeof(state->present_feedback));
+	state->present_submitting = 0;
 	rec->claim.state = ZZAPP_ST_STOPPING;
 	cb_publish_state(rec, ZZAPP_ST_STOPPING);
 	slot_state_lock_release();
@@ -1794,13 +1818,17 @@ static uint16_t zz_to_sdk(int zz)
  * AAR_E_BUSY when the table entry itself is still in use, AAR_E_IO after a
  * stop or on corrupt indices.
  */
-static int req_post(zzapp_xport_req_kind_t kind, const aar_request *req,
-		    uint64_t deadline, uint32_t *id)
+static int req_post_prepared(zzapp_xport_req_kind_t kind,
+			     const aar_request *req, uint64_t deadline,
+			     uint32_t *id, int (*prepare)(void *), void *context)
 {
 	zzapp_rec_t *rec = service_rec();
 
 	for (;;) {
-		int rc = zzapp_xport_post_request(rec, kind, req, deadline, id);
+		int rc = prepare ?
+			zzapp_xport_post_request_prepared(rec, kind, req, deadline,
+							   id, prepare, context) :
+			zzapp_xport_post_request(rec, kind, req, deadline, id);
 		int space;
 
 		if (rc != AAR_E_BUSY) {
@@ -1828,6 +1856,12 @@ static int req_post(zzapp_xport_req_kind_t kind, const aar_request *req,
 			return rc;
 		}
 	}
+}
+
+static int req_post(zzapp_xport_req_kind_t kind, const aar_request *req,
+		    uint64_t deadline, uint32_t *id)
+{
+	return req_post_prepared(kind, req, deadline, id, NULL, NULL);
 }
 
 /*
@@ -3404,28 +3438,92 @@ static uint32_t token_address(uint32_t token);
  * address the client submitted, or by the card latching a LATEST frame. A
  * timeout that merely lets the app go is none of these and does not call
  * this. 0 means "none yet", so a clock that reads 0 is nudged. */
-static void display_note_present_locked(struct zzapp_service_runtime *state)
+static uint64_t display_note_present_locked(struct zzapp_service_runtime *state,
+					uint64_t frame_id)
 {
 	uint64_t t = now_us();
 
 	state->display_present_us = t != 0U ? t : 1U;
+	if (frame_id)
+		aar_present_finish(&state->present_feedback, frame_id,
+				   AAR_PRESENT_ACKNOWLEDGED,
+				   AAR_PRESENT_REASON_NONE, t);
+	return t;
+}
+
+static int present_pending_locked(const struct zzapp_service_runtime *state,
+				  uint64_t frame_id)
+{
+	const aar_present_queue *queue = &state->present_feedback;
+	unsigned slot = (unsigned)frame_id & AAR_PRESENT_QUEUE_MASK;
+
+	return (queue->pending & (1U << slot)) != 0U &&
+	       queue->frames[slot].frame_id == frame_id;
+}
+
+/* Caller holds g_slot_state_lock. Clear the association before releasing a
+ * flip, so a late blank or completion cannot resolve the next ticket. */
+static void flip_unconfirmed_locked(struct zzapp_service_runtime *state,
+				    uint32_t reason, uint64_t completed_us)
+{
+	aar_present_finish(&state->present_feedback, state->display_flip_frame,
+			   AAR_PRESENT_UNCONFIRMED, reason, completed_us);
+	state->display_flip_frame = 0U;
+}
+
+static uint32_t present_error_reason(int status)
+{
+	return status == AAR_E_TIMEDOUT ? AAR_PRESENT_REASON_TIMEOUT :
+					AAR_PRESENT_REASON_BACKEND;
+}
+
+static void display_cancel_pending_locked(zzapp_rec_t *rec)
+{
+	struct zzapp_service_runtime *state = runtime_of(rec);
+
+	if (state->present_feedback.pending)
+		aar_present_cancel(&state->present_feedback, now_us());
+	if (state->display_flip_frame) {
+		state->display_flip_frame = 0U;
+		zzapp_xport_abandon(rec, ZZAPP_XPORT_REQ_FLIP);
+		state->display_flip_result = AAR_E_IO;
+		__atomic_store_n(&state->display_flip_ack, state->display_flip_gen,
+				 __ATOMIC_RELEASE);
+	}
+}
+
+static void display_cancel_on_stop_locked(zzapp_rec_t *rec)
+{
+	struct zzapp_service_runtime *state = runtime_of(rec);
+
+	if (state->present_feedback.pending && !state->present_submitting &&
+	    stop_requested_rec(rec))
+		display_cancel_pending_locked(rec);
 }
 
 /* A submitted flip whose scanout acknowledgement does not come (the address
  * the client says it shows never reaches scanout) is complete after this
  * long: the app is never held by it. It replaces the client's own fallback. */
 #define FLIP_ACK_TIMEOUT_US 100000U
+/* Feedback can expire while a live client has not answered, or a LATEST
+ * frame has not latched. Neither timeout gives the app a buffer back. */
+#define PRESENT_FEEDBACK_TIMEOUT_US 30000000ull
 
 /* Caller holds g_slot_state_lock. */
 static void flip_expire_locked(struct zzapp_service_runtime *state)
 {
 	uint32_t gen = state->display_flip_gen;
+	uint64_t t;
 
-	if (gen != 0U &&
-	    __atomic_load_n(&state->display_flip_submit, __ATOMIC_ACQUIRE) == gen &&
-	    __atomic_load_n(&state->display_flip_ack, __ATOMIC_ACQUIRE) != gen &&
-	    now_us() - state->display_flip_submit_us >= FLIP_ACK_TIMEOUT_US)
-		__atomic_store_n(&state->display_flip_ack, gen, __ATOMIC_RELEASE);
+	if (gen == 0U || state->display_flip_submit != gen ||
+	    state->display_flip_ack == gen)
+		return;
+	t = now_us();
+	if (t - state->display_flip_submit_us < FLIP_ACK_TIMEOUT_US)
+		return;
+	if (state->display_flip_frame)
+		flip_unconfirmed_locked(state, AAR_PRESENT_REASON_TIMEOUT, t);
+	__atomic_store_n(&state->display_flip_ack, gen, __ATOMIC_RELEASE);
 }
 
 /*
@@ -3437,16 +3535,33 @@ static void flip_expire_locked(struct zzapp_service_runtime *state)
  * reaches that address, or the timeout does. Without SUBMITTED the flip is
  * complete now.
  */
-static int flip_apply_locked(zzapp_rec_t *rec)
+static void flip_apply_locked(zzapp_rec_t *rec, int pump_rc)
 {
 	struct zzapp_service_runtime *state = runtime_of(rec);
+	int req_state = zzapp_xport_req_state(rec, ZZAPP_XPORT_REQ_FLIP);
 	aar_completion c;
 
 	flip_expire_locked(state);
-	if (zzapp_xport_req_state(rec, ZZAPP_XPORT_REQ_FLIP) !=
-		    ZZAPP_XPORT_REQ_DONE ||
+	if (req_state == ZZAPP_XPORT_REQ_POSTED && state->display_flip_frame) {
+		uint64_t t = now_us();
+
+		if (pump_rc < 0) {
+			zzapp_xport_abandon(rec, ZZAPP_XPORT_REQ_FLIP);
+			state->display_flip_result = AAR_E_IO;
+			flip_unconfirmed_locked(state, AAR_PRESENT_REASON_BACKEND, t);
+			__atomic_store_n(&state->display_flip_ack,
+					 state->display_flip_gen, __ATOMIC_RELEASE);
+		} else if (t - state->display_flip_submit_us >= PRESENT_FEEDBACK_TIMEOUT_US) {
+			/* The late reply still owns the buffer and can acknowledge
+			 * the flip, but must not resolve its feedback a second time. */
+			state->display_reply_expired = state->display_flip_gen;
+			flip_unconfirmed_locked(state, AAR_PRESENT_REASON_TIMEOUT, t);
+		}
+		return;
+	}
+	if (req_state != ZZAPP_XPORT_REQ_DONE ||
 	    zzapp_xport_take_completion(rec, ZZAPP_XPORT_REQ_FLIP, &c) != 1)
-		return 0;
+		return;
 	state->display_flip_result = c.result < 0 ? c.result : AAR_OK;
 	if (c.result == AAR_OK && (c.flags & ZZAPP_FLIPF_SUBMITTED) != 0U &&
 	    state->display_scanout_ack) {
@@ -3463,32 +3578,36 @@ static int flip_apply_locked(zzapp_rec_t *rec)
 		__atomic_store_n(&state->display_flip_submit,
 				 state->display_flip_gen, __ATOMIC_RELEASE);
 	} else {
+		if (c.result == AAR_OK) {
+			int submitted = (c.flags & ZZAPP_FLIPF_SUBMITTED) != 0U;
+			uint64_t t = display_note_present_locked(state,
+						submitted ? 0U : state->display_flip_frame);
+
+			/* Keep the legacy timestamp and release for this reply.
+			 * Without scanout feedback, a pan submission alone does
+			 * not acknowledge the tracked frame. */
+			if (submitted && state->display_flip_frame)
+				flip_unconfirmed_locked(state, AAR_PRESENT_REASON_BACKEND, t);
+			state->display_flip_frame = 0U;
+		} else if (state->display_flip_frame) {
+			flip_unconfirmed_locked(state, present_error_reason(c.result),
+						now_us());
+		}
 		__atomic_store_n(&state->display_flip_ack,
 				 state->display_flip_gen, __ATOMIC_RELEASE);
-		/* The client replies when the frame is shown. */
-		if (c.result == AAR_OK)
-			display_note_present_locked(state);
 	}
-	return 1;
-}
-
-/* The system pass: pump the CQ while a flip is posted, then apply. */
-static int flip_service_locked(zzapp_rec_t *rec)
-{
-	if (zzapp_xport_req_state(rec, ZZAPP_XPORT_REQ_FLIP) ==
-	    ZZAPP_XPORT_REQ_POSTED)
-		(void)zzapp_xport_pump(rec);
-	return flip_apply_locked(rec);
 }
 
 /* The app thread: the pump needs no lock, the words do. */
 static void flip_service(zzapp_rec_t *rec)
 {
+	int pump_rc = 0;
+
 	if (zzapp_xport_req_state(rec, ZZAPP_XPORT_REQ_FLIP) ==
 	    ZZAPP_XPORT_REQ_POSTED)
-		(void)zzapp_xport_pump(rec);
+		pump_rc = zzapp_xport_pump(rec);
 	slot_state_lock_acquire();
-	(void)flip_apply_locked(rec);
+	flip_apply_locked(rec, pump_rc);
 	slot_state_lock_release();
 }
 
@@ -3503,6 +3622,25 @@ int zzapp_display_flip_idle(void)
 	flip_service(service_rec());
 	display_reap_flip();
 	return state->display_flip_gen == state->display_ack_seen;
+}
+
+/* The core-1 tick only checks displays with a tracked frame pending. Take
+ * the locks in the same order as native latch and replacement. */
+static void display_mailbox_expire(struct zzapp_service_runtime *state)
+{
+	display_mailbox_lock_acquire_for(state);
+	if (state->display_mailbox_frame) {
+		uint64_t t = now_us();
+
+		if (t - state->display_mailbox_started_us >= PRESENT_FEEDBACK_TIMEOUT_US) {
+			slot_state_lock_acquire();
+			aar_present_finish(&state->present_feedback, state->display_mailbox_frame,
+					   AAR_PRESENT_UNCONFIRMED, AAR_PRESENT_REASON_TIMEOUT, t);
+			state->display_mailbox_frame = 0U;
+			slot_state_lock_release();
+		}
+	}
+	display_mailbox_lock_release_for(state);
 }
 
 /*
@@ -3573,8 +3711,9 @@ void zzapp_services_display_mailbox_end(int latched)
 		state->display_front = state->display_mailbox_shown;
 		state->display_spare = old_shown;
 		slot_state_lock_acquire();
-		display_note_present_locked(state);
+		display_note_present_locked(state, state->display_mailbox_frame);
 		slot_state_lock_release();
+		state->display_mailbox_frame = 0U;
 	}
 	/* VDMA now scans the address mailbox_begin matched to this record's
 	 * buffers: that is a blank of its screen, whether or not a frame was
@@ -3674,8 +3813,9 @@ static int display_vblank_locked(zzapp_rec_t *rec, uint32_t scanout_address)
 	    gen != __atomic_load_n(&state->display_flip_submit, __ATOMIC_ACQUIRE) ||
 	    scanout_address != state->display_flip_address)
 		return woke;
+	display_note_present_locked(state, state->display_flip_frame);
+	state->display_flip_frame = 0U;
 	__atomic_store_n(&state->display_flip_ack, gen, __ATOMIC_RELEASE);
-	display_note_present_locked(state);
 	return 1;
 }
 
@@ -3744,7 +3884,7 @@ uint32_t zzapp_display_id(void)
 {
 	struct zzapp_service_runtime *state = current_runtime();
 
-	return state->display_bound ? state->display_id : 0U;
+	return state && state->display_bound ? state->display_id : 0U;
 }
 
 static uint32_t display_alias(uint32_t physical)
@@ -3769,7 +3909,7 @@ static int fill_surface(aar_surface *out)
 	uint32_t back;
 	uint32_t front_alias;
 	uint32_t back_alias;
-	uint32_t caps = AAR_DISPCAP_ASYNC;
+	uint32_t caps = AAR_DISPCAP_ASYNC | AAR_DISPCAP_PRESENT_FEEDBACK;
 
 	if (!out || !current_runtime()->display_bound)
 		return AAR_E_INVAL;
@@ -3839,7 +3979,13 @@ static int flip_take_result(struct zzapp_service_runtime *state)
 	return result;
 }
 
-static int wait_flip(uint32_t gen)
+static int flip_feedback_wait_done(const struct zzapp_service_runtime *state,
+				   uint32_t gen)
+{
+	return state->display_reply_expired == gen || state->display_flip_gen != gen;
+}
+
+static int wait_flip(uint32_t gen, int feedback)
 {
 	struct zzapp_service_runtime *state = current_runtime();
 	zzapp_rec_t *rec = service_rec();
@@ -3856,6 +4002,8 @@ static int wait_flip(uint32_t gen)
 			display_reap_flip();
 			return flip_take_result(state);
 		}
+		if (feedback && flip_feedback_wait_done(state, gen))
+			return AAR_E_TIMEDOUT;
 	}
 	for (;;) {
 		int status;
@@ -3872,11 +4020,20 @@ static int wait_flip(uint32_t gen)
 			wait_end();
 			return flip_take_result(state);
 		}
+		if (feedback && flip_feedback_wait_done(state, gen)) {
+			wait_end();
+			return AAR_E_TIMEDOUT;
+		}
 		/* The first registration wakes this parked app at 50 ms solely for
-		 * diagnostics. Subsequent waiting remains event-driven until ack. */
+		 * diagnostics. Then it wakes on ownership release, or when a
+		 * tracked caller can collect a client reply timeout. */
 		wait_begin(ZZAPP_WAIT_FLIP, gen,
 			   reported ? 0U : started + FLIP_WAIT_REPORT_US);
+		if (feedback)
+			state->display_wait_feedback = 1;
 		yield_wait_once();
+		if (feedback)
+			state->display_wait_feedback = 0;
 		status = wait_status();
 		if (status == AAR_E_TIMEDOUT && !reported) {
 			reported = 1;
@@ -3894,11 +4051,13 @@ static int wait_flip(uint32_t gen)
 
 int zzapp_display_wait_flip_idle(void)
 {
-	if (!current_runtime()->display_bound)
+	struct zzapp_service_runtime *state = current_runtime();
+
+	if (!state || !state->display_bound)
 		return AAR_E_INVAL;
 	if (display_mailbox_enabled())
 		return AAR_OK;
-	return wait_flip(current_runtime()->display_flip_gen);
+	return wait_flip(state->display_flip_gen, state->present_submitting);
 }
 
 /* A token of the client's memory is a board offset; the card address is the
@@ -4051,13 +4210,13 @@ static int display_bind(zzapp_rec_t *rec, uint32_t flags_req,
 	state->display_front = front;
 	state->display_back = back;
 	state->display_spare = spare;
-	state->display_present = 0U;
 	state->display_client_id = c->out[AAR_R_DISPLAY_OPEN_ID];
 	state->display_queued = 0U;
 	slot_state_lock_acquire();
 	state->display_flip_gen = 0U;
 	state->display_flip_ack = 0U;
 	state->display_flip_submit = 0U;
+	state->display_reply_expired = 0U;
 	state->display_flip_address = 0U;
 	state->display_ack_seen = 0U;
 	state->display_mailbox_replaced = 0U;
@@ -4177,9 +4336,8 @@ static void flush_presented(uint32_t addr, uint32_t bytes)
 	barrier();
 }
 
-/* A flip that the card owns end to end (LATEST): nothing goes to the client,
- * the frame replaces a pending one, and the flip is complete at once. */
-static int display_mailbox_flip(uint32_t back)
+/* LATEST hands off ownership under the same lock as the native latch. */
+static int display_mailbox_flip(uint32_t back, uint64_t frame_id)
 {
 	struct zzapp_service_runtime *state = current_runtime();
 	uint32_t spare;
@@ -4196,6 +4354,15 @@ static int display_mailbox_flip(uint32_t back)
 		state->display_back = state->display_mailbox_pending;
 		state->display_mailbox_pending = back;
 		state->display_mailbox_replaced++;
+		if (state->display_mailbox_frame) {
+			slot_state_lock_acquire();
+			if (present_pending_locked(state, state->display_mailbox_frame))
+				aar_present_finish(&state->present_feedback,
+						   state->display_mailbox_frame,
+						   AAR_PRESENT_REPLACED,
+						   AAR_PRESENT_REASON_NONE, now_us());
+			slot_state_lock_release();
+		}
 	} else {
 		spare = state->display_spare;
 		if (spare == 0U) {
@@ -4206,6 +4373,9 @@ static int display_mailbox_flip(uint32_t back)
 		state->display_back = spare;
 		state->display_spare = 0U;
 	}
+	state->display_mailbox_frame = frame_id;
+	if (frame_id)
+		state->display_mailbox_started_us = now_us();
 	/* Keep generic flip clients idle without exposing a VBlank wait. */
 	gen = state->display_flip_gen + 1U;
 	state->display_flip_gen = gen;
@@ -4330,89 +4500,167 @@ int zzapp_svc_display_set_palette(uint32_t surface_id, uint32_t first,
 	return AAR_OK;
 }
 
+struct flip_buffer {
+	struct zzapp_service_runtime *state;
+	uint64_t frame_id;
+	uint32_t front, back, present;
+	int nonblocking;
+};
+
+static uint32_t flip_arm_locked(struct zzapp_service_runtime *state,
+				uint32_t address, uint64_t frame_id)
+{
+	uint32_t old_gen = state->display_flip_gen;
+	uint32_t gen = old_gen + 1U;
+
+	state->display_flip_address = address;
+	state->display_flip_submit = 0U;
+	state->display_flip_result = AAR_OK;
+	state->display_flip_frame = frame_id;
+	state->display_reply_expired = 0U;
+	if (frame_id)
+		state->display_flip_submit_us = now_us();
+	__atomic_store_n(&state->display_flip_gen, gen ? gen : 1U,
+			 __ATOMIC_RELEASE);
+	return old_gen;
+}
+
+/* For a tracked flip, transport has secured the SQ slot before this runs.
+ * In particular, a rejected copy fallback must not modify the front page. */
+static int flip_prepare(void *context)
+{
+	const struct flip_buffer *buffer = context;
+	struct zzapp_service_runtime *state = buffer->state;
+
+	if ((buffer->frame_id || buffer->nonblocking) && zzapp_services_stop_requested())
+		return AAR_E_IO;
+	if (state->display_back_owned)
+		memcpy((void *)(uintptr_t)buffer->front,
+		       (const void *)(uintptr_t)buffer->back, state->display_bytes);
+	flush_presented(buffer->present, state->display_bytes);
+	if (!state->display_back_owned && state->display_spare != 0U) {
+		state->display_queued = buffer->back;
+		state->display_back = state->display_spare;
+		state->display_spare = 0U;
+	}
+	if (buffer->frame_id || buffer->nonblocking) {
+		slot_state_lock_acquire();
+		(void)flip_arm_locked(state, buffer->present, buffer->frame_id);
+		if (buffer->frame_id)
+			set_add(&set_svc, service_pid());
+		slot_state_lock_release();
+	}
+	return AAR_OK;
+}
+
 /* The flip request of the pan or buffer-change path. */
-static int flip_post(zzapp_rec_t *rec, uint32_t present, uint32_t flags)
+static int flip_post(zzapp_rec_t *rec, struct flip_buffer *buffer, uint32_t flags)
 {
 	struct zzapp_service_runtime *state = runtime_of(rec);
 	aar_request req;
-	uint32_t id;
+	uint32_t old_gen;
 	int rc;
 
 	memset(&req, 0, sizeof(req));
 	req.op = AAR_OP_DISPLAY_FLIP;
 	req.arg[AAR_A_DISPLAY_ID] = state->display_client_id;
 	req.arg[AAR_A_DISPLAY_FLIP_FLAGS] = flags;
+	/* The GL system worker must never park or modify the app's wait. */
+	if (buffer->nonblocking)
+		return zzapp_xport_post_request_prepared(rec, ZZAPP_XPORT_REQ_FLIP,
+							 &req, 0U, NULL,
+							 flip_prepare, buffer);
+	if (buffer->frame_id)
+		return req_post_prepared(ZZAPP_XPORT_REQ_FLIP, &req, 0U, NULL,
+					 flip_prepare, buffer);
+
+	(void)flip_prepare(buffer);
+	/* The generation moves before the post: a completion is applied against it. */
 	slot_state_lock_acquire();
-	state->display_flip_address = present;
-	state->display_flip_submit = 0U;
-	state->display_flip_result = AAR_OK;
-	/* The generation moves before the post: a completion is applied against
-	 * it. */
-	__atomic_store_n(&state->display_flip_gen, state->display_flip_gen + 1U,
-			 __ATOMIC_RELEASE);
+	old_gen = flip_arm_locked(state, buffer->present, 0U);
 	slot_state_lock_release();
-	rc = req_post(ZZAPP_XPORT_REQ_FLIP, &req, 0U, &id);
+	rc = req_post(ZZAPP_XPORT_REQ_FLIP, &req, 0U, NULL);
 	if (rc != AAR_OK) {
 		slot_state_lock_acquire();
-		__atomic_store_n(&state->display_flip_gen,
-				 state->display_flip_gen - 1U, __ATOMIC_RELEASE);
+		__atomic_store_n(&state->display_flip_gen, old_gen, __ATOMIC_RELEASE);
 		slot_state_lock_release();
 		return rc;
 	}
 	return AAR_OK;
 }
 
-static int display_flip(uint32_t surface_id, uint32_t flags)
+static int display_flip(uint32_t surface_id, uint32_t flags, uint64_t frame_id,
+			int nonblocking)
 {
 	struct zzapp_service_runtime *state = current_runtime();
-	zzapp_rec_t *rec = service_rec();
-	uint32_t front;
-	uint32_t back;
-	uint32_t present;
+	struct flip_buffer buffer;
 
-	if (!state->display_bound || surface_id != state->display_id)
+	if (!state || !state->display_bound || surface_id != state->display_id)
 		return AAR_E_INVAL;
 	if (!zzapp_display_flip_idle())
 		return AAR_E_BUSY;
-	front = state->display_front;
-	back = state->display_back;
+	buffer.state = state;
+	buffer.frame_id = frame_id;
+	buffer.nonblocking = nonblocking;
+	buffer.front = state->display_front;
+	buffer.back = state->display_back;
 	if (display_mailbox_enabled()) {
-		flush_presented(back, state->display_bytes);
-		return display_mailbox_flip(back);
+		if ((frame_id || nonblocking) && zzapp_services_stop_requested())
+			return AAR_E_IO;
+		flush_presented(buffer.back, state->display_bytes);
+		return display_mailbox_flip(buffer.back, frame_id);
 	}
 	if (state->display_back_owned) {
-		if (front == 0U || back == 0U)
+		if (buffer.front == 0U || buffer.back == 0U)
 			return AAR_E_INVAL;
-		memcpy((void *)(uintptr_t)front, (const void *)(uintptr_t)back,
-		       state->display_bytes);
-		flush_presented(front, state->display_bytes);
-		present = front;
-	} else if (state->display_spare != 0U) {
-		flush_presented(back, state->display_bytes);
-		present = back;
-		state->display_queued = back;
-		state->display_back = state->display_spare;
-		state->display_spare = 0U;
+		buffer.present = buffer.front;
 	} else {
-		present = back != 0U ? back : front;
-		flush_presented(present, state->display_bytes);
+		buffer.present = buffer.back != 0U ? buffer.back : buffer.front;
 	}
-	state->display_present = present;
-	return flip_post(rec, present, flags);
+	return flip_post(service_rec(), &buffer, flags);
 }
 
 int zzapp_svc_display_flip_async(uint32_t surface_id)
 {
-	return display_flip(surface_id, AAR_FLIPF_ASYNC);
+	return display_flip(surface_id, AAR_FLIPF_ASYNC, 0U, 0);
 }
 
 int zzapp_svc_display_flip(uint32_t surface_id)
 {
-	int rc = display_flip(surface_id, 0U);
+	int rc = display_flip(surface_id, 0U, 0U, 0);
 
 	if (rc != AAR_OK)
 		return rc;
-	return wait_flip(current_runtime()->display_flip_gen);
+	return wait_flip(current_runtime()->display_flip_gen, 0);
+}
+
+int zzapp_display_flip_tracked(uint32_t surface_id, uint64_t frame_id)
+{
+	if (frame_id) {
+		struct zzapp_service_runtime *state = current_runtime();
+		int pending;
+
+		slot_state_lock_acquire();
+		pending = state && present_pending_locked(state, frame_id);
+		slot_state_lock_release();
+		if (!pending)
+			return AAR_E_INVAL;
+	}
+	return display_flip(surface_id, AAR_FLIPF_ASYNC, frame_id,
+			    zzapp_kernel_current_thread() < 0);
+}
+
+void zzapp_display_finish_tracked(uint64_t frame_id, uint32_t reason)
+{
+	struct zzapp_service_runtime *state = current_runtime();
+
+	if (!state || !frame_id)
+		return;
+	slot_state_lock_acquire();
+	if (present_pending_locked(state, frame_id))
+		aar_present_finish(&state->present_feedback, frame_id,
+				   AAR_PRESENT_UNCONFIRMED, reason, now_us());
+	slot_state_lock_release();
 }
 
 int zzapp_svc_display_refresh(aar_surface *out)
@@ -4438,7 +4686,13 @@ static void display_unbind(zzapp_rec_t *rec)
 {
 	struct zzapp_service_runtime *state = runtime_of(rec);
 
+	display_mailbox_disable();
 	slot_state_lock_acquire();
+	/* Preserve a client acknowledgement already harvested during close. */
+	if ((state->display_flip_frame || state->display_reply_expired) &&
+	    zzapp_xport_req_state(rec, ZZAPP_XPORT_REQ_FLIP) == ZZAPP_XPORT_REQ_DONE)
+		flip_apply_locked(rec, 0);
+	display_cancel_pending_locked(rec);
 	state->display_bound = 0;
 	state->display_id = 0U;
 	state->display_ack_seen = 0U;
@@ -4446,6 +4700,8 @@ static void display_unbind(zzapp_rec_t *rec)
 	state->display_flip_gen = 0U;
 	state->display_flip_ack = 0U;
 	state->display_flip_submit = 0U;
+	state->display_reply_expired = 0U;
+	state->display_wait_feedback = 0;
 	memset(state->palette_dirty, 0, sizeof(state->palette_dirty));
 	state->display_flags = 0U;
 	state->vblank_waiting = 0U;
@@ -4468,12 +4724,11 @@ int zzapp_svc_display_close(uint32_t surface_id)
 	/* The client closes its screen; the surface goes whatever it answers. */
 	(void)blocking_request(AAR_OP_DISPLAY_CLOSE, ZZAPP_WAIT_DISPLAY_OPEN, 0U,
 			       &id, 1U, NULL, 0U, NULL);
+	display_unbind(service_rec());
 	zzapp_xport_abandon(service_rec(), ZZAPP_XPORT_REQ_FLIP);
 	revoke_surface_grants();
 	zzapp_kernel_surface_unbind(zzapp_runtime_kernel(), service_pid());
 	drop_owned_back();
-	display_mailbox_disable();
-	display_unbind(service_rec());
 	return AAR_OK;
 }
 
@@ -4823,6 +5078,67 @@ uint64_t zzapp_svc_display_last_present_us(void)
 	t = state->display_present_us;
 	slot_state_lock_release();
 	return t;
+}
+
+int zzapp_svc_display_present(uint32_t surface_id, uint32_t flags,
+			      uint64_t *frame_id)
+{
+	zzapp_rec_t *rec = service_rec();
+	struct zzapp_service_runtime *state = current_runtime();
+	uint64_t id;
+	int rc;
+
+	if (!frame_id)
+		return AAR_E_INVAL;
+	*frame_id = 0U;
+	if (!display_named(state, surface_id) ||
+	    (flags != 0U && flags != AAR_PRESENT_ASYNC && flags != AAR_PRESENT_GL))
+		return AAR_E_INVAL;
+	if (stop_requested_rec(rec))
+		return AAR_E_IO;
+	slot_state_lock_acquire();
+	id = aar_present_reserve(&state->present_feedback);
+	if (id)
+		state->present_submitting = 1;
+	slot_state_lock_release();
+	if (!id)
+		return AAR_E_BUSY;
+
+	rc = flags == AAR_PRESENT_GL ? zzapp_minigl_swap_tracked(surface_id, id) :
+	     display_flip(surface_id, flags == AAR_PRESENT_ASYNC ? AAR_FLIPF_ASYNC : 0U,
+			  id, 0);
+	slot_state_lock_acquire();
+	state->present_submitting = 0;
+	if (rc != AAR_OK)
+		aar_present_discard(&state->present_feedback, id);
+	display_cancel_on_stop_locked(rec);
+	if (state->present_feedback.pending)
+		set_add(&set_svc, rec->hdr.pid);
+	slot_state_lock_release();
+	if (rc != AAR_OK)
+		return rc;
+
+	*frame_id = id;
+	if (flags == 0U && wait_flip(state->display_flip_gen, 1) != AAR_OK) {
+		slot_state_lock_acquire();
+		display_cancel_on_stop_locked(rec);
+		slot_state_lock_release();
+	}
+	return AAR_OK;
+}
+
+int zzapp_svc_display_present_poll(aar_present_result *out)
+{
+	zzapp_rec_t *rec = service_rec();
+	int rc;
+
+	if (!out || !rec)
+		return AAR_E_INVAL;
+	slot_state_lock_acquire();
+	display_cancel_on_stop_locked(rec);
+	rc = aar_present_poll(&runtime_of(rec)->present_feedback, out);
+	slot_state_lock_release();
+	return rc;
 }
 
 static int slot_is_busy(uint32_t slot)
@@ -5480,7 +5796,6 @@ void zzapp_services_reclaim_halted_audio(void)
  * core 0 never frees the blocks of a record while it is looked at; the wake
  * itself is outside it.
  */
-static int flip_service_locked(zzapp_rec_t *rec);
 static void console_service(zzapp_rec_t *rec);
 
 /* A blocking request of the record has its completion. */
@@ -5498,13 +5813,15 @@ static int service_one_locked(zzapp_rec_t *rec)
 	int kicked;
 	int ready = 0;
 	int event_ready = 0;
+	int pump_rc = 0;
 
 	if (!zzapp_xport_live(rec))
 		return 0;
 	kicked = zzapp_xport_kick_take(rec) != 0U;
 	if (kicked || state->wait_kind != ZZAPP_WAIT_NONE || console_pending(rec) ||
-	    palette_pending(rec) || file_async_pending(rec)) {
-		int pump_rc = zzapp_xport_pump(rec);
+	    palette_pending(rec) || file_async_pending(rec) ||
+	    state->display_flip_frame) {
+		pump_rc = zzapp_xport_pump(rec);
 
 		if (pump_rc < 0)
 			/* The waiter finds the indices corrupt and ends. */
@@ -5513,6 +5830,11 @@ static int service_one_locked(zzapp_rec_t *rec)
 	}
 	console_service(rec);
 	palette_service(rec);
+	if (state->display_flip_frame ||
+	    (kicked && state->display_reply_expired) ||
+	    (state->wait_kind == ZZAPP_WAIT_FLIP && !state->vblank_waiting))
+		flip_apply_locked(rec, pump_rc);
+	display_cancel_on_stop_locked(rec);
 	if (state->wait_kind == ZZAPP_WAIT_NONE)
 		return 0;
 	switch (state->wait_kind) {
@@ -5535,8 +5857,9 @@ static int service_one_locked(zzapp_rec_t *rec)
 			ready |= state->vblank_seq != state->wait_value;
 			break;
 		}
-		(void)flip_service_locked(rec);
 		ready |= state->display_flip_ack == state->wait_value;
+		if (state->display_wait_feedback)
+			ready |= flip_feedback_wait_done(state, state->wait_value);
 		break;
 	case ZZAPP_WAIT_AUDIO:
 		/* Core 0's bounded handoff, not cancellable: the waiter does
@@ -5567,6 +5890,7 @@ static int service_one_locked(zzapp_rec_t *rec)
 static int service_wanted(zzapp_rec_t *rec)
 {
 	return runtime_of(rec)->wait_kind != ZZAPP_WAIT_NONE ||
+	       runtime_of(rec)->present_feedback.pending ||
 	       console_pending(rec) || palette_pending(rec) || file_async_pending(rec);
 }
 
@@ -5577,8 +5901,10 @@ static void service_pass(void)
 
 	for (i = set_svc.count; i-- > 0U;) {
 		zzapp_rec_t *rec;
+		struct zzapp_service_runtime *state;
 		uint32_t pid;
 		int wake;
+		int check_mailbox;
 
 		slot_state_lock_acquire();
 		if (i >= set_svc.count) {
@@ -5595,12 +5921,17 @@ static void service_pass(void)
 		ctx_pid[service_context()] = pid;
 		SERVICE_LOOKUP_GAP(pid);
 		wake = service_one_locked(rec);
+		state = runtime_of(rec);
+		check_mailbox = state->present_feedback.pending &&
+			__atomic_load_n(&state->display_mailbox_active, __ATOMIC_ACQUIRE);
 		if (!service_wanted(rec))
 			set_del(&set_svc, pid);
 		/* IDLE is the launcher's permission to release the shell. A
 		 * final console completion may have drained it in this pass. */
 		finish_shell_release(rec);
 		slot_state_lock_release();
+		if (check_mailbox)
+			display_mailbox_expire(state);
 		if (wake != 0)
 			(void)zzapp_kernel_wake(zzapp_runtime_kernel(), pid,
 						(zzapp_wake_reason_t)wake);

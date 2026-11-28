@@ -900,6 +900,8 @@ static const zzapp_svc_descriptor_t api_descriptors[API_VENEERS] = {
     [API_SLOT(display_pointer)] = D(3, ZZAPP_SVC_RETURN_INT, IN_OPT(2, sizeof(aar_pointer)), N, N),
     [API_SLOT(display_wait_vblank)] = D(1, ZZAPP_SVC_RETURN_INT, N, N, N),
     [API_SLOT(display_last_present_us)] = D(0, ZZAPP_SVC_RETURN_U64, N, N, N),
+    [API_SLOT(display_present)] = D(3, ZZAPP_SVC_RETURN_INT, OUT_OPTIONAL(2, sizeof(uint64_t), 0U), N, N),
+    [API_SLOT(display_present_poll)] = D(1, ZZAPP_SVC_RETURN_INT, OUT_OPTIONAL(0, sizeof(aar_present_result), 0U), N, N),
     /* audio */
     [API_SLOT(audio_open)] = D(3, ZZAPP_SVC_RETURN_INT, OUT_OPTIONAL(2, sizeof(aar_audio), 1U), N, N),
     [API_SLOT(audio_close)] = D(0, ZZAPP_SVC_RETURN_INT, N, N, N),
@@ -2051,6 +2053,15 @@ static void zzapp_svc_dispatch_slow(const aar_api *api, zzapp_proc_t *proc,
             counters_handler_end(st);
         }
         frame->r[0] = (uint32_t)status;
+        return;
+    }
+    /* These fixed, writable outputs go directly to the handler so rejection
+     * can zero the ID and an empty poll does not touch the result. */
+    if (!gl && ((number == API_SLOT(display_present) &&
+                 args[2] % _Alignof(uint64_t) != 0U) ||
+                (number == API_SLOT(display_present_poll) &&
+                 args[0] % _Alignof(aar_present_result) != 0U))) {
+        frame->r[0] = (uint32_t)AAR_E_FAULT;
         return;
     }
     if (gl && (number == GL_SLOT(DrawArrays) ||

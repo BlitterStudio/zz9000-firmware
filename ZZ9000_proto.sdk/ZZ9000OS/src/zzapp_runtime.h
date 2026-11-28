@@ -324,6 +324,7 @@ int zzapp_minigl_bind(uint32_t surface_id, const struct aar_gl **out);
 int zzapp_minigl_bind_flags(uint32_t surface_id, uint32_t flags,
                             const struct aar_gl **out);
 int zzapp_minigl_swap(void);
+int zzapp_minigl_swap_tracked(uint32_t surface_id, uint64_t frame_id);
 void zzapp_minigl_unbind(void);
 void zzapp_minigl_reclaim(uint32_t generation);
 /* Core 0, while core 1 is halted: drops the binding without module code. */

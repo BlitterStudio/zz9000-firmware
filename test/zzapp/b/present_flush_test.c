@@ -36,7 +36,7 @@ static void count_yield(void)
 {
 	svc_yield();
 	if (++g_yields >= 1000U)
-		zzapp_services_display_vblank(current_runtime()->display_present);
+		zzapp_services_display_vblank(current_runtime()->display_flip_address);
 }
 
 static void open_display(void)
@@ -80,7 +80,7 @@ static void test_steady_flip_flushes_surface_only(void)
 			fail("steady flip");
 			return;
 		}
-		presented = current_runtime()->display_present;
+		presented = current_runtime()->display_flip_address;
 		/* No remap and no grant churn across a steady-state flip:
 		 * the surface stays mapped from open to close. */
 		if (service_proc()->as.alias_count != aliases_before) {

@@ -37,7 +37,7 @@ and programs that use the card.
 | [aar-run manual](https://github.com/BlitterStudio/aar/blob/main/client/run/README.md) | The reference launcher, shipped by the SDK as `Docs/aar-run.guide`. |
 | [aar-developer-guide.md](https://github.com/BlitterStudio/aar/blob/main/docs/aar-developer-guide.md) | Building (including freestanding apps), running, memory, scheduling, bit-identical maths, and porting apps. |
 | [aar-api.md](https://github.com/BlitterStudio/aar/blob/main/docs/aar-api.md) | Every `aar_*` call and `AAR_*` constant, with the ZZ9000 notes and extension table. |
-| [app-runtime.md](app-runtime.md) | The firmware and client contract: the AAR 0.5 interface choices, process records and handles, the record arena, the claim and transport protocol (control block, queues, doorbell), admission and its refusal reasons, limits and leases, release and quarantine, address spaces and ASIDs, lifecycle, retire, exit and reset teardown, and the SVC interface. |
+| [app-runtime.md](app-runtime.md) | The firmware and client contract: AAR 0.6, process records and handles, admission, limits and leases, address spaces, transport, teardown, and the SVC interface. |
 | [host-runner/README.md in BlitterStudio/aar](https://github.com/BlitterStudio/aar/blob/main/host-runner/README.md) | Running apps on a PC with the host runner. |
 | [templates/README.md in BlitterStudio/aar](https://github.com/BlitterStudio/aar/blob/main/templates/README.md) | The app templates, including the freestanding, FPU probe, and ring conformance apps. |
 

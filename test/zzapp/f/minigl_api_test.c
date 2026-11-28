@@ -43,6 +43,7 @@ static uint32_t g_present_pixel;
 static int g_flips;
 static uint32_t g_bind_flags;
 static uint32_t g_display_id;
+static uint64_t g_tracked_frame;
 
 /* The id of the app's open display, 0 without one. */
 uint32_t zzapp_display_id(void)
@@ -137,6 +138,12 @@ static int mock_app_swap(void *context)
     return AAR_OK;
 }
 
+static int mock_app_swap_tracked(void *context, uint64_t frame_id)
+{
+    g_tracked_frame = frame_id;
+    return mock_app_swap(context);
+}
+
 static void mock_app_unbind(void *context)
 {
     (void)context;
@@ -198,6 +205,7 @@ static void reset_module(void)
     g_ops.app_reclaim = mock_app_reclaim;
     g_ops.app_bind_flags = mock_app_bind_flags;
     g_ops.reset_protocol = ZZM_MINIGL_RESET_PROTOCOL_V2;
+    g_ops.app_swap_tracked = mock_app_swap_tracked;
     g_available = 0;
     g_acquires = 0;
     g_releases = 0;
@@ -229,6 +237,7 @@ static void reset_module(void)
     g_telemetry_resets = 0U;
     g_telemetry_swaps = 0U;
     g_telemetry_reports = 0U;
+    g_tracked_frame = 0;
 }
 
 int main(void)
@@ -372,5 +381,26 @@ int main(void)
     assert(g_reclaims == 0);
     assert(g_unbinds == 0);
     assert(g_releases == 1);
+    zzapp_boot_init();
+    reset_module();
+    g_available = 1;
+    g_display_id = 1u;
+    zzapp_test_mark_running();
+    zzapp_api_enter();
+    assert(zzapp_minigl_swap_tracked(1u, 0x200000011ULL) == AAR_E_INVAL);
+    assert(g_tracked_frame == 0 && g_swaps == 0);
+    zzapp_api_leave();
+    assert(api->gl_bind(1u) == &g_gl);
+    zzapp_api_enter();
+    assert(zzapp_minigl_swap_tracked(2u, 0x200000011ULL) == AAR_E_INVAL);
+    assert(g_tracked_frame == 0 && g_swaps == 0);
+    g_ops.size = offsetof(zzm_minigl_ops_v1_t, app_swap_tracked);
+    assert(zzapp_minigl_swap_tracked(1u, 0x200000011ULL) == AAR_E_NOSYS);
+    assert(g_tracked_frame == 0 && g_swaps == 0);
+    g_ops.size = sizeof(g_ops);
+    assert(zzapp_minigl_swap_tracked(1u, 0x200000011ULL) == AAR_OK);
+    assert(g_tracked_frame == 0x200000011ULL && g_swaps == 1);
+    zzapp_api_leave();
+    api->gl_unbind();
     return 0;
 }
