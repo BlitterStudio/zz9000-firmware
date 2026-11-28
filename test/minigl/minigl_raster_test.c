@@ -588,7 +588,7 @@ static void assert_texture_compaction(void)
 {
     MiniGLRasterBuffers buffers = {
         color, sizeof(color), depth, sizeof(depth), vertices, sizeof(vertices),
-        staging, sizeof(staging), textures, 128U, W, H
+        staging, sizeof(staging), textures, 128U, W, H, 0U
     };
     ZZ9KMiniGLPacketSetState s = state();
     unsigned id;
@@ -631,7 +631,7 @@ static void assert_fragmented_pool_growth(void)
 {
     MiniGLRasterBuffers buffers = {
         color, sizeof(color), depth, sizeof(depth), vertices, sizeof(vertices),
-        staging, sizeof(staging), fragmented_pool, sizeof(fragmented_pool), W, H
+        staging, sizeof(staging), fragmented_pool, sizeof(fragmented_pool), W, H, 0U
     };
     ZZ9KMiniGLPacketSetState s = state();
     uint32_t id;
@@ -781,6 +781,8 @@ struct rix_raster_model {
     unsigned cache_cleans;
     unsigned cache_invalidates;
     int complete;
+    uint32_t clear_depth;
+    void (*depth_clear_hook)(struct rix_raster_model *model, uint16_t z16);
 };
 
 static uint16_t rix_raster_rgb565(uint32_t rgba)
@@ -805,9 +807,15 @@ static void rix_raster_complete_fifo_packet(struct rix_raster_model *model)
                 model->color_address = model->fifo_packet[word];
             else if ((command & 0x0fffffffU) == RIX_REG_CLEAR_COLOR)
                 model->clear_color = model->fifo_packet[word];
+            else if ((command & 0x0fffffffU) == RIX_REG_CLEAR_DEPTH)
+                model->clear_depth = model->fifo_packet[word];
             ++word;
             break;
         case 2U:
+            if (model->depth_clear_hook != NULL &&
+                (command & (RIX_FRAMEBUFFER_MEMSET | RIX_FRAMEBUFFER_DEPTH)) ==
+                    (RIX_FRAMEBUFFER_MEMSET | RIX_FRAMEBUFFER_DEPTH))
+                model->depth_clear_hook(model, (uint16_t)model->clear_depth);
             if ((command & (RIX_FRAMEBUFFER_MEMSET | RIX_FRAMEBUFFER_COLOR)) ==
                 (RIX_FRAMEBUFFER_MEMSET | RIX_FRAMEBUFFER_COLOR)) {
                 unsigned index;
@@ -968,7 +976,7 @@ static void assert_rix_ownership_transitions(void)
          * the next back buffer, bind one before using the raster again. */
         MiniGLRasterBuffers buffers = {
             color, sizeof(color), depth, sizeof(depth), vertices, sizeof(vertices),
-            staging, sizeof(staging), textures, sizeof(textures), W, H
+            staging, sizeof(staging), textures, sizeof(textures), W, H, 0U
         };
         assert(minigl_raster_configure_buffers(&buffers));
     }
@@ -1004,6 +1012,242 @@ static void assert_rix_ownership_transitions(void)
     minigl_raster_set_rix_platform(NULL);
 }
 
+/* A write-back data cache over the depth buffer: CPU stores stay dirty until
+ * a clean, and a dirty line may be evicted at any moment, writing its CPU
+ * bytes over whatever RasterIX stored in DDR since. The model holds the DDR
+ * image and the value each byte had when last synchronized. */
+struct rix_cache_model {
+    struct rix_raster_model base;
+    uint8_t ddr[W * H * 2U];
+    uint8_t synced[W * H * 2U];
+    unsigned depth_invalidates;
+};
+static struct rix_cache_model s_cache_model;
+
+static void cache_model_sync(void *context, uintptr_t address, size_t bytes, int clean)
+{
+    struct rix_cache_model *model = context;
+    uintptr_t base = (uintptr_t)depth;
+    size_t index;
+
+    for (index = 0U; index < sizeof(model->ddr); ++index) {
+        uintptr_t at = base + index;
+        if (at < address || at >= address + bytes)
+            continue;
+        if (clean)
+            model->ddr[index] = depth[index];
+        else
+            depth[index] = model->ddr[index];
+        model->synced[index] = model->ddr[index];
+    }
+    if (!clean && address < base + sizeof(model->ddr) && address + bytes > base)
+        ++model->depth_invalidates;
+}
+
+static void cache_model_clean(void *context, uintptr_t address, size_t bytes)
+{
+    cache_model_sync(context, address, bytes, 1);
+    ++((struct rix_raster_model *)context)->cache_cleans;
+}
+
+static void cache_model_invalidate(void *context, uintptr_t address, size_t bytes)
+{
+    cache_model_sync(context, address, bytes, 0);
+    ++((struct rix_raster_model *)context)->cache_invalidates;
+}
+
+static void cache_model_evict_dirty(struct rix_cache_model *model)
+{
+    size_t index;
+
+    for (index = 0U; index < sizeof(model->ddr); ++index) {
+        if (depth[index] != model->synced[index]) {
+            model->ddr[index] = depth[index];
+            model->synced[index] = depth[index];
+        }
+    }
+}
+
+static void cache_model_depth_clear(struct rix_raster_model *model, uint16_t z16)
+{
+    struct rix_cache_model *cache = (struct rix_cache_model *)model;
+    size_t index;
+
+    for (index = 0U; index < W * H; ++index) {
+        cache->ddr[index * 2U] = (uint8_t)z16;
+        cache->ddr[index * 2U + 1U] = (uint8_t)(z16 >> 8U);
+    }
+}
+
+static void cache_model_setup(MiniGLRixPlatform *platform)
+{
+    memset(&s_cache_model, 0, sizeof(s_cache_model));
+    s_cache_model.base.complete = 1;
+    s_cache_model.base.depth_clear_hook = cache_model_depth_clear;
+    s_cache_model.base.csr[RIX_DRV_CSR_IDENTITY / 4U] = RIX_DRV_IDENTITY_VALUE;
+    s_cache_model.base.csr[RIX_DRV_CSR_VERSION / 4U] = RIX_DRV_VERSION_VALUE;
+    s_cache_model.base.csr[RIX_DRV_CSR_STATUS / 4U] = RIX_DRV_STATUS_IDLE;
+    s_cache_model.base.command_address[0] = 0x01000000U;
+    s_cache_model.base.command_address[1] = 0x01010000U;
+    memset(platform, 0, sizeof(*platform));
+    platform->context = &s_cache_model;
+    platform->csr_read = rix_raster_read;
+    platform->csr_write = rix_raster_write;
+    platform->fifo_read = rix_raster_fifo_read;
+    platform->fifo_write = rix_raster_fifo_write;
+    platform->cache_clean = cache_model_clean;
+    platform->cache_invalidate = cache_model_invalidate;
+    platform->command_buffer[0] = s_cache_model.base.command[0];
+    platform->command_buffer[1] = s_cache_model.base.command[1];
+    platform->command_address[0] = s_cache_model.base.command_address[0];
+    platform->command_address[1] = s_cache_model.base.command_address[1];
+    platform->command_capacity = MINIGL_RIX_COMMAND_BYTES;
+    platform->white_texture = s_cache_model.base.white;
+    platform->white_texture_address = 0x02000000U;
+    platform->white_texture_bytes = sizeof(s_cache_model.base.white);
+}
+
+/* Depth converted for a CPU read, then a clear that replaces both targets:
+ * the stale CPU-format lines must not be written back over RasterIX's clear.
+ * expect_replace is 0 once the dirty table has overflowed: every handoff must
+ * then take the cleaning preparation instead. */
+static void assert_rix_cpu_depth_not_written_back_over_clear(int expect_replace)
+{
+    MiniGLRixPlatform platform;
+    MiniGLRasterBuffers buffers = {
+        color, sizeof(color), depth, sizeof(depth), vertices, sizeof(vertices),
+        staging, sizeof(staging), textures, sizeof(textures), W, H, 0U
+    };
+    ZZ9KMiniGLPacketSetState s = state();
+    unsigned index;
+#ifndef MINIGL_BASE_RASTER
+    unsigned invalidates, cleans;
+#endif
+
+    cache_model_setup(&platform);
+    minigl_raster_set_rix_platform(&platform);
+    assert(minigl_raster_configure_buffers(&buffers));
+    minigl_raster_init();
+    s.enabled_flags = ZZ9K_MGL_STATE_DEPTH_TEST | ZZ9K_MGL_STATE_DEPTH_WRITE;
+    minigl_raster_set_state(&s);
+    memset(depth, 0, sizeof(depth));
+
+    minigl_raster_clear(0x4100U, 0U, 0x006d8200U);
+    assert(minigl_raster_submit_present());
+    assert(minigl_raster_finish()); /* depth is now in CPU order, dirty in the cache */
+    assert(depth[0] == 0x6dU && depth[1] == 0x82U && depth[2] == 0U);
+#ifndef MINIGL_BASE_RASTER
+    invalidates = s_cache_model.base.cache_invalidates;
+    cleans = s_cache_model.base.cache_cleans;
+#endif
+    minigl_raster_clear(0x4100U, 0U, 0x00123400U);
+#ifndef MINIGL_BASE_RASTER
+    if (expect_replace)
+        assert(s_cache_model.base.cache_invalidates > invalidates);
+    else
+        assert(s_cache_model.base.cache_cleans > cleans);
+#else
+    (void)expect_replace;
+#endif
+    assert(minigl_raster_submit_present()); /* RasterIX executes the second clear */
+    cache_model_evict_dirty(&s_cache_model);
+    assert(minigl_raster_finish());
+    for (index = 0U; index < W * H; ++index) {
+        if (depth[index * 3U] != 0x12U || depth[index * 3U + 1U] != 0x34U ||
+            depth[index * 3U + 2U] != 0U)
+            fprintf(stderr, "depth[%u] = %02x%02x%02x, expected 123400 (stale CPU-format write-back)\n",
+                    index, depth[index * 3U], depth[index * 3U + 1U], depth[index * 3U + 2U]);
+        assert(depth[index * 3U] == 0x12U && depth[index * 3U + 1U] == 0x34U &&
+               depth[index * 3U + 2U] == 0U);
+    }
+    minigl_raster_set_rix_platform(NULL);
+}
+
+#ifndef MINIGL_BASE_RASTER
+/* Each CPU handoff is noted once per buffer with its current size; a release
+ * (the buffer's free) forgets it and a clear then has nothing to discard. */
+static void assert_rix_cpu_dirty_lifetime(void)
+{
+    MiniGLRixPlatform platform;
+    MiniGLRasterBuffers full = {
+        color, sizeof(color), depth, sizeof(depth), vertices, sizeof(vertices),
+        staging, sizeof(staging), textures, sizeof(textures), W, H, 0U
+    };
+    MiniGLRasterBuffers half = full;
+    ZZ9KMiniGLPacketSetState s = state();
+    unsigned invalidates;
+
+    half.width = W / 2U;
+    half.height = H / 2U;
+    s.enabled_flags = ZZ9K_MGL_STATE_DEPTH_TEST | ZZ9K_MGL_STATE_DEPTH_WRITE;
+    cache_model_setup(&platform);
+    minigl_raster_set_rix_platform(&platform);
+    assert(minigl_raster_configure_buffers(&full));
+    minigl_raster_init();
+    minigl_raster_set_state(&s);
+    minigl_raster_clear(0x4100U, 0U, 0x006d8200U);
+    assert(minigl_raster_submit_present());
+    assert(minigl_raster_finish());
+    assert(minigl_raster_buffer_released(depth) == W * H * 2U);
+    assert(minigl_raster_buffer_released(depth) == 0U);
+    assert(minigl_raster_buffer_released(color) == W * H * 2U);
+    assert(minigl_raster_buffer_released(NULL) == 0U);
+    invalidates = s_cache_model.depth_invalidates;
+    minigl_raster_clear(0x4100U, 0U, 0x00123400U); /* nothing noted: nothing to discard */
+    assert(s_cache_model.depth_invalidates == invalidates);
+    assert(minigl_raster_submit_present());
+    assert(minigl_raster_finish()); /* noted again at its current size */
+    invalidates = s_cache_model.depth_invalidates;
+    minigl_raster_clear(0x4100U, 0U, 0x006d8200U);
+    assert(s_cache_model.depth_invalidates == invalidates + 1U);
+    assert(minigl_raster_submit_present());
+    assert(minigl_raster_finish());
+    /* The same address resized: the note follows the new size, not the old. */
+    assert(minigl_raster_configure_buffers(&half));
+    minigl_raster_init();
+    minigl_raster_set_state(&s);
+    minigl_raster_clear(0x4100U, 0U, 0x00123400U);
+    assert(minigl_raster_submit_present());
+    assert(minigl_raster_finish());
+    assert(minigl_raster_buffer_released(depth) == (W / 2U) * (H / 2U) * 2U);
+    (void)minigl_raster_buffer_released(color);
+    assert(minigl_raster_configure_buffers(&full));
+    minigl_raster_init();
+    minigl_raster_set_rix_platform(NULL);
+}
+
+/* More buffers than the table holds: nothing is dropped silently; replacing
+ * clears stop and every handoff cleans, so the hazard stays closed. */
+static uint32_t extra_color[26][W * H] __attribute__((aligned(2048)));
+static uint8_t extra_depth[26][W * H * 3U] __attribute__((aligned(2048)));
+
+static void assert_rix_cpu_dirty_overflow_is_safe(void)
+{
+    MiniGLRixPlatform platform;
+    ZZ9KMiniGLPacketSetState s = state();
+    unsigned index;
+
+    s.enabled_flags = ZZ9K_MGL_STATE_DEPTH_TEST | ZZ9K_MGL_STATE_DEPTH_WRITE;
+    cache_model_setup(&platform);
+    minigl_raster_set_rix_platform(&platform);
+    for (index = 0U; index < 26U; ++index) {
+        MiniGLRasterBuffers buffers = {
+            extra_color[index], sizeof(extra_color[index]), extra_depth[index],
+            sizeof(extra_depth[index]), vertices, sizeof(vertices),
+            staging, sizeof(staging), textures, sizeof(textures), W, H, 0U
+        };
+        assert(minigl_raster_configure_buffers(&buffers));
+        minigl_raster_init();
+        minigl_raster_set_state(&s);
+        minigl_raster_clear(0x4100U, 0U, 0x00ffff00U);
+        assert(minigl_raster_submit_present());
+        assert(minigl_raster_finish()); /* 52 buffers noted against 48 slots */
+    }
+    minigl_raster_set_rix_platform(NULL);
+    assert_rix_cpu_depth_not_written_back_over_clear(0);
+}
+#endif
+
 int main(void)
 {
     ZZ9KMiniGLPacketSetState s;
@@ -1013,7 +1257,7 @@ int main(void)
     {
         MiniGLRasterBuffers buffers = {
             color, sizeof(color), depth, sizeof(depth), vertices, sizeof(vertices),
-            staging, sizeof(staging), textures, sizeof(textures), W, H
+            staging, sizeof(staging), textures, sizeof(textures), W, H, 0U
         };
         assert(minigl_raster_configure_buffers(&buffers));
     }
@@ -1397,6 +1641,10 @@ int main(void)
     assert_integer_vertices();
     assert_texture_compaction();
     assert_rix_ownership_transitions();
+#ifndef MINIGL_BASE_RASTER
+    assert_rix_cpu_dirty_lifetime();
+#endif
+    assert_rix_cpu_depth_not_written_back_over_clear(1);
     assert_fragmented_pool_growth();
     minigl_raster_release_buffers();
     assert(minigl_raster_color_buffer() == NULL);
@@ -1405,10 +1653,13 @@ int main(void)
     {
         MiniGLRasterBuffers buffers = {
             color, sizeof(color), depth, sizeof(depth), vertices, sizeof(vertices),
-            staging, sizeof(staging), textures, sizeof(textures), W, H
+            staging, sizeof(staging), textures, sizeof(textures), W, H, 0U
         };
         assert(minigl_raster_configure_buffers(&buffers));
         minigl_raster_init();
+#ifndef MINIGL_BASE_RASTER
+    assert_rix_cpu_dirty_overflow_is_safe();
+#endif
     }
     puts("MiniGL raster behavioral assertions passed");
     return 0;

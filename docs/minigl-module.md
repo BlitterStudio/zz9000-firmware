@@ -44,7 +44,7 @@ The MiniGL resource tables are declared in
 | 4 | reclaim | 3.0 | typed owner creation, close, reclaim and quarantine |
 | 6 | host window | 3.0 | allocate/free a Z3 host-visible non-cacheable block |
 | 7 | palette | 3.0 | generation, CLUT snapshot and indexed lookup |
-| 8 | app GL host | 4.0 | API guard, bound display, generation-qualified flip and flip wait |
+| 8 | app GL host | 4.0, optional 4.1 | API guard, bound display, generation-qualified flip and flip wait; 4.1 adds [direct mailbox presentation](app-runtime.md#direct-presentation-on-the-mailbox-display) |
 | 9 | profile | 3.0 | counter registration, time samples and snapshots |
 | 10 | transport | 3.0 | descriptor, doorbell and capability publication |
 | 11 | graphics hardware | 3.0 | capability record, CSR/FIFO access, PL330 and fence publication |
@@ -114,7 +114,9 @@ App GL supports six user clip planes, initially disabled.
 `glClipPlane` takes four doubles and captures the equation using the
 current modelview matrix. Use `glEnable` and `glDisable` with
 `GL_CLIP_PLANE0` through `GL_CLIP_PLANE5`. The ARM geometry stage clips
-before either the CPU or RasterIX rasterizer draws the primitive.
+before either the CPU or RasterIX rasterizer draws the primitive. With
+any user plane enabled, packed draws use the geometry path that keeps
+eye coordinates for clipping.
 In smooth polygon point mode a new boundary vertex uses its interpolated
 color. Flat shading still uses the original provoking vertex.
 This does not add clip planes to the 68k wire protocol.

@@ -34,7 +34,14 @@ uint32_t minigl_platform_csr_read(void *context, uint32_t offset)
 
 void minigl_platform_log(const char *message)
 {
-    (void)snprintf(report, sizeof(report), "%s", message);
+    size_t used = strlen(report);
+
+    /* The report is more than one line; the checks name fields on the
+     * first, so a later line must not replace it. */
+    if (used != 0U && used + 1U < sizeof(report))
+        report[used++] = '\n';
+    if (message != NULL && used < sizeof(report))
+        snprintf(report + used, sizeof(report) - used, "%s", message);
 }
 
 int minigl_raster_mem_counters(uint32_t *reads, uint32_t *writes)

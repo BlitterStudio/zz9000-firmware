@@ -44,6 +44,48 @@
  * request followed by the board-relative destination offset and span bytes,
  * so old v9 implementations reject it and the library keeps BRIDGE_BLIT. */
 #define MW_PRESENT_SPAN             51UL
+/* Context handle, slot, incarnation, then an indexed packed draw. A replay
+ * carries only its current header and constants, a store also its geometry. */
+#define MW_DRAW_CACHE_INDEXED       52UL
+#define MW_DRAW_CACHE_HEADER        12UL
+#define MW_DRAW_CACHE_SLOTS         128UL
+#define MW_DRAW_CACHE_SLOT_BYTES    16384UL
+/* Context, slot, incarnation, action, index base, retirement watermark.
+ * The packed indexed prefix and indices are current; only STORE has vertices. */
+#define MW_DRAW_RESIDENT_INDEXED    54UL
+#define MW_DRAW_RESIDENT_HEADER     24UL
+#define MW_DRAW_RESIDENT_STORE      1UL
+#define MW_DRAW_RESIDENT_REUSE      2UL
+#define MW_DRAW_RESIDENT_SLOTS      64UL
+#define MW_DRAW_RESIDENT_SLOT_BYTES 32496UL
+#define MW_DRAW_RESIDENT_XYZ_ST     0x011UL
+#define MW_DRAW_RESIDENT_XYZ_ST_ST  0x051UL
+#define MW_DRAW_RESIDENT_XYZ_RGBA_ST 0x015UL
+
+/* Opcode 54's six words followed by independent index slot, incarnation,
+ * action and retirement watermark. */
+#define MW_DRAW_RESIDENT_BOTH        55UL
+#define MW_DRAW_RESIDENT_BOTH_HEADER 40UL
+#define MW_DRAW_RESIDENT_INDEX_SLOTS 64UL
+#define MW_DRAW_RESIDENT_INDEX_MAX   2048UL
+#define MW_DRAW_RESIDENT_INDEX_BYTES 4096UL
+
+static inline int mw_resident_layout(uint32_t format, uint32_t *prefix, uint32_t *stride)
+{
+    switch (format) {
+    case MW_DRAW_RESIDENT_XYZ_ST:
+        *prefix = 60U; *stride = 20U;
+        return 1;
+    case MW_DRAW_RESIDENT_XYZ_ST_ST:
+        *prefix = 44U; *stride = 28U;
+        return 1;
+    case MW_DRAW_RESIDENT_XYZ_RGBA_ST:
+        *prefix = 44U; *stride = 24U;
+        return 1;
+    default:
+        return 0;
+    }
+}
 /* Custom raw texture format tokens */
 #define MW_RAW_ARGB_4444            0x4d574001UL
 #define MW_RAW_UBYTE_ARGB           0x4d574002UL

@@ -287,6 +287,24 @@ static uint32_t g_rix_cpu_fallbacks;
 static uint32_t g_rix_cpu_reason;
 static int g_rix_cpu_frame;
 
+/* Bitwise equality of two 4-byte-aligned blocks whose size is a multiple of
+ * four: the per-draw state sync compares ~120 and ~64 bytes several times
+ * per command, which a library memcmp walks byte by byte. */
+typedef uint32_t __attribute__((may_alias)) word_alias_t;
+
+static inline int words_equal(const void *a, const void *b, size_t bytes)
+{
+    const word_alias_t *pa = (const word_alias_t *)a;
+    const word_alias_t *pb = (const word_alias_t *)b;
+    size_t count = bytes / sizeof(uint32_t);
+    uint32_t diff = 0U;
+    size_t i;
+
+    for (i = 0U; i < count; ++i)
+        diff |= pa[i] ^ pb[i];
+    return diff == 0U;
+}
+
 static uint32_t be32(const uint8_t *p)
 {
     return ((uint32_t)p[0] << 24) | ((uint32_t)p[1] << 16) |
@@ -304,6 +322,16 @@ static float bef(const uint8_t *p)
     value.u = be32(p);
     return value.f;
 }
+
+static inline uint32_t float_bits(float value)
+{
+    uint32_t bits;
+    memcpy(&bits, &value, sizeof(bits));
+    return bits;
+}
+
+static inline float min_f(float a, float b) { return a < b ? a : b; }
+static inline float max_f(float a, float b) { return a > b ? a : b; }
 
 #if defined(__ARM_NEON)
 static void be_float4(const uint8_t *source, float *out)
@@ -376,11 +404,17 @@ static void matrix_mul(float *out, const float *left, const float *right)
 }
 
 #if defined(__ARM_NEON)
+static inline int exponent_only_invalid(uint32_t bits)
+{
+    uint32_t mag = bits & 0x7fffffffU;
+    return mag != 0U && (mag - 0x00800000U) >= 0x7f000000U;
+}
+
 static int matrix_neon_ok(const float *matrix)
 {
     unsigned index;
     for (index = 0U; index < 16U; ++index)
-        if (!isfinite(matrix[index]) || fpclassify(matrix[index]) == FP_SUBNORMAL)
+        if (exponent_only_invalid(float_bits(matrix[index])))
             return 0;
     return 1;
 }
@@ -416,6 +450,15 @@ void minigl_raster_set_texture_pool(uint8_t *pool, uint32_t bytes,
  * state of that moment only. */
 static int g_rix_abandoned;
 
+/* 8 contexts x (3 colour + 1 depth buffer) plus quarantined targets. Entries
+ * leave through a RasterIX handoff, a replacing clear or the buffer's free
+ * (minigl_raster_buffer_released), so the table cannot outlive its memory. */
+#define RIX_CPU_DIRTY_SLOTS 48U
+static struct { uintptr_t address; size_t bytes; } g_rix_cpu_dirty[RIX_CPU_DIRTY_SLOTS];
+/* A buffer that could not be recorded may hold dirty CPU-order lines nobody
+ * can discard; replacing clears are disabled so every handoff cleans. */
+static int g_rix_cpu_dirty_overflow;
+
 void minigl_raster_set_rix_platform(const MiniGLRixPlatform *platform)
 {
     if (platform == NULL) {
@@ -438,6 +481,76 @@ void minigl_raster_set_rix_platform(const MiniGLRixPlatform *platform)
      * teardown skip waiting for work submitted from now on. */
     g_rix_abandoned = 0;
     minigl_rix_backend_reinit(&g_rix, &g_rix_platform);
+}
+
+/* The Z16/565 -> CPU conversions rewrite the first two bytes of every pixel in
+ * place, and the CPU renderer writes the same buffers afterwards; all of it
+ * stays dirty in the data cache. A clear that replaces both targets skips the
+ * preparation that cleans them, so a late write-back would land over what
+ * RasterIX wrote next (byte-swapped depth, or a clear that never took).
+ * Every CPU gate (minigl_raster_finish) notes the buffers it hands to the CPU;
+ * a replacing clear discards the notes' stale cache lines, a normal
+ * preparation cleans them, and a free invalidates them. Nothing is ever
+ * dropped unresolved: when the table is full the replacing clear is simply
+ * not used (see g_rix_cpu_dirty_overflow). */
+static void rix_cpu_dirty_note(const void *buffer, size_t bytes)
+{
+    uintptr_t address = (uintptr_t)buffer;
+    unsigned index, free_slot = RIX_CPU_DIRTY_SLOTS;
+
+    if (buffer == NULL)
+        return;
+    for (index = 0U; index < RIX_CPU_DIRTY_SLOTS; ++index) {
+        if (g_rix_cpu_dirty[index].address == address) {
+            g_rix_cpu_dirty[index].bytes = bytes;
+            return;
+        }
+        if (g_rix_cpu_dirty[index].address == 0U && free_slot == RIX_CPU_DIRTY_SLOTS)
+            free_slot = index;
+    }
+    if (free_slot == RIX_CPU_DIRTY_SLOTS) {
+        g_rix_cpu_dirty_overflow = 1;
+        return;
+    }
+    g_rix_cpu_dirty[free_slot].address = address;
+    g_rix_cpu_dirty[free_slot].bytes = bytes;
+}
+
+static void rix_cpu_dirty_note_current(void)
+{
+    if (!minigl_rix_backend_available(&g_rix))
+        return;
+    rix_cpu_dirty_note(g_buffers.color, pixels() * 2U);
+    rix_cpu_dirty_note(g_buffers.depth, pixels() * 2U);
+}
+
+/* Returns the bytes that were noted for the buffer (0: none) and forgets it. */
+size_t minigl_raster_buffer_released(const void *buffer)
+{
+    unsigned index;
+    size_t bytes = 0U;
+
+    if (buffer == NULL)
+        return 0U;
+    for (index = 0U; index < RIX_CPU_DIRTY_SLOTS; ++index) {
+        if (g_rix_cpu_dirty[index].address != (uintptr_t)buffer)
+            continue;
+        bytes = g_rix_cpu_dirty[index].bytes;
+        g_rix_cpu_dirty[index].address = 0U;
+        g_rix_cpu_dirty[index].bytes = 0U;
+    }
+    return bytes;
+}
+
+/* discard != 0: the CPU copy is dead (the buffer is about to be fully
+ * rewritten by RasterIX), so its lines are invalidated. Otherwise the caller
+ * already cleaned it. */
+static void rix_cpu_dirty_release(const void *buffer, int discard)
+{
+    size_t bytes = minigl_raster_buffer_released(buffer);
+
+    if (bytes != 0U && discard && g_rix.platform.cache_invalidate != NULL)
+        g_rix.platform.cache_invalidate(g_rix.platform.context, (uintptr_t)buffer, bytes);
 }
 
 static int rix_target_is_rgb565(void)
@@ -474,6 +587,7 @@ static int rix_prepare_depth(void)
         g_rix.platform.cache_clean(g_rix.platform.context, (uintptr_t)depth,
                                    pixels() * 2U);
     g_rix_depth_z16 = 1;
+    rix_cpu_dirty_release(depth, 0);
     return 1;
 }
 
@@ -516,6 +630,8 @@ static int rix_prepare_target(void)
     minigl_profile_push(MGLP_TARGET);
     ok = minigl_rix_backend_prepare_target(&g_rix, g_buffers.color, pixels()) &&
          rix_prepare_depth();
+    if (ok)
+        rix_cpu_dirty_release(g_buffers.color, 0);
     if (ok) {
         g_rix_surface = g_buffers.color;
         g_rix_surface_rgb565 = 1;
@@ -525,7 +641,7 @@ static int rix_prepare_target(void)
 }
 static int rix_clear_replaces_targets(uint32_t mask)
 {
-    return !rix_target_is_rgb565() &&
+    return !g_rix_cpu_dirty_overflow && !rix_target_is_rgb565() &&
            (g_state.enabled_flags & ZZ9K_MGL_STATE_SCISSOR_TEST) == 0U &&
            (mask & (GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT)) ==
                (GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
@@ -551,6 +667,7 @@ static int rix_make_cpu_visible_now(void)
                                             &replacement))
             return 0;
         g_buffers = replacement;
+        g_rix.mailbox_color_address = 0U;
         g_rix_surface = NULL;
         g_rix_surface_rgb565 = 0;
         g_rix_depth_z16 = 0;
@@ -566,10 +683,12 @@ static int rix_make_cpu_visible_now(void)
                                             pixels() * 2U);
         if (!g_rix_cpu_fallback_target_handler(g_rix_cpu_fallback_target_context,
                                                 &g_buffers, &replacement) ||
-            !rix_make_cpu_depth_visible())
+            !rix_make_cpu_depth_visible() ||
+            !minigl_rix_backend_set_color_byte_swap(&g_rix, 0))
             return 0;
         minigl_rix_backend_discard_target(&g_rix, 0);
         g_buffers = replacement;
+        g_rix.mailbox_color_address = 0U;
         g_rix_surface = NULL;
         g_rix_surface_rgb565 = 0;
         return 1;
@@ -612,6 +731,20 @@ int minigl_raster_present_ready(void)
      * The backend owns the fences until they are observed here.
      */
     return minigl_rix_backend_poll(&g_rix);
+}
+
+int minigl_raster_target_ready(uintptr_t color_address)
+{
+    if (!ready())
+        return 0;
+    return minigl_rix_backend_target_ready(&g_rix, color_address);
+}
+
+int minigl_raster_wait_target(uintptr_t color_address)
+{
+    if (!ready())
+        return 0;
+    return minigl_rix_backend_wait_target(&g_rix, color_address);
 }
 
 int minigl_raster_prepare_present(void)
@@ -662,6 +795,11 @@ int minigl_raster_drain(void)
 int minigl_raster_retire_submitted(void)
 {
     return minigl_rix_backend_drain(&g_rix);
+}
+
+int minigl_raster_set_color_byte_swap(int enabled)
+{
+    return minigl_rix_backend_set_color_byte_swap(&g_rix, enabled);
 }
 static int g_async_feed;
 
@@ -743,7 +881,10 @@ int minigl_raster_buffer_to_rgba(uint32_t *rgba, size_t pixels)
 {
     if (!ready() || rgba == NULL)
         return 0;
-    return minigl_rix_backend_make_cpu_visible(&g_rix, rgba, pixels);
+    if (!minigl_rix_backend_make_cpu_visible(&g_rix, rgba, pixels))
+        return 0;
+    rix_cpu_dirty_note(rgba, pixels * 2U);
+    return 1;
 }
 
 int minigl_raster_finish(void)
@@ -754,6 +895,7 @@ int minigl_raster_finish(void)
         g_error |= RASTER_ERR_MEMORY;
         return 0;
     }
+    rix_cpu_dirty_note_current();
     return 1;
 }
 
@@ -860,6 +1002,13 @@ int minigl_raster_configure_buffers(const MiniGLRasterBuffers *buffers)
         return 0;
     }
     count = (uint32_t)buffers->width * buffers->height;
+    if (buffers->mailbox_color &&
+        (!target_is_rgb565_only(buffers) ||
+         ((uintptr_t)buffers->color & (MINIGL_RIX_MAILBOX_COLOR_ALIGNMENT - 1U)) != 0U ||
+         (buffers->color_bytes & (MINIGL_RIX_COLOR_CACHE_LINE_BYTES - 1U)) != 0U)) {
+        g_error |= RASTER_ERR_MEMORY;
+        return 0;
+    }
     if ((target_is_rgb565_only(buffers) ?
          (count > buffers->color_bytes / 2U ||
           g_rix_cpu_fallback_target_handler == NULL) :
@@ -873,6 +1022,8 @@ int minigl_raster_configure_buffers(const MiniGLRasterBuffers *buffers)
         !minigl_raster_finish())
         return 0;
     g_buffers = *buffers;
+    g_rix.mailbox_color_address = buffers->mailbox_color ?
+        (uintptr_t)buffers->color : 0U;
     if (g_rix_surface != g_buffers.color) {
         g_rix_surface = NULL;
         g_rix_surface_rgb565 = 0;
@@ -884,6 +1035,7 @@ int minigl_raster_configure_buffers(const MiniGLRasterBuffers *buffers)
 void minigl_raster_release_buffers(void)
 {
     memset(&g_buffers, 0, sizeof(g_buffers));
+    g_rix.mailbox_color_address = 0U;
     g_rix_surface = NULL;
     g_rix_surface_rgb565 = 0;
     g_rix_depth_z16 = 0;
@@ -1535,34 +1687,44 @@ static uint32_t color_lerp(uint32_t a, uint32_t b, float amount)
                 (uint8_t)(channel(a, 0U) + (channel(b, 0U) - channel(a, 0U)) * amount));
 }
 
+/* `with_color` false leaves the interpolated `color` field at a's value:
+ * triangle, quad and polygon callers replace `color` with the front or back
+ * colour before anything reads it, while lines interpolate it.  A vertex
+ * whose front and back colours match on both ends gets one colour lerp for
+ * both. */
+static void lerp_vertex_into(Vertex *out, const Vertex *a, const Vertex *b, float amount,
+                             int with_color)
+{
+    amount = clamp01(amount);
+    out->x = a->x + (b->x - a->x) * amount;
+    out->y = a->y + (b->y - a->y) * amount;
+    out->z = a->z + (b->z - a->z) * amount;
+    out->w = a->w + (b->w - a->w) * amount;
+    if (g_user_clip_mask) {
+        for (unsigned i = 0U; i < 4U; ++i)
+            out->eye[i] = a->eye[i] + (b->eye[i] - a->eye[i]) * amount;
+    } else {
+        out->inv_w = out->sx = out->sy = out->sz = 0.0f;
+    }
+    out->u0 = a->u0 + (b->u0 - a->u0) * amount;
+    out->v0 = a->v0 + (b->v0 - a->v0) * amount;
+    out->q0 = a->q0 + (b->q0 - a->q0) * amount;
+    out->u1 = a->u1 + (b->u1 - a->u1) * amount;
+    out->v1 = a->v1 + (b->v1 - a->v1) * amount;
+    out->q1 = a->q1 + (b->q1 - a->q1) * amount;
+    out->fog_coord = a->fog_coord + (b->fog_coord - a->fog_coord) * amount;
+    out->color = with_color ? color_lerp(a->color, b->color, amount) : a->color;
+    out->front_color = color_lerp(a->front_color, b->front_color, amount);
+    out->back_color = (a->front_color == a->back_color && b->front_color == b->back_color) ?
+                      out->front_color : color_lerp(a->back_color, b->back_color, amount);
+    out->flat_color = a->flat_color;
+}
+
 static Vertex lerp_vertex(const Vertex *a, const Vertex *b, float amount)
 {
     Vertex out;
 
-    amount = clamp01(amount);
-    out.x = a->x + (b->x - a->x) * amount;
-    out.y = a->y + (b->y - a->y) * amount;
-    out.z = a->z + (b->z - a->z) * amount;
-    out.w = a->w + (b->w - a->w) * amount;
-    if (g_user_clip_mask) {
-        unsigned i;
-
-        for (i = 0U; i < 4U; ++i)
-            out.eye[i] = a->eye[i] + (b->eye[i] - a->eye[i]) * amount;
-    } else {
-        out.inv_w = out.sx = out.sy = out.sz = 0.0f;
-    }
-    out.u0 = a->u0 + (b->u0 - a->u0) * amount;
-    out.v0 = a->v0 + (b->v0 - a->v0) * amount;
-    out.q0 = a->q0 + (b->q0 - a->q0) * amount;
-    out.u1 = a->u1 + (b->u1 - a->u1) * amount;
-    out.v1 = a->v1 + (b->v1 - a->v1) * amount;
-    out.q1 = a->q1 + (b->q1 - a->q1) * amount;
-    out.fog_coord = a->fog_coord + (b->fog_coord - a->fog_coord) * amount;
-    out.color = color_lerp(a->color, b->color, amount);
-    out.front_color = color_lerp(a->front_color, b->front_color, amount);
-    out.back_color = color_lerp(a->back_color, b->back_color, amount);
-    out.flat_color = a->flat_color;
+    lerp_vertex_into(&out, a, b, amount, 1);
     return out;
 }
 
@@ -1574,7 +1736,7 @@ static inline float user_clip_distance(const Vertex *vertex, unsigned index)
            equation[2] * vertex->eye[2] + equation[3] * vertex->eye[3];
 }
 
-static float plane(const Vertex *vertex, unsigned index)
+static inline float plane(const Vertex *vertex, unsigned index)
 {
     switch (index) {
     case 0U: return vertex->x + vertex->w;
@@ -1609,12 +1771,14 @@ static inline unsigned vertex_outcode(const Vertex *v)
 }
 
 
-static unsigned clip_polygon(const Vertex *in, unsigned count, Vertex *out)
+/* Clip against the frustum and any enabled user planes. Compute each
+ * surviving vertex's distance once per plane and alternate output buffers. */
+static unsigned clip_polygon_ex(const Vertex *in, unsigned count, Vertex *out, int with_color)
 {
-    Vertex first[CLIP_MAX_VERTICES];
-    Vertex second[CLIP_MAX_VERTICES];
-    const Vertex *source = in;
-    Vertex *target = first;
+    Vertex scratch[CLIP_MAX_VERTICES];
+    float distance[CLIP_MAX_VERTICES];
+    const Vertex *current = in;
+    Vertex *target = scratch;
     unsigned any = 0U;
     unsigned all = 63U | (g_user_clip_mask << 6U);
     unsigned index;
@@ -1633,13 +1797,20 @@ static unsigned clip_polygon(const Vertex *in, unsigned count, Vertex *out)
     while (any) {
         unsigned plane_index = (unsigned)__builtin_ctz(any);
         unsigned result_count = 0U;
+        int all_inside = 1;
 
         any &= any - 1U;
         for (index = 0U; index < count; ++index) {
-            const Vertex *start = &source[index];
-            const Vertex *end = &source[(index + 1U) % count];
-            float start_distance = plane(start, plane_index);
-            float end_distance = plane(end, plane_index);
+            distance[index] = plane(&current[index], plane_index);
+            if (!(distance[index] >= 0.0f))
+                all_inside = 0;
+        }
+        if (all_inside)
+            continue;
+        for (index = 0U; index < count; ++index) {
+            unsigned next = index + 1U == count ? 0U : index + 1U;
+            float start_distance = distance[index];
+            float end_distance = distance[next];
             int start_inside = start_distance >= 0.0f;
             int end_inside = end_distance >= 0.0f;
 
@@ -1648,26 +1819,39 @@ static unsigned clip_polygon(const Vertex *in, unsigned count, Vertex *out)
                     g_error |= RASTER_ERR_MEMORY;
                     return 0U;
                 }
-                target[result_count++] = *start;
+                target[result_count++] = current[index];
             }
             if (start_inside != end_inside) {
                 if (result_count >= CLIP_MAX_VERTICES) {
                     g_error |= RASTER_ERR_MEMORY;
                     return 0U;
                 }
-                target[result_count++] = lerp_vertex(start, end, start_distance / (start_distance - end_distance));
+                lerp_vertex_into(&target[result_count++], &current[index], &current[next],
+                                 start_distance / (start_distance - end_distance), with_color);
             }
         }
-        source = target;
-        target = target == first ? second : first;
         count = result_count;
         if (!count)
             break;
+        if (current == in) {
+            current = scratch;
+            target = out;
+        } else {
+            const Vertex *finished = target;
+
+            target = (Vertex *)(uintptr_t)current;
+            current = finished;
+        }
     }
-    memcpy(out, source, count * sizeof(*out));
+    if (count && current != out)
+        memcpy(out, current, count * sizeof(*out));
     return count;
 }
 
+static unsigned clip_polygon(const Vertex *in, unsigned count, Vertex *out)
+{
+    return clip_polygon_ex(in, count, out, 1);
+}
 
 static int project(Vertex *vertex)
 {
@@ -1683,11 +1867,9 @@ static int project(Vertex *vertex)
     gl_y = (vertex->y * inverse_w + 1.0f) * 0.5f * g_state.viewport_h + g_state.viewport_y;
     vertex->sy = (float)g_buffers.height - gl_y;
     vertex->sz = vertex->z * inverse_w * 0.5f + 0.5f;
-    return isfinite(vertex->sx) && isfinite(vertex->sy) && isfinite(vertex->sz) &&
-           vertex->sx >= -(float)RASTER_SCREEN_COORD_LIMIT &&
-           vertex->sx <= (float)RASTER_SCREEN_COORD_LIMIT &&
-           vertex->sy >= -(float)RASTER_SCREEN_COORD_LIMIT &&
-           vertex->sy <= (float)RASTER_SCREEN_COORD_LIMIT;
+    return (float_bits(vertex->sx) & 0x7fffffffU) <= float_bits((float)RASTER_SCREEN_COORD_LIMIT) &&
+           (float_bits(vertex->sy) & 0x7fffffffU) <= float_bits((float)RASTER_SCREEN_COORD_LIMIT) &&
+           (float_bits(vertex->sz) & 0x7fffffffU) < 0x7f800000U;
 }
 
 static void texture_matrix(unsigned unit, float *u, float *v, float r, float *q)
@@ -1708,10 +1890,7 @@ static void texture_matrix(unsigned unit, float *u, float *v, float r, float *q)
 #if defined(__ARM_NEON)
 static inline int float_neon_ok(float f)
 {
-    union { float f; uint32_t u; } un;
-    un.f = f;
-    uint32_t a = un.u & 0x7fffffffU;
-    return (a == 0U) || ((a - 0x00800000U) < 0x7f000000U);
+    return !exponent_only_invalid(float_bits(f));
 }
 
 static inline int neon_input_ok(float x, float y, float z, float w)
@@ -1736,6 +1915,86 @@ static void transform_mvp(const float *matrix, float x, float y, float z, float 
     out[1] = x * matrix[1] + y * matrix[5] + z * matrix[9] + w * matrix[13];
     out[2] = x * matrix[2] + y * matrix[6] + z * matrix[10] + w * matrix[14];
     out[3] = x * matrix[3] + y * matrix[7] + z * matrix[11] + w * matrix[15];
+}
+
+#if defined(__ARM_NEON)
+/* Four-lane form of float_neon_ok: every lane is zero or a normal number. */
+static inline int neon_vec_ok(float32x4_t value)
+{
+    uint32x4_t magnitude = vandq_u32(vreinterpretq_u32_f32(value), vdupq_n_u32(0x7fffffffU));
+    uint32x4_t normal = vcltq_u32(vsubq_u32(magnitude, vdupq_n_u32(0x00800000U)),
+                                  vdupq_n_u32(0x7f000000U));
+    uint32x4_t ok = vorrq_u32(vceqq_u32(magnitude, vdupq_n_u32(0U)), normal);
+    uint32x2_t both = vpmin_u32(vget_low_u32(ok), vget_high_u32(ok));
+
+    both = vpmin_u32(both, both);
+    return vget_lane_u32(both, 0) != 0U;
+}
+#endif
+
+/* transform_mvp of an object-space position into four clip floats. */
+static inline void transform_xyzw(const float *v, float *clip_out)
+{
+#if defined(__ARM_NEON)
+    if (g_mvp_neon_ok) {
+        float32x4_t position = vld1q_f32(v);
+
+        if (neon_vec_ok(position)) {
+            float32x2_t low = vget_low_f32(position);
+            float32x2_t high = vget_high_f32(position);
+            float32x4_t value = vmulq_lane_f32(vld1q_f32(g_mvp), low, 0);
+
+            value = vmlaq_lane_f32(value, vld1q_f32(g_mvp + 4U), low, 1);
+            value = vmlaq_lane_f32(value, vld1q_f32(g_mvp + 8U), high, 0);
+            value = vmlaq_lane_f32(value, vld1q_f32(g_mvp + 12U), high, 1);
+            vst1q_f32(clip_out, value);
+            return;
+        }
+    }
+#endif
+    transform_mvp(g_mvp, v[0], v[1], v[2], v[3], clip_out);
+}
+
+static inline void transform_vertex(const float *v, Vertex *out)
+{
+    transform_xyzw(v, &out->x);
+}
+
+/* rgba((uint8_t)(clamp01(c[0]) * 255.0f + 0.5f), ...) for four floats.  The
+ * mask keeps the lanes whose bits are at most +infinity (non-negative, not
+ * NaN) and zeroes the rest, as clamp01 does (-0 included: both end as byte
+ * 0); denormal lanes are flushed, which gives the same byte (a denormal
+ * times 255 plus one half is one half).  The compare is done on the bits
+ * because a float vector compare is lowered to scalar code unless the
+ * compiler may ignore NaN semantics. */
+#if defined(__ARM_NEON)
+static inline uint32_t color_from_vector(float32x4_t value)
+{
+    uint32x4_t bits = vreinterpretq_u32_f32(value);
+    uint32x4_t positive = vcleq_u32(bits, vdupq_n_u32(0x7f800000U));
+    uint16x4_t half;
+    uint8x8_t bytes;
+
+    value = vreinterpretq_f32_u32(vandq_u32(vreinterpretq_u32_f32(value), positive));
+    value = vminq_f32(value, vdupq_n_f32(1.0f));
+    value = vmulq_f32(value, vdupq_n_f32(255.0f));
+    value = vaddq_f32(value, vdupq_n_f32(0.5f));
+    half = vmovn_u32(vcvtq_u32_f32(value));
+    bytes = vmovn_u16(vcombine_u16(half, half));
+    return vget_lane_u32(vreinterpret_u32_u8(vrev32_u8(bytes)), 0);
+}
+#endif
+
+static inline uint32_t color_from_floats(const float *c)
+{
+#if defined(__ARM_NEON)
+    return color_from_vector(vld1q_f32(c));
+#else
+    return rgba((uint8_t)(clamp01(c[0]) * 255.0f + 0.5f),
+                (uint8_t)(clamp01(c[1]) * 255.0f + 0.5f),
+                (uint8_t)(clamp01(c[2]) * 255.0f + 0.5f),
+                (uint8_t)(clamp01(c[3]) * 255.0f + 0.5f));
+#endif
 }
 
 static int read_vertex(const uint8_t *source, uint16_t stride, Vertex *out)
@@ -2118,10 +2377,12 @@ static void triangle_fill(const Vertex *first, const Vertex *second, const Verte
         v2 = second;
         area = -area;
     }
-    x0 = (int)floorf(fminf(v0->sx, fminf(v1->sx, v2->sx)));
-    x1 = (int)ceilf(fmaxf(v0->sx, fmaxf(v1->sx, v2->sx)));
-    y0 = (int)floorf(fminf(v0->sy, fminf(v1->sy, v2->sy)));
-    y1 = (int)ceilf(fmaxf(v0->sy, fmaxf(v1->sy, v2->sy)));
+    /* Callers either project or form an integer pixel square. These
+     * coordinates are finite; min/max tie signs do not affect a cast. */
+    x0 = (int)floorf(min_f(v0->sx, min_f(v1->sx, v2->sx)));
+    x1 = (int)ceilf(max_f(v0->sx, max_f(v1->sx, v2->sx)));
+    y0 = (int)floorf(min_f(v0->sy, min_f(v1->sy, v2->sy)));
+    y1 = (int)ceilf(max_f(v0->sy, max_f(v1->sy, v2->sy)));
     if (x0 < 0) x0 = 0;
     if (y0 < 0) y0 = 0;
     if (x1 >= g_buffers.width) x1 = (int)g_buffers.width - 1;
@@ -2644,7 +2905,9 @@ static void point_screen(const Vertex *vertex, uint32_t color, float polygon_off
                      vertex->fog_coord, color, NULL, polygon_offset);
 }
 
-static void render_clipped_polygon(const Vertex *clipped, unsigned count, uint32_t flat_color)
+/* Takes ownership of `verts` (callers pass their own clip output): the face
+ * colour and flat colour are written into it rather than into a copy. */
+static void render_clipped_polygon(Vertex *verts, unsigned count, uint32_t flat_color)
 {
     float area;
     float polygon_offset;
@@ -2658,7 +2921,7 @@ static void render_clipped_polygon(const Vertex *clipped, unsigned count, uint32
     }
     area = 0.0f;
     for (i = 2U; i < count; ++i)
-        area += edge(&clipped[0], &clipped[i - 1U], clipped[i].sx, clipped[i].sy);
+        area += edge(&verts[0], &verts[i - 1U], verts[i].sx, verts[i].sy);
     if (g_state.min_triangle_area > 0.0f && fabsf(area) < 2.0f * g_state.min_triangle_area) {
         clip_charge();
         return;
@@ -2671,32 +2934,7 @@ static void render_clipped_polygon(const Vertex *clipped, unsigned count, uint32
             return;
         }
     }
-    if (count == 3U) {
-        Vertex verts[3];
-        for (i = 0U; i < 3U; ++i) {
-            verts[i] = clipped[i];
-            verts[i].color = front ? verts[i].front_color : verts[i].back_color;
-            verts[i].flat_color = flat_color;
-        }
-        polygon_offset = polygon_offset_polygon(verts, 3U);
-        switch (g_state.polygon_mode ? g_state.polygon_mode : GL_FILL) {
-        case GL_POINT:
-            for (i = 0U; i < 3U; ++i)
-                point_screen(&verts[i], verts[i].flat_color, polygon_offset);
-            break;
-        case GL_LINE:
-            for (i = 0U; i < 3U; ++i)
-                line_screen(&verts[i], &verts[(i + 1U) % 3U], polygon_offset);
-            break;
-        default:
-            triangle_fill(&verts[0], &verts[1], &verts[2], polygon_offset);
-            break;
-        }
-        return;
-    }
-    Vertex verts[CLIP_MAX_VERTICES];
     for (i = 0U; i < count; ++i) {
-        verts[i] = clipped[i];
         verts[i].color = front ? verts[i].front_color : verts[i].back_color;
         verts[i].flat_color = flat_color;
     }
@@ -2708,7 +2946,7 @@ static void render_clipped_polygon(const Vertex *clipped, unsigned count, uint32
         break;
     case GL_LINE:
         for (i = 0U; i < count; ++i)
-            line_screen(&verts[i], &verts[(i + 1U) % count], polygon_offset);
+            line_screen(&verts[i], &verts[i + 1U == count ? 0U : i + 1U], polygon_offset);
         break;
     default:
         for (i = 2U; i < count; ++i) {
@@ -2753,7 +2991,7 @@ static void primitive_triangle(const Vertex *first, const Vertex *second, const 
     input[1] = *second;
     input[2] = *third;
     input[0].flat_color = input[1].flat_color = input[2].flat_color = third->color;
-    count = clip_polygon(input, 3U, clipped);
+    count = clip_polygon_ex(input, 3U, clipped, 0);
     if (!count) {
         clip_charge();
         return;
@@ -2764,6 +3002,206 @@ static void primitive_triangle(const Vertex *first, const Vertex *second, const 
             return;
         }
     render_clipped_polygon(clipped, count, third->color);
+}
+
+/* ---- wire-v9 triangle path for RasterIX collection -------------------------
+ *
+ * A fan, strip, quad or polygon shares vertices between triangles.  The wire
+ * path converts each vertex once into a TriVertex, which also caches the
+ * outcode and the screen projection, hands triangles around by pointer, and
+ * keeps the unclipped RasterIX case free of struct copies.  Every decision
+ * and every float expression is the one primitive_triangle, project,
+ * render_clipped_polygon and triangle_fill apply to a triangle that needs no
+ * clipping (the only kind this path accepts); triangles that touch a clip
+ * plane, and all CPU rasterization, still go through those functions. */
+typedef struct TriVertex {
+    Vertex v;
+    unsigned outcode;
+    int projected;      /* 0 not yet, 1 inside the screen limits, -1 rejected */
+} TriVertex;
+
+static struct {
+    int fast;           /* RasterIX collecting and a filled polygon mode */
+    float viewport_w;
+    float viewport_x;
+    float viewport_h;
+    float viewport_y;
+    float target_height;
+    float coord_limit;
+    uint32_t right_bits;
+    uint32_t target_height_bits;
+    int width;
+    int height;
+    int front_is_negative;  /* GL_CCW front faces have negative screen area */
+    int cull_enabled;
+    int cull_front;
+    int cull_back;
+    int check_min_area;
+    float min_area2;
+} g_tri;
+
+static void tri_prepare(void)
+{
+    uint16_t polygon_mode = g_state.polygon_mode ? g_state.polygon_mode : GL_FILL;
+    uint16_t face;
+
+    /* The projection fields alias eye position, which another triangle
+     * sharing the vertex may still need when clipping. */
+    g_tri.fast = g_rix_collecting > 0 && !g_user_clip_mask &&
+                 polygon_mode != GL_POINT && polygon_mode != GL_LINE;
+    g_tri.viewport_w = (float)g_state.viewport_w;
+    g_tri.viewport_x = (float)g_state.viewport_x;
+    g_tri.viewport_h = (float)g_state.viewport_h;
+    g_tri.viewport_y = (float)g_state.viewport_y;
+    g_tri.target_height = (float)g_buffers.height;
+    g_tri.coord_limit = (float)RASTER_SCREEN_COORD_LIMIT;
+    g_tri.width = (int)g_buffers.width;
+    g_tri.height = (int)g_buffers.height;
+    g_tri.right_bits = float_bits((float)g_buffers.width);
+    g_tri.target_height_bits = float_bits(g_tri.target_height);
+    g_tri.front_is_negative = (g_state.front_face ? g_state.front_face : GL_CCW) == GL_CCW;
+    g_tri.cull_enabled = (g_state.enabled_flags & ZZ9K_MGL_STATE_CULL_FACE) != 0U;
+    face = g_state.cull_face_mode ? g_state.cull_face_mode : GL_BACK;
+    g_tri.cull_front = face == GL_FRONT_AND_BACK || face == GL_FRONT;
+    g_tri.cull_back = face == GL_FRONT_AND_BACK || face == GL_BACK;
+    g_tri.check_min_area = g_state.min_triangle_area > 0.0f;
+    g_tri.min_area2 = 2.0f * g_state.min_triangle_area;
+}
+
+/* Same result as project(): the finiteness tests on x, y and z and on the
+ * screen values are implied by the range tests below (an infinite or NaN
+ * input gives an infinite or NaN screen value, also when 1/w underflows to
+ * zero), so only w and sz are tested separately. */
+static int project_tv(TriVertex *t)
+{
+    Vertex *vertex = &t->v;
+    float inverse_w;
+    float gl_y;
+
+    if (t->projected != 0)
+        return t->projected > 0;
+    t->projected = -1;
+    if (vertex->w == 0.0f || (vertex->w - vertex->w) != 0.0f)
+        return 0;
+    inverse_w = 1.0f / vertex->w;
+    vertex->inv_w = inverse_w;
+    vertex->sx = (vertex->x * inverse_w + 1.0f) * 0.5f * g_tri.viewport_w + g_tri.viewport_x;
+    gl_y = (vertex->y * inverse_w + 1.0f) * 0.5f * g_tri.viewport_h + g_tri.viewport_y;
+    vertex->sy = g_tri.target_height - gl_y;
+    vertex->sz = vertex->z * inverse_w * 0.5f + 0.5f;
+    if ((vertex->sz - vertex->sz) != 0.0f ||
+        !(vertex->sx >= -g_tri.coord_limit && vertex->sx <= g_tri.coord_limit &&
+          vertex->sy >= -g_tri.coord_limit && vertex->sy <= g_tri.coord_limit))
+        return 0;
+    t->projected = 1;
+    return 1;
+}
+
+/* (int)floorf(x) and (int)ceilf(x) for the screen range project() admits. */
+static inline int floor_to_int(float x)
+{
+    int i = (int)x;
+
+    return i - (x < (float)i);
+}
+
+static inline int ceil_to_int(float x)
+{
+    int i = (int)x;
+
+    return i + (x > (float)i);
+}
+
+static void triangle_unclipped(const Vertex *v0, const Vertex *v1, const Vertex *v2)
+{
+    float area = 0.0f;
+    const Vertex *swap;
+    int front;
+    int x0;
+    int x1;
+    int y0;
+    int y1;
+    uint32_t c0;
+    uint32_t c1;
+    uint32_t c2;
+
+    area += edge(v0, v1, v2->sx, v2->sy);
+    if (g_tri.check_min_area && fabsf(area) < g_tri.min_area2) {
+        clip_charge();
+        return;
+    }
+    front = g_tri.front_is_negative ? area < 0.0f : area > 0.0f;
+    if (g_tri.cull_enabled && (front ? g_tri.cull_front : g_tri.cull_back)) {
+        clip_charge();
+        return;
+    }
+    if (!isfinite(area) || area == 0.0f) {
+        clip_charge();
+        return;
+    }
+    if (area < 0.0f) {
+        swap = v1;
+        v1 = v2;
+        v2 = swap;
+    }
+    x0 = floor_to_int(min_f(v0->sx, min_f(v1->sx, v2->sx)));
+    x1 = ceil_to_int(max_f(v0->sx, max_f(v1->sx, v2->sx)));
+    y0 = floor_to_int(min_f(v0->sy, min_f(v1->sy, v2->sy)));
+    y1 = ceil_to_int(max_f(v0->sy, max_f(v1->sy, v2->sy)));
+    if (x0 < 0) x0 = 0;
+    if (y0 < 0) y0 = 0;
+    if (x1 >= g_tri.width) x1 = g_tri.width - 1;
+    if (y1 >= g_tri.height) y1 = g_tri.height - 1;
+    if (x0 > x1 || y0 > y1) {
+        clip_charge();
+        return;
+    }
+    if (front) {
+        c0 = v0->front_color; c1 = v1->front_color; c2 = v2->front_color;
+    } else {
+        c0 = v0->back_color; c1 = v1->back_color; c2 = v2->back_color;
+    }
+    {
+        MiniGLRixVertex va = { v0->sx, v0->sy, v0->sz, v0->inv_w, c0,
+                               v0->u0, v0->v0, v0->q0, v0->u1, v0->v1, v0->q1 };
+        MiniGLRixVertex vb = { v1->sx, v1->sy, v1->sz, v1->inv_w, c1,
+                               v1->u0, v1->v0, v1->q0, v1->u1, v1->v1, v1->q1 };
+        MiniGLRixVertex vc = { v2->sx, v2->sy, v2->sz, v2->inv_w, c2,
+                               v2->u0, v2->v0, v2->q0, v2->u1, v2->v1, v2->q1 };
+
+        clip_charge();
+        if (!minigl_rix_backend_add_triangle(&g_rix, &va, &vb, &vc))
+            g_rix_collecting = -1;
+    }
+}
+
+static void primitive_triangle_tv(TriVertex *a, TriVertex *b, TriVertex *c)
+{
+    unsigned c0;
+    unsigned c1;
+    unsigned c2;
+
+    if (!g_tri.fast || g_rix_collecting <= 0) {
+        primitive_triangle(&a->v, &b->v, &c->v);
+        return;
+    }
+    g_clip_start_cycle = minigl_profile_cycles();
+    c0 = a->outcode;
+    c1 = b->outcode;
+    c2 = c->outcode;
+    if ((c0 & c1 & c2) != 0U) {
+        clip_charge();
+        return;
+    }
+    if ((c0 | c1 | c2) != 0U) {
+        primitive_triangle(&a->v, &b->v, &c->v);
+        return;
+    }
+    if (!project_tv(a) || !project_tv(b) || !project_tv(c)) {
+        clip_charge();
+        return;
+    }
+    triangle_unclipped(&a->v, &b->v, &c->v);
 }
 
 static void primitive_quad(const Vertex *first, const Vertex *second, const Vertex *third, const Vertex *fourth)
@@ -2778,7 +3216,7 @@ static void primitive_quad(const Vertex *first, const Vertex *second, const Vert
     input[2] = *third;
     input[3] = *fourth;
     input[0].flat_color = input[1].flat_color = input[2].flat_color = input[3].flat_color = fourth->color;
-    count = clip_polygon(input, 4U, clipped);
+    count = clip_polygon_ex(input, 4U, clipped, 0);
     if (!count)
         return;
     for (index = 0U; index < count; ++index)
@@ -2802,7 +3240,7 @@ static void primitive_polygon(const Vertex *in, unsigned in_count)
         input[index] = in[index];
         input[index].flat_color = in[0].color;
     }
-    count = clip_polygon(input, in_count, clipped);
+    count = clip_polygon_ex(input, in_count, clipped, 0);
     if (!count)
         return;
     for (index = 0U; index < count; ++index)
@@ -3289,6 +3727,12 @@ void minigl_raster_clear(uint32_t mask, uint32_t color, uint32_t depth)
         g_context_backend_logged = 1;
         minigl_rix_backend_log_context_backend(&g_rix);
     }
+    if (minigl_rix_backend_available(&g_rix) && rix_clear_replaces_targets(clear_mask) &&
+        (g_state.color_mask & 0xfU) == 0xfU) {
+        /* RasterIX rewrites both targets in full: drop CPU-format copies. */
+        rix_cpu_dirty_release(g_buffers.color, 1);
+        rix_cpu_dirty_release(g_buffers.depth, 1);
+    }
     if (minigl_rix_backend_available(&g_rix) &&
         (rix_clear_replaces_targets(clear_mask) || rix_prepare_target()) &&
         minigl_rix_backend_clear(&g_rix, g_buffers.width, g_buffers.height,
@@ -3408,7 +3852,7 @@ void minigl_raster_set_state(const ZZ9KMiniGLPacketSetState *state)
      * Comparing against the raster-side copy (not a cached input) keeps
      * the skip correct across contexts, raster-side resets and any
      * mutation of g_state elsewhere. */
-    if (g_state_valid && memcmp(&g_state, state, sizeof(g_state)) == 0)
+    if (g_state_valid && words_equal(&g_state, state, sizeof(g_state)))
         return;
     memcpy(&g_state, state, sizeof(g_state));
     g_state_valid = 1U;
@@ -3445,7 +3889,7 @@ void minigl_raster_load_matrix(uint16_t mode, const float *matrix)
      * copy, the identity flag, g_mvp (any mutation of matrices 0/1 calls
      * update_mvp, so g_mvp always holds their current product) nor the
      * lighting modelview (guarded by its own comparison). */
-    if (g_matrix_valid[mode] && memcmp(g_matrix[mode], matrix, sizeof(g_matrix[mode])) == 0)
+    if (g_matrix_valid[mode] && words_equal(g_matrix[mode], matrix, sizeof(g_matrix[mode])))
         return;
     memcpy(g_matrix[mode], matrix, sizeof(g_matrix[mode]));
     g_matrix_valid[mode] = 1U;
@@ -4145,10 +4589,63 @@ static void sphere_map_coords(const float eye[4], const float normal_eye[3], flo
     out_st[1] += r[1] / divisor;
 }
 
+/* Per-draw conversion mode. Without fog, lighting, texgen or user clip
+ * planes, the vertex does not need an eye position or normal and uses
+ * the same colour for both faces. */
+static struct {
+    int plain;
+    int texture_matrix0;
+    int texture_matrix1;
+} g_conv;
+
+static void conv_prepare(void)
+{
+    g_need_eye = vert_needs_eye();
+    g_need_normal = vert_needs_normal();
+    g_conv.plain = !g_user_clip_mask && !g_need_eye && !g_need_normal &&
+                   !(g_mw_state != NULL &&
+                     (g_mw_state->lighting_enabled ||
+                      g_mw_state->texgen[0].s_enabled || g_mw_state->texgen[0].t_enabled ||
+                      g_mw_state->texgen[1].s_enabled || g_mw_state->texgen[1].t_enabled));
+    g_conv.texture_matrix0 = (g_state.enabled_flags & ZZ9K_MGL_STATE_TEXTURE_2D_0) != 0U &&
+                             !g_matrix_is_identity[2];
+    g_conv.texture_matrix1 = (g_state.enabled_flags & ZZ9K_MGL_STATE_TEXTURE_2D_1) != 0U &&
+                             !g_matrix_is_identity[3];
+}
+
+static inline void v9_vert_convert_plain(const float *v, Vertex *out)
+{
+    uint32_t color;
+
+    transform_vertex(v, out);
+    out->fog_coord = 0.0f;
+    color = color_from_floats(&v[4]);
+    out->front_color = color;
+    out->back_color = color;
+    out->color = color;
+    out->flat_color = color;
+    out->u0 = v[8];
+    out->v0 = v[9];
+    out->q0 = v[11];
+    if (g_conv.texture_matrix0)
+        texture_matrix(0U, &out->u0, &out->v0, v[10], &out->q0);
+    out->u1 = v[12];
+    out->v1 = v[13];
+    out->q1 = v[15];
+    if (g_conv.texture_matrix1)
+        texture_matrix(1U, &out->u1, &out->v1, v[14], &out->q1);
+}
+
 static void v9_vert_convert(const float *v, Vertex *out)
 {
     uint32_t c_conv = minigl_profile_cycles();
     float clip[4];
+
+    if (g_conv.plain) {
+        v9_vert_convert_plain(v, out);
+        minigl_profile_geom_add_cycles(MGLP_GEOM_CONV, c_conv);
+        return;
+    }
     transform_mvp(g_mvp, v[0], v[1], v[2], v[3], clip);
     out->x = clip[0];
     out->y = clip[1];
@@ -4273,6 +4770,14 @@ static void v9_vert_convert(const float *v, Vertex *out)
     minigl_profile_geom_add_cycles(MGLP_GEOM_CONV, c_conv);
 }
 
+static inline void tri_vertex_convert(const float *source, TriVertex *t)
+{
+    v9_vert_convert(source, &t->v);
+    t->projected = 0;
+    if (g_tri.fast)
+        t->outcode = vertex_outcode(&t->v);
+}
+
 static int v9_mask_edge(const uint32_t *mask, size_t i)
 {
     /* The wire carries the edge-mask words big-endian (mw_draw.c's
@@ -4358,9 +4863,11 @@ static void assemble_wire_v9_prims(uint16_t mode, const float *object_vertices,
                                    const uint32_t *edge_mask)
 {
     uint32_t i;
-    Vertex a, b, c, d;
-    g_need_eye = vert_needs_eye();
-    g_need_normal = vert_needs_normal();
+    Vertex a, b;
+    TriVertex slot[4];
+
+    conv_prepare();
+    tri_prepare();
 
     if (g_user_clip_mask && (flags & V9_POLYGON_STYLE_MASK) && mode >= GL_TRIANGLES) {
         v9_clipped_lowered(mode, object_vertices, count, flags, edge_mask);
@@ -4505,18 +5012,9 @@ static void assemble_wire_v9_prims(uint16_t mode, const float *object_vertices,
             return;
         }
 
-        if (flags & MW_LOWERED_FLAT) {
-            if (mode == GL_TRIANGLES) {
-                for (i = 2; i < count; i += 3) {
-                    v9_vert_convert(object_vertices + (i - 2) * MW_OBJECT_WORDS, &a);
-                    v9_vert_convert(object_vertices + (i - 1) * MW_OBJECT_WORDS, &b);
-                    v9_vert_convert(object_vertices + i * MW_OBJECT_WORDS, &c);
-                    a.flat_color = b.flat_color = c.flat_color = c.color;
-                    primitive_triangle(&a, &b, &c);
-                }
-                return;
-            }
-        }
+        /* A flat-lowered triangle list takes the plain list path below:
+         * the flat colour it would set is replaced by the third vertex's
+         * colour in every case that reads it. */
     }
 
     if (mode == GL_POINTS) {
@@ -4552,38 +5050,48 @@ static void assemble_wire_v9_prims(uint16_t mode, const float *object_vertices,
 
     if (mode == GL_TRIANGLES) {
         for (i = 2; i < count; i += 3) {
-            v9_vert_convert(object_vertices + (i - 2) * MW_OBJECT_WORDS, &a);
-            v9_vert_convert(object_vertices + (i - 1) * MW_OBJECT_WORDS, &b);
-            v9_vert_convert(object_vertices + i * MW_OBJECT_WORDS, &c);
-            primitive_triangle(&a, &b, &c);
+            tri_vertex_convert(object_vertices + (i - 2) * MW_OBJECT_WORDS, &slot[0]);
+            tri_vertex_convert(object_vertices + (i - 1) * MW_OBJECT_WORDS, &slot[1]);
+            tri_vertex_convert(object_vertices + i * MW_OBJECT_WORDS, &slot[2]);
+            primitive_triangle_tv(&slot[0], &slot[1], &slot[2]);
         }
         return;
     }
 
     if (mode == GL_TRIANGLE_STRIP) {
+        TriVertex *pa = &slot[0], *pb = &slot[1], *pc = &slot[2], *swap;
+
         if (count < 3) return;
-        v9_vert_convert(object_vertices, &a);
-        v9_vert_convert(object_vertices + MW_OBJECT_WORDS, &b);
+        tri_vertex_convert(object_vertices, pa);
+        tri_vertex_convert(object_vertices + MW_OBJECT_WORDS, pb);
         for (i = 2; i < count; ++i) {
-            v9_vert_convert(object_vertices + i * MW_OBJECT_WORDS, &c);
+            tri_vertex_convert(object_vertices + i * MW_OBJECT_WORDS, pc);
             if (i & 1)
-                primitive_triangle(&b, &a, &c);
+                primitive_triangle_tv(pb, pa, pc);
             else
-                primitive_triangle(&a, &b, &c);
-            a = b;
-            b = c;
+                primitive_triangle_tv(pa, pb, pc);
+            swap = pa;
+            pa = pb;
+            pb = pc;
+            pc = swap;
         }
         return;
     }
 
-    if (mode == GL_TRIANGLE_FAN) {
+    /* A lowered polygon is a fan from vertex 0, as the reference lowers it;
+     * the whole-polygon clip path stays with the legacy consumer ABI. */
+    if (mode == GL_TRIANGLE_FAN || mode == GL_POLYGON) {
+        TriVertex *pa = &slot[0], *pb = &slot[1], *pc = &slot[2], *swap;
+
         if (count < 3) return;
-        v9_vert_convert(object_vertices, &a);
-        v9_vert_convert(object_vertices + MW_OBJECT_WORDS, &b);
+        tri_vertex_convert(object_vertices, pa);
+        tri_vertex_convert(object_vertices + MW_OBJECT_WORDS, pb);
         for (i = 2; i < count; ++i) {
-            v9_vert_convert(object_vertices + i * MW_OBJECT_WORDS, &c);
-            primitive_triangle(&a, &b, &c);
-            b = c;
+            tri_vertex_convert(object_vertices + i * MW_OBJECT_WORDS, pc);
+            primitive_triangle_tv(pa, pb, pc);
+            swap = pb;
+            pb = pc;
+            pc = swap;
         }
         return;
     }
@@ -4592,42 +5100,33 @@ static void assemble_wire_v9_prims(uint16_t mode, const float *object_vertices,
         /* A lowered quad is expanded into two triangles before clipping,
          * mirroring the reference's guest-lowering (expand_lowered). */
         for (i = 3; i < count; i += 4) {
-            v9_vert_convert(object_vertices + (i - 3) * MW_OBJECT_WORDS, &a);
-            v9_vert_convert(object_vertices + (i - 2) * MW_OBJECT_WORDS, &b);
-            v9_vert_convert(object_vertices + (i - 1) * MW_OBJECT_WORDS, &c);
-            v9_vert_convert(object_vertices + i * MW_OBJECT_WORDS, &d);
-            primitive_triangle(&a, &b, &c);
-            primitive_triangle(&a, &c, &d);
+            tri_vertex_convert(object_vertices + (i - 3) * MW_OBJECT_WORDS, &slot[0]);
+            tri_vertex_convert(object_vertices + (i - 2) * MW_OBJECT_WORDS, &slot[1]);
+            tri_vertex_convert(object_vertices + (i - 1) * MW_OBJECT_WORDS, &slot[2]);
+            tri_vertex_convert(object_vertices + i * MW_OBJECT_WORDS, &slot[3]);
+            primitive_triangle_tv(&slot[0], &slot[1], &slot[2]);
+            primitive_triangle_tv(&slot[0], &slot[2], &slot[3]);
         }
         return;
     }
 
     if (mode == GL_QUAD_STRIP) {
-        if (count < 4) return;
-        v9_vert_convert(object_vertices, &a);
-        v9_vert_convert(object_vertices + MW_OBJECT_WORDS, &b);
-        for (i = 3; i < count; i += 2) {
-            v9_vert_convert(object_vertices + (i - 1) * MW_OBJECT_WORDS, &c);
-            v9_vert_convert(object_vertices + i * MW_OBJECT_WORDS, &d);
-            primitive_triangle(&a, &b, &d);
-            primitive_triangle(&a, &d, &c);
-            a = c;
-            b = d;
-        }
-        return;
-    }
+        TriVertex *pa = &slot[0], *pb = &slot[1], *pc = &slot[2], *pd = &slot[3], *swap;
 
-    if (mode == GL_POLYGON) {
-        /* A lowered polygon is a fan from vertex 0, as the reference
-         * lowers it; the whole-polygon clip path stays with the legacy
-         * consumer ABI. */
-        if (count < 3) return;
-        v9_vert_convert(object_vertices, &a);
-        v9_vert_convert(object_vertices + MW_OBJECT_WORDS, &b);
-        for (i = 2; i < count; ++i) {
-            v9_vert_convert(object_vertices + i * MW_OBJECT_WORDS, &c);
-            primitive_triangle(&a, &b, &c);
-            b = c;
+        if (count < 4) return;
+        tri_vertex_convert(object_vertices, pa);
+        tri_vertex_convert(object_vertices + MW_OBJECT_WORDS, pb);
+        for (i = 3; i < count; i += 2) {
+            tri_vertex_convert(object_vertices + (i - 1) * MW_OBJECT_WORDS, pc);
+            tri_vertex_convert(object_vertices + i * MW_OBJECT_WORDS, pd);
+            primitive_triangle_tv(pa, pb, pd);
+            primitive_triangle_tv(pa, pd, pc);
+            swap = pa;
+            pa = pc;
+            pc = swap;
+            swap = pb;
+            pb = pd;
+            pd = swap;
         }
         return;
     }
@@ -4642,6 +5141,29 @@ static void assemble_wire_v9(uint16_t mode, const float *object_vertices,
         g_mw_state->user_clip_mask & ((1U << MW_USER_CLIP_PLANES) - 1U) : 0U;
     assemble_wire_v9_prims(mode, object_vertices, count, flags, edge_mask);
     g_user_clip_mask = 0U;
+}
+
+static void draw_wire_cpu(uint16_t mode, const float *object_vertices, uint32_t count,
+                          uint32_t flags, const uint32_t *edge_mask, uint32_t reason)
+{
+    ++g_frame_draws_software;
+    minigl_profile_count(MGLP_N_DRAW_SW, 1U);
+    minigl_profile_fallback(reason, rix_draw_triangles(mode, count));
+    if (g_frame_fallback_reason == ZZ9K_MGL_FALLBACK_NONE && reason != ZZ9K_MGL_FALLBACK_NONE)
+        g_frame_fallback_reason = reason;
+    if (reason != ZZ9K_MGL_FALLBACK_NONE && !(g_logged_fallback_mask & (1U << reason))) {
+        g_logged_fallback_mask |= (1U << reason);
+        minigl_rix_backend_log_fallback(reason);
+    }
+    g_rix_cpu_reason = reason;
+    if (++g_rix_cpu_fallbacks >= MINIGL_RIX_CPU_FALLBACKS_PER_FRAME)
+        g_rix_cpu_frame = 1;
+    minigl_profile_push(MGLP_CPU);
+    if (minigl_raster_finish()) {
+        g_rix_collecting = 0;
+        assemble_wire_v9(mode, object_vertices, count, flags, edge_mask);
+    }
+    minigl_profile_pop();
 }
 
 void minigl_raster_draw_wire_v9(uint16_t mode, const float *object_vertices,
@@ -4704,23 +5226,537 @@ void minigl_raster_draw_wire_v9(uint16_t mode, const float *object_vertices,
     /* Fallback to software rasterizer */
     uint32_t reason = rix_fallback_reason((style != 0U) ? ZZ9K_MGL_FALLBACK_POLYGON_MODE
                                                          : minigl_rix_backend_eval_fallback(&g_rix));
-    ++g_frame_draws_software;
-    minigl_profile_count(MGLP_N_DRAW_SW, 1U);
-    minigl_profile_fallback(reason, rix_draw_triangles(mode, count));
-    if (g_frame_fallback_reason == ZZ9K_MGL_FALLBACK_NONE && reason != ZZ9K_MGL_FALLBACK_NONE)
-        g_frame_fallback_reason = reason;
-    if (reason != ZZ9K_MGL_FALLBACK_NONE && !(g_logged_fallback_mask & (1U << reason))) {
-        g_logged_fallback_mask |= (1U << reason);
-        minigl_rix_backend_log_fallback(reason);
-    }
-    g_rix_cpu_reason = reason;
-    if (++g_rix_cpu_fallbacks >= MINIGL_RIX_CPU_FALLBACKS_PER_FRAME)
-        g_rix_cpu_frame = 1;
-    minigl_profile_push(MGLP_CPU);
-    if (minigl_raster_finish()) {
-        g_rix_collecting = 0;
-        assemble_wire_v9(mode, object_vertices, count, flags, edge_mask);
-    }
-    minigl_profile_pop();
+    draw_wire_cpu(mode, object_vertices, count, flags, edge_mask, reason);
     minigl_profile_geom_add_total_cycles(c_geom_start);
+}
+
+/* Packed draws whose state makes the general convert a plain transform
+ * (no lighting, fog, texgen or texture matrix) skip the 19-float object
+ * record.  Each wire vertex is transformed, outcoded and, when inside,
+ * projected once; a fan or an index list then reuses that result.  A
+ * triangle that crosses a clip plane is handed to primitive_triangle, so
+ * clipping stays the general path. */
+#define FAST_MAX 2048U
+typedef struct FastVert {
+    float x, y, z, w;
+    MiniGLRixVertex rix;
+    unsigned outcode;
+    int screen; /* -1: unprojectable; otherwise four screen edge bits. */
+} FastVert;
+static FastVert g_fast[FAST_MAX];
+
+static int packed_fast_eligible(void)
+{
+    uint16_t polygon_mode = g_state.polygon_mode ? g_state.polygon_mode : GL_FILL;
+
+    if (!ready() || g_rix_cpu_frame || !minigl_rix_backend_available(&g_rix))
+        return 0;
+    if (polygon_mode == GL_POINT || polygon_mode == GL_LINE)
+        return 0;
+    if (g_mw_state && (g_mw_state->user_clip_mask || g_mw_state->lighting_enabled ||
+                       g_mw_state->texgen[0].s_enabled || g_mw_state->texgen[0].t_enabled ||
+                       g_mw_state->texgen[1].s_enabled || g_mw_state->texgen[1].t_enabled))
+        return 0;
+    if ((g_state.enabled_flags & ZZ9K_MGL_STATE_TEXTURE_2D_0) && !g_matrix_is_identity[2])
+        return 0;
+    if ((g_state.enabled_flags & ZZ9K_MGL_STATE_TEXTURE_2D_1) && !g_matrix_is_identity[3])
+        return 0;
+    return 1;
+}
+
+static unsigned fast_outcode(float x, float y, float z, float w)
+{
+    unsigned code = 0U;
+
+    if (x + w < 0.0f) code |= 1U << 0;
+    if (w - x < 0.0f) code |= 1U << 1;
+    if (y + w < 0.0f) code |= 1U << 2;
+    if (w - y < 0.0f) code |= 1U << 3;
+    if (z + w < 0.0f) code |= 1U << 4;
+    if (w - z < 0.0f) code |= 1U << 5;
+    return code;
+}
+
+static inline void fast_project(FastVert *vertex, float x, float y, float z, float w)
+{
+    uint32_t mag_w = float_bits(w) & 0x7fffffffU;
+    uint32_t sx_bits, sy_bits;
+    float inverse_w, sx, sy, sz, gl_y;
+
+    vertex->screen = -1;
+    if (vertex->outcode || !mag_w || mag_w >= 0x7f800000U)
+        return;
+    inverse_w = 1.0f / w;
+    sx = (x * inverse_w + 1.0f) * 0.5f * g_tri.viewport_w + g_tri.viewport_x;
+    gl_y = (y * inverse_w + 1.0f) * 0.5f * g_tri.viewport_h + g_tri.viewport_y;
+    sy = g_tri.target_height - gl_y;
+    sz = z * inverse_w * 0.5f + 0.5f;
+    sx_bits = float_bits(sx);
+    sy_bits = float_bits(sy);
+    if ((float_bits(sz) & 0x7fffffffU) >= 0x7f800000U ||
+        (sx_bits & 0x7fffffffU) > float_bits(g_tri.coord_limit) ||
+        (sy_bits & 0x7fffffffU) > float_bits(g_tri.coord_limit))
+        return;
+    vertex->rix.x = sx;
+    vertex->rix.y = sy;
+    vertex->rix.z = sz;
+    vertex->rix.reciprocal_w = inverse_w;
+    /* floor(min) >= size iff all coordinates >= size; ceil(max) < 0 iff
+     * all coordinates <= -1. Encode those tests for the integer AND in
+     * fast_triangle. Positive finite floats have monotone bit patterns. */
+    vertex->screen = ((sx_bits >= 0xbf800000U)      ? 1 : 0) |
+                     ((sy_bits >= 0xbf800000U)      ? 2 : 0) |
+                     ((int32_t)sx_bits >= (int32_t)g_tri.right_bits ? 4 : 0) |
+                     ((int32_t)sy_bits >= (int32_t)g_tri.target_height_bits ? 8 : 0);
+}
+
+static void fast_as_vertex(const FastVert *f, Vertex *v)
+{
+    *v = (Vertex){
+        .x = f->x, .y = f->y, .z = f->z, .w = f->w,
+        .u0 = f->rix.s, .v0 = f->rix.t, .q0 = f->rix.q,
+        .u1 = f->rix.s1, .v1 = f->rix.t1, .q1 = f->rix.q1,
+        .color = f->rix.rgba, .front_color = f->rix.rgba,
+        .back_color = f->rix.rgba, .flat_color = f->rix.rgba,
+    };
+}
+
+static void fast_triangle(const FastVert *v0, const FastVert *v1, const FastVert *v2)
+{
+    const MiniGLRixVertex *a = &v0->rix, *b = &v1->rix, *c = &v2->rix;
+    float area;
+    uint32_t bits, magnitude;
+    int negative, front;
+
+    if ((v0->outcode & v1->outcode & v2->outcode) != 0U)
+        return;
+    if ((v0->screen | v1->screen | v2->screen) < 0) {
+        Vertex va, vb, vc;
+
+        fast_as_vertex(v0, &va);
+        fast_as_vertex(v1, &vb);
+        fast_as_vertex(v2, &vc);
+        primitive_triangle(&va, &vb, &vc);
+        return;
+    }
+    if ((v0->screen & v1->screen & v2->screen) != 0)
+        return;
+    area = (b->x - a->x) * (c->y - a->y) - (b->y - a->y) * (c->x - a->x);
+    bits = float_bits(area);
+    magnitude = bits & 0x7fffffffU;
+    if (!magnitude || magnitude >= 0x7f800000U ||
+        (g_tri.check_min_area && fabsf(area) < g_tri.min_area2))
+        return;
+    negative = (int32_t)bits < 0;
+    front = negative == g_tri.front_is_negative;
+    if (g_tri.cull_enabled && (front ? g_tri.cull_front : g_tri.cull_back))
+        return;
+    if (!minigl_rix_backend_add_triangle(&g_rix, a, negative ? c : b, negative ? b : c))
+        g_rix_collecting = -1;
+}
+
+static void fast_emit(uint16_t mode, const FastVert *v, uint32_t count)
+{
+    uint32_t i;
+
+    if (mode == GL_TRIANGLES) {
+        for (i = 2; i < count && g_rix_collecting > 0; i += 3)
+            fast_triangle(&v[i - 2], &v[i - 1], &v[i]);
+    } else if (mode == GL_TRIANGLE_STRIP) {
+        for (i = 2; i < count && g_rix_collecting > 0; ++i)
+            if (i & 1)
+                fast_triangle(&v[i - 1], &v[i - 2], &v[i]);
+            else
+                fast_triangle(&v[i - 2], &v[i - 1], &v[i]);
+    } else if (mode == GL_TRIANGLE_FAN || mode == GL_POLYGON) {
+        for (i = 2; i < count && g_rix_collecting > 0; ++i)
+            fast_triangle(&v[0], &v[i - 1], &v[i]);
+    }
+}
+
+static void fast_emit_indexed(uint16_t mode, const FastVert *v, uint32_t v_count,
+                              const uint8_t *idx, uint32_t count)
+{
+    uint32_t i;
+    uint16_t i0, i1, i2;
+
+    if (mode == GL_TRIANGLES) {
+        for (i = 2; i < count && g_rix_collecting > 0; i += 3) {
+            i0 = mw_be16(idx + (i - 2) * 2);
+            i1 = mw_be16(idx + (i - 1) * 2);
+            i2 = mw_be16(idx + i * 2);
+            if (i0 >= v_count || i1 >= v_count || i2 >= v_count) {
+                g_rix_collecting = -1;
+                return;
+            }
+            fast_triangle(&v[i0], &v[i1], &v[i2]);
+        }
+    } else if (mode == GL_TRIANGLE_STRIP || mode == GL_TRIANGLE_FAN || mode == GL_POLYGON) {
+        for (i = 2; i < count && g_rix_collecting > 0; ++i) {
+            uint32_t a = i - 2, b = i - 1, c = i;
+
+            if (mode == GL_TRIANGLE_STRIP && (i & 1)) {
+                uint32_t t = a;
+                a = b;
+                b = t;
+            }
+            if (mode == GL_TRIANGLE_FAN || mode == GL_POLYGON)
+                a = 0;
+            i0 = mw_be16(idx + a * 2);
+            i1 = mw_be16(idx + b * 2);
+            i2 = mw_be16(idx + c * 2);
+            if (i0 >= v_count || i1 >= v_count || i2 >= v_count) {
+                g_rix_collecting = -1;
+                return;
+            }
+            fast_triangle(&v[i0], &v[i1], &v[i2]);
+        }
+    }
+}
+
+static const uint8_t *fast_load(const uint8_t *q, FastVert *fv,
+                                uint32_t position, uint32_t color_mode,
+                                uint32_t tex0, uint32_t tex1, uint32_t normal,
+                                uint32_t constant_color, const float *ct0, const float *ct1)
+{
+    float pos[4];
+    float col[4];
+    pos[0] = bef(q);
+    pos[1] = bef(q + 4);
+    q += 8;
+    pos[2] = position >= 3U ? bef(q) : 0.0f;
+    if (position >= 3U)
+        q += 4;
+    pos[3] = position == 4U ? bef(q) : 1.0f;
+    if (position == 4U)
+        q += 4;
+    transform_xyzw(pos, &fv->x);
+    fv->outcode = fast_outcode(fv->x, fv->y, fv->z, fv->w);
+    fast_project(fv, fv->x, fv->y, fv->z, fv->w);
+    if (color_mode == 1U) {
+        uint32_t rgba = be32(q);
+
+        q += 4;
+        /* The unpack/pack float round trip incurs far less than half a
+         * byte of error across [0, 255], so this colour is unchanged. */
+        fv->rix.rgba = rgba;
+    } else if (color_mode == 2U) {
+        col[0] = bef(q);
+        col[1] = bef(q + 4);
+        col[2] = bef(q + 8);
+        col[3] = bef(q + 12);
+        q += 16;
+        fv->rix.rgba = color_from_floats(col);
+    } else {
+        fv->rix.rgba = constant_color;
+    }
+    if (tex0 == 1U) {
+        fv->rix.s = bef(q);
+        fv->rix.t = bef(q + 4);
+        fv->rix.q = 1.0f;
+        q += 8;
+    } else if (tex0 == 2U) {
+        fv->rix.s = bef(q);
+        fv->rix.t = bef(q + 4);
+        fv->rix.q = bef(q + 12);
+        q += 16;
+    } else {
+        fv->rix.s = ct0[0];
+        fv->rix.t = ct0[1];
+        fv->rix.q = ct0[3];
+    }
+    if (tex1 == 1U) {
+        fv->rix.s1 = bef(q);
+        fv->rix.t1 = bef(q + 4);
+        fv->rix.q1 = 1.0f;
+        q += 8;
+    } else if (tex1 == 2U) {
+        fv->rix.s1 = bef(q);
+        fv->rix.t1 = bef(q + 4);
+        fv->rix.q1 = bef(q + 12);
+        q += 16;
+    } else {
+        fv->rix.s1 = ct1[0];
+        fv->rix.t1 = ct1[1];
+        fv->rix.q1 = ct1[3];
+    }
+    if (normal)
+        q += 12;
+    return q;
+}
+
+#if defined(__ARM_NEON)
+static inline int neon_projection_mode(void)
+{
+    uint32_t fpscr;
+    __asm__ volatile("vmrs %0, fpscr" : "=r"(fpscr));
+    /* Scalar clip distances need gradual underflow, and vector arithmetic
+     * always rounds to nearest even regardless of the scalar rounding mode. */
+    return !(fpscr & (7U << 22));
+}
+
+static inline unsigned neon_outcode(float32x4_t clip)
+{
+    const uint32x4_t low_bits = { 1U, 4U, 16U, 0U };
+    const uint32x4_t high_bits = { 2U, 8U, 32U, 0U };
+    float32x4_t w = vdupq_lane_f32(vget_high_f32(clip), 1);
+    float32x4_t neg_w = vnegq_f32(w);
+    uint32x4_t below, above, planes;
+    uint32x2_t pairs;
+
+    /* The NEON transform emits no denormals, and the scalar distances
+     * are evaluated with gradual underflow. x+w < 0 iff x < -w, and
+     * w-x < 0 iff w < x. Both forms reject neither a NaN nor equal
+     * infinities (their difference would be NaN), and ignore signed zero.
+     * Spell out the instructions: GCC otherwise lowers these intrinsics
+     * to scalar comparisons when compiling with strict floating point. */
+    __asm__("vcgt.f32 %q0, %q1, %q2" : "=w"(below) : "w"(neg_w), "w"(clip));
+    __asm__("vcgt.f32 %q0, %q1, %q2" : "=w"(above) : "w"(clip), "w"(w));
+    planes = vorrq_u32(vandq_u32(below, low_bits), vandq_u32(above, high_bits));
+    pairs = vorr_u32(vget_low_u32(planes), vget_high_u32(planes));
+    return vget_lane_u32(vpadd_u32(pairs, pairs), 0);
+}
+
+static inline __attribute__((always_inline)) void
+fast_project_neon(FastVert *f, float32x4_t clip, float inverse_w,
+                  float32x4_t scale, float32x4_t offset)
+{
+    const float32x4_t add_xy = { 1.0f, 1.0f, 0.0f, 0.0f };
+    const uint32x4_t y_lane = { 0U, UINT32_MAX, 0U, 0U };
+    const uint32x4_t screen_hi = { g_tri.right_bits, g_tri.target_height_bits, 0, 0 };
+    const uint32x4_t below_bits = { 1U, 2U, 0U, 0U };
+    const uint32x4_t above_bits = { 4U, 8U, 0U, 0U };
+    const uint32_t coord = float_bits((float)RASTER_SCREEN_COORD_LIMIT);
+    const uint32x4_t limit = { coord, coord, 0x7f7fffffU, UINT32_MAX };
+    float32x4_t projected, flipped;
+    uint32x4_t bits, outside, above, below;
+    uint32x2_t pair;
+    /* Keep the scalar operation order in each lane. Subnormal products
+     * disappear below half an ulp of the +1 (x/y) or +0.5 (z). After
+     * those additions, the viewport multiply and integer offsets cannot
+     * introduce a subnormal. The unused w lane is replaced below. */
+    projected = vmulq_n_f32(clip, inverse_w);
+    projected = vaddq_f32(projected, add_xy);
+    projected = vmulq_n_f32(projected, 0.5f);
+    projected = vmlaq_f32(offset, projected, scale);
+    flipped = vsubq_f32(vdupq_n_f32(g_tri.target_height), projected);
+    projected = vbslq_f32(y_lane, flipped, projected);
+    bits = vreinterpretq_u32_f32(projected);
+    outside = vcgtq_u32(vandq_u32(bits, vdupq_n_u32(0x7fffffffU)), limit);
+    below = vcgeq_u32(bits, vdupq_n_u32(0xbf800000U));
+    above = vcgeq_s32(vreinterpretq_s32_u32(bits), vreinterpretq_s32_u32(screen_hi));
+    bits = vorrq_u32(vandq_u32(below, below_bits), vandq_u32(above, above_bits));
+    bits = vorrq_u32(bits, outside);
+    pair = vorr_u32(vget_low_u32(bits), vget_high_u32(bits));
+    f->screen = (int32_t)vget_lane_u32(vorr_u32(pair, vrev64_u32(pair)), 0);
+    vst1q_f32(&f->rix.x, vsetq_lane_f32(inverse_w, projected, 3));
+}
+
+/* The caller checks the full wire span, including the s/t following xyz;
+ * the 16-byte position load therefore fits even on the last vertex. */
+static inline __attribute__((always_inline)) int
+fast_load_xyz_st_neon(const uint8_t *wire, unsigned count, unsigned color_mode,
+                      unsigned tex1, uint32_t constant_color, const float *ct1)
+{
+    const float32x4_t m0 = vld1q_f32(g_mvp);
+    const float32x4_t m1 = vld1q_f32(g_mvp + 4);
+    const float32x4_t m2 = vld1q_f32(g_mvp + 8);
+    const float32x4_t m3 = vld1q_f32(g_mvp + 12);
+    const float32x4_t scale = { g_tri.viewport_w, g_tri.viewport_h, 1.0f, 0.0f };
+    const float32x4_t offset = { g_tri.viewport_x, g_tri.viewport_y, 0.5f, 0.0f };
+    const unsigned color_bytes = color_mode == 2U ? 16U : color_mode * 4U;
+    uint32x4_t invalid = vdupq_n_u32(0);
+    unsigned i;
+
+    for (i = 0; i < count; ++i, wire += 20U + color_bytes + tex1 * 8U) {
+        FastVert *f = &g_fast[i];
+        float32x4_t pos = vreinterpretq_f32_u8(vrev32q_u8(vld1q_u8(wire)));
+        float32x2_t xy = vget_low_f32(pos), zw = vget_high_f32(pos);
+        uint32x4_t mag, nonzero, bad;
+        float32x4_t clip;
+        const uint8_t *st = wire + 12U + color_bytes;
+
+        mag = vandq_u32(vreinterpretq_u32_f32(pos), vdupq_n_u32(0x7fffffffU));
+        nonzero = vmvnq_u32(vceqq_u32(mag, vdupq_n_u32(0)));
+        bad = vcgeq_u32(vsubq_u32(mag, vdupq_n_u32(0x00800000U)),
+                        vdupq_n_u32(0x7f000000U));
+        invalid = vorrq_u32(invalid, vandq_u32(nonzero, bad));
+
+        clip = vmulq_lane_f32(m0, xy, 0);
+        clip = vmlaq_lane_f32(clip, m1, xy, 1);
+        clip = vmlaq_lane_f32(clip, m2, zw, 0);
+        /* The fourth object coordinate is exactly +1, so the last
+         * unfused multiply-accumulate reduces to this same add. */
+        clip = vaddq_f32(clip, m3);
+        vst1q_f32(&f->x, clip);
+        f->outcode = neon_outcode(clip);
+        if (!f->outcode) {
+            float w = vgetq_lane_f32(clip, 3);
+            uint32_t mag_w = float_bits(w) & 0x7fffffffU;
+
+            /* The NEON transform has already flushed subnormal clip
+             * coordinates. For finite |w| > 2^126 the exact reciprocal
+             * can be subnormal, so replay conversion on the scalar path. */
+            if (__builtin_expect(mag_w > 0x7e800000U, 0))
+                return 0;
+            if (mag_w) {
+                fast_project_neon(f, clip, 1.0f / w, scale, offset);
+            } else {
+                f->screen = -1;
+            }
+        } else {
+            f->screen = -1;
+        }
+
+        if (color_mode == 2U)
+            f->rix.rgba = color_from_vector(vreinterpretq_f32_u8(vrev32q_u8(vld1q_u8(wire + 12))));
+        else if (color_mode == 1U)
+            f->rix.rgba = be32(wire + 12);
+        else
+            f->rix.rgba = constant_color;
+        vst1_u8((uint8_t *)&f->rix.s, vrev32_u8(vld1_u8(st)));
+        f->rix.q = 1.0f;
+        if (tex1) {
+            vst1_u8((uint8_t *)&f->rix.s1, vrev32_u8(vld1_u8(st + 8)));
+            f->rix.q1 = 1.0f;
+        } else {
+            f->rix.s1 = ct1[0];
+            f->rix.t1 = ct1[1];
+            f->rix.q1 = ct1[3];
+        }
+    }
+    /* Only xyz came from position; lane 3 is the next wire attribute.
+     * No triangles have been emitted if a position needs scalar math. */
+    invalid = vsetq_lane_u32(0, invalid, 3);
+    return !(vgetq_lane_u64(vreinterpretq_u64_u32(invalid), 0) |
+             vgetq_lane_u64(vreinterpretq_u64_u32(invalid), 1));
+}
+#endif
+
+int minigl_raster_draw_packed_fast(const uint8_t *payload, uint32_t bytes,
+                                   int indexed, float *scratch)
+{
+    uint32_t mode, count, v_count, format, constants, words, position, color_mode, tex0, tex1, normal;
+    uint32_t constant_color;
+    float ct0[4], ct1[4], cc[4];
+    const uint8_t *q;
+    const uint8_t *idx = NULL;
+    uint32_t i;
+    uint32_t c_geom = 0U, c_conv = 0U;
+    int profiling;
+
+    if (!payload || !packed_fast_eligible())
+        return 0;
+    if (!indexed) {
+        if (bytes < 12U)
+            return 0;
+        mode = be32(payload);
+        count = be32(payload + 4);
+        v_count = count;
+        format = be32(payload + 8);
+        q = payload + 12;
+    } else {
+        if (bytes < 16U)
+            return 0;
+        mode = be32(payload);
+        v_count = be32(payload + 4);
+        count = be32(payload + 8);
+        format = be32(payload + 12);
+        q = payload + 16;
+    }
+    if (mode != GL_TRIANGLES && mode != GL_TRIANGLE_STRIP && mode != GL_TRIANGLE_FAN)
+        return 0;
+    if (!count || count > FAST_MAX || !v_count || v_count > FAST_MAX)
+        return 0;
+    if (!mw_packed_layout(format, &constants, &words))
+        return 0;
+    position = ((format >> 0) & 3U) + 2U;
+    color_mode = (format >> 2) & 3U;
+    tex0 = (format >> 4) & 3U;
+    tex1 = (format >> 6) & 3U;
+    normal = (format >> 8) & 1U;
+    if ((size_t)(payload + bytes - q) <
+        (size_t)(constants + words * v_count) * 4U + (indexed ? count * 2U : 0U))
+        return 0;
+    cc[0] = cc[1] = cc[2] = cc[3] = 1.0f;
+    ct0[0] = ct0[1] = ct0[2] = 0.0f;
+    ct0[3] = 1.0f;
+    ct1[0] = ct1[1] = ct1[2] = 0.0f;
+    ct1[3] = 1.0f;
+    if (!color_mode) {
+        for (i = 0; i < 4U; ++i, q += 4)
+            cc[i] = bef(q);
+    }
+    if (!tex0) {
+        for (i = 0; i < 4U; ++i, q += 4)
+            ct0[i] = bef(q);
+    }
+    if (!tex1) {
+        for (i = 0; i < 4U; ++i, q += 4)
+            ct1[i] = bef(q);
+    }
+    if (!normal)
+        q += 12; /* A normal is consumed only by the general geometry path. */
+    constant_color = color_from_floats(cc);
+    if (scratch) {
+        scratch[4] = cc[0];
+        scratch[5] = cc[1];
+        scratch[6] = cc[2];
+        scratch[7] = cc[3];
+    }
+    if (!g_context_backend_logged) {
+        g_context_backend_logged = 1;
+        minigl_rix_backend_log_context_backend(&g_rix);
+    }
+    if (!rix_begin_draw())
+        return 0;
+    g_rix_collecting = 1;
+    tri_prepare();
+    profiling = minigl_profile_enabled();
+    if (profiling)
+        c_geom = minigl_profile_cycles();
+#if defined(__ARM_NEON)
+    if (!g_mvp_neon_ok || !neon_projection_mode() ||
+        !((format == 0x011U && fast_load_xyz_st_neon(q, v_count, 0, 0, constant_color, ct1)) ||
+          (format == 0x019U && fast_load_xyz_st_neon(q, v_count, 2, 0, constant_color, ct1)) ||
+          (format == 0x051U && fast_load_xyz_st_neon(q, v_count, 0, 1, constant_color, ct1)) ||
+          (format == 0x015U && fast_load_xyz_st_neon(q, v_count, 1, 0, constant_color, ct1))))
+#endif
+        for (i = 0; i < v_count; ++i)
+            fast_load(q + (size_t)i * words * 4U, &g_fast[i], position, color_mode,
+                      tex0, tex1, normal, constant_color, ct0, ct1);
+    if (indexed)
+        idx = q + (size_t)v_count * words * 4U;
+    if (profiling)
+        c_conv = minigl_profile_geom_split(MGLP_GEOM_CONV, c_geom);
+    if (indexed)
+        fast_emit_indexed((uint16_t)mode, g_fast, v_count, idx, count);
+    else
+        fast_emit((uint16_t)mode, g_fast, count);
+    if (profiling) {
+        minigl_profile_geom_add_cycles(MGLP_GEOM_SETUP, c_conv);
+        minigl_profile_geom_add_total_cycles(c_geom);
+    }
+    if (g_rix_collecting > 0 &&
+        minigl_rix_backend_end_draw(&g_rix, (uintptr_t)g_buffers.color,
+                                    (uintptr_t)g_buffers.depth)) {
+        g_rix_collecting = 0;
+        ++g_frame_draws_hardware;
+        minigl_profile_count(MGLP_N_DRAW_HW, 1U);
+        mark_dirty(0, 0, (int)g_buffers.width - 1, (int)g_buffers.height - 1);
+        return 1;
+    }
+    /* Hardware accepted the draw and then refused it.  The caller redraws
+     * on the CPU; the general path would begin_draw again and submit the
+     * triangles a second time. */
+    rix_note_reject((uint16_t)mode);
+    minigl_rix_backend_abort_draw(&g_rix);
+    g_rix_collecting = 0;
+    return -1;
+}
+
+void minigl_raster_cpu_redraw(uint16_t mode, const float *object_vertices, uint32_t count)
+{
+    draw_wire_cpu(mode, object_vertices, count, 0, NULL,
+                  rix_fallback_reason(minigl_rix_backend_eval_fallback(&g_rix)));
 }

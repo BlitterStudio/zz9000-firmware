@@ -203,6 +203,12 @@ void mw_ctx_diag_presented(mw_ctx *c, uint32_t source, const uint8_t *pixels,
         const uint8_t *plaque_pixel = pixels + (height / 4U) * pitch +
                                       (width / 2U) * sizeof(uint16_t);
 
+        if (c->present_select && c->color_direct[source]) {
+            /* These diagnostic samples are CPU reads of HP-port output. */
+            minigl_platform_cache_invalidate(NULL, (uintptr_t)(pixels + corner_x * 2U), 2U);
+            minigl_platform_cache_invalidate(NULL, (uintptr_t)centre_pixel, 2U);
+            minigl_platform_cache_invalidate(NULL, (uintptr_t)plaque_pixel, 2U);
+        }
         corner = (uint16_t)(((uint16_t)pixels[corner_x * 2U] << 8U) |
                             pixels[corner_x * 2U + 1U]);
         centre = (uint16_t)(((uint16_t)centre_pixel[0] << 8U) | centre_pixel[1]);
@@ -510,8 +516,15 @@ static void *mw_context_alloc_uninitialized(mw_ctx *c, uint32_t bytes,
 static void mw_context_free(mw_ctx *c, void *memory, uint32_t *address)
 {
     mw_context_select_allocation_owner(c);
+    if (memory != NULL) {
+        /* A target handed to the CPU may still hold dirty CPU-order lines:
+         * drop them before the memory can be reused by RasterIX. */
+        size_t dirty = minigl_raster_buffer_released(memory);
+
+        if (dirty != 0U)
+            minigl_platform_cache_invalidate(NULL, (uintptr_t)memory, dirty);
+    }
 #if MW_CONTEXT_CARD_POOL
-    (void)memory;
     if (*address)
         (void)card_pool_free(&card_pool, *address, c->card_pool_owner);
     *address = 0;
@@ -1250,6 +1263,8 @@ static int mw_ctx_bind_buffers(mw_ctx *c)
     uint32_t index;
     int draw_front;
 
+    if (c->present_lost)
+        return 0;
     memset(&buffers, 0, sizeof(buffers));
     minigl_raster_set_texture_pool(c->texture_pool, c->texture_pool_bytes,
                                    mw_ctx_grow_texture_pool, c);
@@ -1260,6 +1275,7 @@ static int mw_ctx_bind_buffers(mw_ctx *c)
         (uint32_t *)(void *)c->direct_color_buffers[index] : c->color_buffers[index];
     buffers.color_bytes = c->width * c->height *
         (c->color_direct[index] ? 2U : sizeof(*buffers.color));
+    buffers.mailbox_color = c->color_direct[index] && c->direct_color_buffers[2] != NULL;
     buffers.depth = c->depth_buffer;
     buffers.depth_bytes = c->width * c->height * 4U;
     buffers.vertices = g_dummy_vertices;
@@ -1271,6 +1287,8 @@ static int mw_ctx_bind_buffers(mw_ctx *c)
     buffers.width = (uint16_t)c->width;
     buffers.height = (uint16_t)c->height;
     if (!minigl_raster_configure_buffers(&buffers))
+        return 0;
+    if (!minigl_raster_set_color_byte_swap(c->direct_color_be && c->color_direct[index]))
         return 0;
     if (g_raster_texture_context == c)
         return 1;
@@ -1295,9 +1313,12 @@ static int mw_ctx_cpu_fallback_target(void *context,
     if (index >= 3U || !c->color_direct[index] ||
         source->color != (uint32_t *)(void *)c->direct_color_buffers[index])
         return 0;
+    /* RasterIX drained and invalidated the direct source before calling us. */
     rgb565 = c->direct_color_buffers[index];
     for (pixel = c->width * c->height; pixel != 0U; --pixel) {
         uint16_t value = rgb565[pixel - 1U];
+        if (c->direct_color_be)
+            value = __builtin_bswap16(value);
         uint32_t red = (uint32_t)((value >> 11U) & 0x1fU);
         uint32_t green = (uint32_t)((value >> 5U) & 0x3fU);
         uint32_t blue = (uint32_t)(value & 0x1fU);
@@ -1312,6 +1333,7 @@ static int mw_ctx_cpu_fallback_target(void *context,
     *replacement = *source;
     replacement->color = c->color_buffers[index];
     replacement->color_bytes = c->width * c->height * sizeof(*replacement->color);
+    replacement->mailbox_color = 0U;
     return 1;
 }
 
@@ -1329,6 +1351,13 @@ static int mw_ctx_replace_rix_target(void *context,
 
     if (!c || !replacement || c->rix_target_quarantined)
         return 0;
+    /* A failed engine may still write external mailbox memory. Do not
+     * replace it with a shadow that the presenter could mistake for a
+     * completed frame; keep this context lost until teardown. */
+    if (c->present_select) {
+        c->present_lost = 1U;
+        return 0;
+    }
     color_bytes = (size_t)c->width * c->height * sizeof(*new_colors[0]);
     depth_bytes = (size_t)c->width * c->height * 4U;
     for (index = 0; index < 3; ++index) {
@@ -1407,6 +1436,10 @@ static void mw_clip_raster_rect(const mw_ctx *c, int32_t x, int32_t y,
     *clipped_height = (uint16_t)(y1 > y0 ? y1 - y0 : 0);
 }
 
+/* Whether the shared lighting tables last published an enabled lighting
+ * configuration (see mw_ctx_sync_to_raster). */
+static int g_lighting_configured_on;
+
 static void mw_ctx_sync_to_raster(mw_ctx *c)
 {
     ZZ9KMiniGLPacketSetState rstate;
@@ -1472,7 +1505,14 @@ static void mw_ctx_sync_to_raster(mw_ctx *c)
     rstate.fog_color = mw_color_from_floats(s->fog_color[0], s->fog_color[1],
                                             s->fog_color[2], s->fog_color[3]);
     minigl_raster_set_wire_v9_state(&c->state);
-    minigl_lighting_configure_wire_v9(&c->state);
+    /* The lighting tables are read only while lighting is enabled.  Their
+     * rebuild compares and copies the whole context state, so while lighting
+     * is off it runs only to publish the switch-off: an enabled
+     * configuration left in the shared tables by an earlier sync. */
+    if (s->lighting_enabled || g_lighting_configured_on) {
+        minigl_lighting_configure_wire_v9(&c->state);
+        g_lighting_configured_on = s->lighting_enabled != 0U;
+    }
 
     minigl_raster_set_state(&rstate);
     minigl_raster_load_matrix(0, s->modelview);
@@ -1484,6 +1524,11 @@ static void mw_ctx_sync_to_raster(mw_ctx *c)
         minigl_raster_bind_texture(0, GL_TEXTURE_2D, s->stages[0].name);
     if (s->stages[1].enabled)
         minigl_raster_bind_texture(1, GL_TEXTURE_2D, s->stages[1].name);
+}
+
+const mw_ctx *mw_host_rix_platform_context(void)
+{
+    return g_rix_platform_ctx;
 }
 
 mw_ctx *mw_host_create(uint32_t width, uint32_t height)
@@ -1576,38 +1621,78 @@ mw_ctx *mw_host_create_owned(uint32_t width, uint32_t height, uint32_t owner,
     return c;
 }
 int mw_host_bind_direct_rgb565(mw_ctx *c, uint32_t front, uint32_t back,
-                               uint32_t bytes)
+                               uint32_t spare, uint32_t bytes)
 {
-    uint32_t required;
+    const uint32_t addresses[3] = { front, back, spare };
+    uint32_t count = spare != 0U ? 3U : 2U;
+    uint32_t alignment = spare != 0U ?
+        MINIGL_RIX_MAILBOX_COLOR_ALIGNMENT : MW_RIX_TARGET_ALIGNMENT;
+    uint32_t i;
 
-    if (!c || !front || !back || (front & (MW_RIX_TARGET_ALIGNMENT - 1U)) != 0U ||
-        (back & (MW_RIX_TARGET_ALIGNMENT - 1U)) != 0U ||
-        c->width > UINT32_MAX / c->height ||
-        c->width * c->height > UINT32_MAX / 2U)
+    if (!c || bytes != c->width * c->height * 2U ||
+        (spare != 0U && (bytes & (MINIGL_RIX_COLOR_CACHE_LINE_BYTES - 1U)) != 0U))
         return 0;
-    required = c->width * c->height * 2U;
-    if (bytes != required || !minigl_raster_finish())
+    for (i = 0U; i < count; ++i) {
+        if (addresses[i] == 0U ||
+            (addresses[i] & (alignment - 1U)) != 0U)
+            return 0;
+    }
+    if (!minigl_raster_finish())
         return 0;
-    c->direct_color_buffers[0] = (uint16_t *)(uintptr_t)front;
-    c->direct_color_buffers[1] = (uint16_t *)(uintptr_t)back;
-    c->color_direct[0] = 1U;
-    c->color_direct[1] = 1U;
-    c->color_rgb565[0] = 1U;
-    c->color_rgb565[1] = 1U;
-    minigl_platform_cache_clean(NULL, (uintptr_t)front, bytes);
-    minigl_platform_cache_clean(NULL, (uintptr_t)back, bytes);
-    minigl_platform_barrier(NULL);
+    for (i = 0U; i < count; ++i) {
+        c->direct_color_buffers[i] = (uint16_t *)(uintptr_t)addresses[i];
+        c->color_direct[i] = 1U;
+        c->color_rgb565[i] = 1U;
+        /* Mailbox leases already clean these ranges through L1 and L2. */
+        if (!spare)
+            minigl_platform_cache_clean(NULL, addresses[i], bytes);
+    }
+    if (!spare)
+        minigl_platform_barrier(NULL);
     if (!mw_ctx_bind_buffers(c)) {
-        c->color_direct[0] = 0U;
-        c->color_direct[1] = 0U;
-        c->direct_color_buffers[0] = NULL;
-        c->direct_color_buffers[1] = NULL;
+        for (i = 0U; i < count; ++i) {
+            c->direct_color_buffers[i] = NULL;
+            c->color_direct[i] = 0U;
+            c->color_rgb565[i] = 0U;
+        }
         return 0;
     }
     minigl_raster_target_discard(1);
     return 1;
 }
 
+
+struct mw_draw_resident_slot {
+    uint32_t serial, base, vertices, format;
+    uint8_t draw[MW_DRAW_RESIDENT_SLOT_BYTES];
+};
+
+struct mw_draw_resident {
+    struct mw_draw_resident_slot *slot[MW_DRAW_RESIDENT_SLOTS];
+};
+
+struct mw_draw_index_slot {
+    uint32_t serial, base, vertices, count;
+    uint8_t data[MW_DRAW_RESIDENT_INDEX_BYTES];
+};
+
+struct mw_draw_index_resident {
+    struct mw_draw_index_slot *slot[MW_DRAW_RESIDENT_INDEX_SLOTS];
+};
+
+/* 256 KiB data plus metadata and at most four allocator granules per block. */
+_Static_assert(sizeof(struct mw_draw_index_resident) + 256U +
+               MW_DRAW_RESIDENT_INDEX_SLOTS * (sizeof(struct mw_draw_index_slot) + 256U) <= 280U * 1024U,
+               "resident index cache exceeds its per-context memory budget");
+
+/* Reserve a 64-byte granule for each of the libzzm_rt and heap
+ * headers plus a possible final unsplit 64-byte fragment per block. */
+_Static_assert(sizeof(struct mw_draw_resident_slot) % 64U == 0U &&
+               sizeof(struct mw_draw_resident) % 64U == 0U,
+               "resident allocations should fill module heap granules");
+_Static_assert((sizeof(struct mw_draw_resident) + 192U) +
+               MW_DRAW_RESIDENT_SLOTS * (sizeof(struct mw_draw_resident_slot) + 192U) <= 2U * 1024U * 1024U,
+               "resident draw cache exceeds its per-context memory budget");
 
 void mw_host_destroy(mw_ctx *c)
 {
@@ -1619,6 +1704,18 @@ void mw_host_destroy(mw_ctx *c)
     if (g_raster_texture_context == c)
         g_raster_texture_context = NULL;
     mw_context_select_allocation_owner(c);
+    /* CPU-only geometry: RasterIX owns generated commands, not this cache. */
+    free(c->draw_cache);
+    if (c->draw_resident) {
+        for (i = 0; i < (int)MW_DRAW_RESIDENT_SLOTS; ++i)
+            free(c->draw_resident->slot[i]);
+        free(c->draw_resident);
+    }
+    if (c->draw_index_resident) {
+        for (i = 0; i < (int)MW_DRAW_RESIDENT_INDEX_SLOTS; ++i)
+            free(c->draw_index_resident->slot[i]);
+        free(c->draw_index_resident);
+    }
     /* The RasterIX platform and the target handlers belong to the context
      * that registered them last: a 68k context closed after an ARM app
      * bound must leave the app both, and only finishes the work it may have
@@ -1832,6 +1929,14 @@ static void mw_sync_active_format(mw_ctx *c)
 /* Make a target readable through the CPU shadow. Direct P96 targets remain
  * RGB565 in card memory, so unlike a private RasterIX buffer they cannot be
  * reinterpreted as the RGBA shadow merely by clearing the format marker. */
+static int mw_finish_color_read(mw_ctx *c)
+{
+    /* Colour reads need completed writes, not a CPU drawable target.
+     * Keep the direct target installed and read into the private shadow. */
+    return c->present_select && c->color_direct[mw_active_color_index(c)] ?
+        minigl_raster_drain() : minigl_raster_finish();
+}
+
 static int mw_buffer_cpu_visible(mw_ctx *c, uint32_t index)
 {
     uint8_t before;
@@ -1845,10 +1950,14 @@ static int mw_buffer_cpu_visible(mw_ctx *c, uint32_t index)
 
         if (!source)
             return 0;
+        /* The HP port bypasses CPU caches. Discard old clean lines only
+         * when reading the GPU's pixels, never to hand them to scanout. */
         minigl_platform_cache_invalidate(NULL, (uintptr_t)source,
                                          (size_t)c->width * c->height * 2U);
         for (pixel = 0U; pixel < (size_t)c->width * c->height; pixel++) {
             uint16_t value = source[pixel];
+            if (c->direct_color_be)
+                value = __builtin_bswap16(value);
             uint32_t red = (value >> 11U) & 0x1fU;
             uint32_t green = (value >> 5U) & 0x3fU;
             uint32_t blue = value & 0x1fU;
@@ -1857,9 +1966,11 @@ static int mw_buffer_cpu_visible(mw_ctx *c, uint32_t index)
                 (((green << 2U) | (green >> 4U)) << 16U) |
                 (((blue << 3U) | (blue >> 2U)) << 8U) | 0xffU;
         }
-        c->color_rgb565[index] = 0U;
-        if (before != 0U)
-            mw_present_layout_note(c, index, before, "direct_to_rgba");
+        if (!c->present_select) {
+            c->color_rgb565[index] = 0U;
+            if (before != 0U)
+                mw_present_layout_note(c, index, before, "direct_to_rgba");
+        }
         return 1;
     }
     if (index == mw_active_color_index(c)) {
@@ -2324,7 +2435,7 @@ target_allocation_failed:
             goto command_complete;
         }
 
-        if (!minigl_raster_finish()) {
+        if (!mw_finish_color_read(c)) {
             mw_ctx_set_error(c, MW_GL_INVALID_OPERATION);
             goto command_complete;
         }
@@ -2471,6 +2582,36 @@ target_allocation_failed:
         const uint8_t *edge_mask = NULL;
         int ok = 0;
 
+        if ((cmd->opcode == MW_DRAW_PACKED || cmd->opcode == MW_DRAW_PACKED_INDEXED) &&
+            cmd->bytes >= 12U && c->vertex_scratch) {
+            int fast;
+            mw_ctx_sync_to_raster(c);
+            minigl_profile_push(MGLP_GEOM);
+            fast = minigl_raster_draw_packed_fast(p, cmd->bytes,
+                                                  cmd->opcode == MW_DRAW_PACKED_INDEXED,
+                                                  c->vertex_scratch);
+            if (fast > 0) {
+                minigl_profile_pop();
+                mw_ctx_update_latest(c);
+                break;
+            }
+            if (fast < 0) {
+                if (cmd->opcode == MW_DRAW_PACKED)
+                    ok = mw_decode_draw_packed(p, cmd->bytes, c->vertex_scratch, &mode, &count);
+                else
+                    ok = mw_decode_draw_packed_indexed_validated(p, cmd->bytes, c->vertex_scratch, &mode, &count);
+                if (ok)
+                    minigl_raster_cpu_redraw((uint16_t)mode, c->vertex_scratch, count);
+                else
+                    mw_ctx_set_error(c, MW_GL_INVALID_OPERATION);
+                minigl_profile_pop();
+                mw_ctx_update_latest(c);
+                break;
+            }
+            minigl_profile_pop();
+        }
+
+
         if (cmd->opcode == MW_DRAW_PACKED) {
             uint32_t constants, words;
             if (cmd->bytes < 12 ||
@@ -2549,20 +2690,42 @@ target_allocation_failed:
         int gpu_format = minigl_raster_present_is_rgb565();
         int retire = gpu_format && c->state.target.buffer_count > 1U;
 
+        uint32_t next;
         /* Hand the command stream to RasterIX and immediately rotate to an
          * independent colour target.  The presenter owns the fence before it
          * reads `outgoing`; only command-buffer reuse may wait later. */
         if (!minigl_raster_submit_present()) {
             mw_ctx_set_error(c, MW_GL_INVALID_OPERATION);
+            if (c->present_select) {
+                c->present_lost = 1U;
+                return 0;
+            }
             goto command_complete;
         }
         minigl_profile_count(MGLP_N_FRAMES, 1U);
+        if (c->present_select) {
+            c->color_rgb565[outgoing] = gpu_format ? 1U : 0U;
+            mw_ctx_diag_snapshot(c, outgoing);
+            next = c->present_select(c, outgoing);
+            if (next >= c->state.target.buffer_count) {
+                c->present_lost = 1U;
+                mw_ctx_set_error(c, MW_GL_INVALID_OPERATION);
+                return 0;
+            }
+        } else {
+            next = (old_back + 1U) % c->state.target.buffer_count;
+        }
         c->state.target.front = c->state.target.back;
         c->state.target.latest = c->state.target.front;
-        c->state.target.back = (c->state.target.back + 1U) % c->state.target.buffer_count;
+        c->state.target.back = next;
         if (retire)
             minigl_raster_target_retire();
         if (!mw_ctx_bind_buffers(c)) {
+            if (c->present_select) {
+                c->present_lost = 1U;
+                mw_ctx_set_error(c, MW_GL_INVALID_OPERATION);
+                return 0;
+            }
             c->state.target.front = old_front;
             c->state.target.latest = old_latest;
             c->state.target.back = old_back;
@@ -2580,7 +2743,8 @@ target_allocation_failed:
         if (c->state.target.buffer_count > 1U)
             minigl_raster_target_discard(
                 c->color_rgb565[c->state.target.back] != 0U);
-        mw_ctx_diag_snapshot(c, outgoing);
+        if (!c->present_select)
+            mw_ctx_diag_snapshot(c, outgoing);
         minigl_raster_frame_boundary();
         break;
     }
@@ -2646,6 +2810,12 @@ target_allocation_failed:
         break;
     }
 
+    case MW_DRAW_CACHE_INDEXED:
+    case MW_DRAW_RESIDENT_INDEXED:
+    case MW_DRAW_RESIDENT_BOTH:
+        /* A trusted in-process producer does not negotiate wire caching. */
+        return 0;
+
     default:
         break;
     }
@@ -2665,8 +2835,27 @@ static int mw_execute_command(void *user, const mw_command *cmd)
                   cmd->opcode == MW_TEXTURE_COPY ||
                   cmd->opcode == MW_COLOR_TABLE;
     int result;
+
+    if (((mw_ctx *)user)->present_lost)
+        return 0;
     mw_sync_active_format((mw_ctx *)user);
 
+    if (minigl_profile_enabled()) {
+        const uint8_t *p = cmd->payload;
+        uint32_t layout = 0U, vertices = 0U;
+
+        if (cmd->opcode == MW_DRAW_PACKED && cmd->bytes >= 12U) {
+            vertices = mw_be32(p + 4);
+            layout = mw_be32(p + 8);
+        } else if (cmd->opcode == MW_DRAW_PACKED_INDEXED && cmd->bytes >= 16U) {
+            vertices = mw_be32(p + 4);
+            layout = mw_be32(p + 12);
+        } else if ((cmd->opcode == MW_DRAW_OBJECT || cmd->opcode == MW_DRAW_LOWERED ||
+                    cmd->opcode == MW_DRAW_ARRAY_RAW) && cmd->bytes >= 8U) {
+            vertices = mw_be32(p + 4);
+        }
+        minigl_profile_command(cmd->opcode, cmd->bytes, layout, vertices);
+    }
     if (texture) {
         minigl_profile_push(MGLP_TEX);
         minigl_profile_count(MGLP_N_TEX_UPLOADS, 1U);
@@ -2677,28 +2866,333 @@ static int mw_execute_command(void *user, const mw_command *cmd)
     return result;
 }
 
+struct mw_draw_cache {
+    struct {
+        uint32_t serial;
+        uint8_t draw[MW_DRAW_CACHE_SLOT_BYTES];
+    } slot[MW_DRAW_CACHE_SLOTS];
+};
+
+struct mw_resident_shape {
+    uint32_t serial, base, vertices, format;
+};
+
+static struct mw_resident_shape mw_resident_shape(const uint8_t *p, uint32_t header)
+{
+    return (struct mw_resident_shape){
+        mw_be32(p + 8U), mw_be32(p + 16U),
+        mw_be32(p + header + 4U), mw_be32(p + header + 12U)
+    };
+}
+
+struct mw_resident_preflight {
+    const mw_ctx *ctx;
+    uint32_t serial, retired;
+    const uint8_t *store[MW_DRAW_RESIDENT_SLOTS];
+    uint32_t index_serial, index_retired;
+    const uint8_t *index_store[MW_DRAW_RESIDENT_INDEX_SLOTS];
+};
+
+static int mw_check_resident_indices(struct mw_resident_preflight *check,
+                                     const uint8_t *p, const struct mw_resident_shape *shape)
+{
+    const uint32_t slot = mw_be32(p + 24U), serial = mw_be32(p + 28U);
+    const uint32_t count = mw_be32(p + MW_DRAW_RESIDENT_BOTH_HEADER + 8U);
+    const uint32_t retired = mw_be32(p + 36U);
+    const uint8_t *stored = check->index_store[slot];
+    const struct mw_draw_index_resident *cache = check->ctx->draw_index_resident;
+
+    if (serial <= check->index_retired)
+        return 0;
+    if (mw_be32(p + 32U) == MW_DRAW_RESIDENT_STORE) {
+        if (serial <= check->index_serial)
+            return 0;
+        check->index_serial = serial;
+        check->index_store[slot] = p;
+    } else if (stored) {
+        if (serial != mw_be32(stored + 28U) || shape->base != mw_be32(stored + 16U) ||
+            shape->vertices != mw_be32(stored + MW_DRAW_RESIDENT_BOTH_HEADER + 4U) ||
+            count != mw_be32(stored + MW_DRAW_RESIDENT_BOTH_HEADER + 8U))
+            return 0;
+    } else {
+        const struct mw_draw_index_slot *entry = cache ? cache->slot[slot] : NULL;
+        if (!entry || serial != entry->serial || shape->base != entry->base ||
+            shape->vertices != entry->vertices || count != entry->count)
+            return 0;
+    }
+    if (retired > check->index_retired)
+        check->index_retired = retired;
+    return 1;
+}
+
+static int mw_check_resident_command(void *user, const mw_command *cmd)
+{
+    struct mw_resident_preflight *check = user;
+    const mw_ctx *c = check->ctx;
+    const uint8_t *p = cmd->payload;
+    uint32_t slot, retired;
+    const int both = cmd->opcode == MW_DRAW_RESIDENT_BOTH;
+    const uint32_t header = both ? MW_DRAW_RESIDENT_BOTH_HEADER : MW_DRAW_RESIDENT_HEADER;
+    struct mw_resident_shape shape;
+
+    if (!both && cmd->opcode != MW_DRAW_RESIDENT_INDEXED)
+        return 1;
+    shape = mw_resident_shape(p, header);
+    if (mw_be32(p) != c->handle || shape.serial <= check->retired)
+        return 0;
+    slot = mw_be32(p + 4U);
+    if (mw_be32(p + 12U) == MW_DRAW_RESIDENT_STORE) {
+        if (shape.serial <= check->serial)
+            return 0;
+        check->serial = shape.serial;
+        check->store[slot] = p;
+    } else {
+        struct mw_resident_shape stored;
+        if (check->store[slot]) {
+            const uint8_t *previous = check->store[slot];
+            stored = mw_resident_shape(previous, mw_be32(previous - 8U) == MW_DRAW_RESIDENT_BOTH ?
+                                       MW_DRAW_RESIDENT_BOTH_HEADER : MW_DRAW_RESIDENT_HEADER);
+        } else {
+            const struct mw_draw_resident_slot *entry =
+                c->draw_resident ? c->draw_resident->slot[slot] : NULL;
+            if (!entry)
+                return 0;
+            stored = (struct mw_resident_shape){entry->serial, entry->base, entry->vertices, entry->format};
+        }
+        if (shape.serial != stored.serial || shape.base != stored.base ||
+            shape.vertices != stored.vertices || shape.format != stored.format)
+            return 0;
+    }
+    retired = mw_be32(p + 20U);
+    if (retired > check->retired)
+        check->retired = retired;
+    return !both || mw_check_resident_indices(check, p, &shape);
+}
+
+static uint32_t mw_preflight_resident_draws(const mw_ctx *c, const uint8_t *packet,
+                                           uint32_t bytes, uint32_t *failed_opcode)
+{
+    /* Replay slot metadata on the stack without mutating GL state or
+     * allocating a slot. A REUSE may name a STORE earlier in this packet. */
+    struct mw_resident_preflight check = {
+        .ctx = c, .serial = c->draw_resident_serial, .retired = c->draw_resident_retired,
+        .index_serial = c->draw_index_serial, .index_retired = c->draw_index_retired
+    };
+    return mw_parse_packet_validated_report(packet, bytes, mw_check_resident_command, &check, failed_opcode);
+}
+
+#if defined(MINIGL_HOST_TEST)
+uint32_t mw_test_resident_view_bytes;
+uint8_t mw_test_resident_view[MW_DRAW_RESIDENT_SLOT_BYTES];
+#endif
+
+static int mw_execute_resident_draw(mw_ctx *c, const mw_command *cmd)
+{
+    const uint8_t *p = cmd->payload;
+    const uint32_t slot = mw_be32(p + 4U), serial = mw_be32(p + 8U);
+    const uint32_t action = mw_be32(p + 12U), base = mw_be32(p + 16U);
+    const uint32_t retired = mw_be32(p + 20U);
+    const int both = cmd->opcode == MW_DRAW_RESIDENT_BOTH;
+    const uint32_t header = both ? MW_DRAW_RESIDENT_BOTH_HEADER : MW_DRAW_RESIDENT_HEADER;
+    const uint8_t *packed = p + header;
+    const uint32_t vertices = mw_be32(packed + 4U), count = mw_be32(packed + 8U);
+    const uint32_t format = mw_be32(packed + 12U);
+    struct mw_draw_index_slot *index = NULL;
+    uint32_t index_action = 0, index_retired = 0, index_bytes = 0;
+    struct mw_draw_resident_slot *entry;
+    mw_command draw = { MW_DRAW_PACKED_INDEXED, packed, cmd->bytes - header };
+
+    /* Both packet framing and the ordered slot references were checked in
+     * preflight. The ring slot remains owned by this consumer until return. */
+    if (both) {
+        const uint32_t index_slot = mw_be32(p + 24U);
+        index_action = mw_be32(p + 32U);
+        index_retired = mw_be32(p + 36U);
+        index_bytes = (count * 2U + 3U) & ~3U;
+        if (!c->draw_index_resident) {
+            c->draw_index_resident = calloc(1, sizeof(*c->draw_index_resident));
+            if (!c->draw_index_resident)
+                goto oom;
+        }
+        index = c->draw_index_resident->slot[index_slot];
+        if (!index) {
+            index = malloc(sizeof(*index));
+            if (!index)
+                goto oom;
+            index->serial = 0; /* An allocation failure must not leave an uninitialized root. */
+            c->draw_index_resident->slot[index_slot] = index;
+        }
+    }
+    entry = c->draw_resident ? c->draw_resident->slot[slot] : NULL;
+    if (action == MW_DRAW_RESIDENT_STORE) {
+        if (!c->draw_resident) {
+            c->draw_resident = calloc(1, sizeof(*c->draw_resident));
+            if (!c->draw_resident)
+                goto oom;
+        }
+        if (!entry) {
+            entry = malloc(sizeof(*entry));
+            if (!entry)
+                goto oom;
+            entry->serial = 0;
+            c->draw_resident->slot[slot] = entry;
+        }
+    }
+
+    /* No allocation follows this point: publish either both roots or
+     * neither for this command. Packet rejection retires any earlier roots. */
+    if (index_action == MW_DRAW_RESIDENT_STORE) {
+        index->serial = mw_be32(p + 28U);
+        index->base = base;
+        index->vertices = vertices;
+        index->count = count;
+        memcpy(index->data, packed + draw.bytes - index_bytes, index_bytes);
+        c->draw_index_serial = index->serial;
+    }
+    if (index_retired > c->draw_index_retired)
+        c->draw_index_retired = index_retired;
+    if (action == MW_DRAW_RESIDENT_STORE) {
+        entry->serial = serial;
+        entry->base = base;
+        entry->vertices = vertices;
+        entry->format = format;
+        c->draw_resident_serial = serial;
+        memcpy(entry->draw, packed, draw.bytes);
+        if (index_action == MW_DRAW_RESIDENT_REUSE) {
+            memcpy(entry->draw + draw.bytes, index->data, index_bytes);
+            draw.payload = entry->draw;
+            draw.bytes += index_bytes;
+        }
+    } else {
+        uint32_t prefix = 0, stride = 0, vertex_bytes;
+        (void)mw_resident_layout(format, &prefix, &stride);
+        vertex_bytes = vertices * stride;
+        /* Both packed consumers finish reading the input during this call.
+         * RasterIX records its own triangle/state data; only the slot's
+         * vertex words are needed by a future command. */
+        memcpy(entry->draw, packed, prefix);
+        if (index_action == MW_DRAW_RESIDENT_REUSE) {
+            memcpy(entry->draw + prefix + vertex_bytes, index->data, index_bytes);
+            draw.bytes += index_bytes;
+        } else {
+            memcpy(entry->draw + prefix + vertex_bytes, packed + prefix, draw.bytes - prefix);
+        }
+        draw.payload = entry->draw;
+        draw.bytes += vertex_bytes;
+    }
+    if (retired > c->draw_resident_retired)
+        c->draw_resident_retired = retired;
+#if defined(MINIGL_HOST_TEST)
+    /* Host proof only: the exact packed indexed draw handed to the common
+     * renderer entry, before any raster backend consumes it. */
+    mw_test_resident_view_bytes = draw.bytes;
+    memcpy(mw_test_resident_view, draw.payload, draw.bytes);
+#endif
+    return mw_execute_command(c, &draw);
+
+oom:
+    mw_ctx_set_error(c, MW_GL_OUT_OF_MEMORY);
+    return 0;
+}
+
+static int mw_execute_wire_command(void *user, const mw_command *cmd)
+{
+    mw_ctx *c = user;
+    const uint8_t *p = cmd->payload;
+    uint32_t slot, serial, constants, words, prefix, bytes;
+    mw_command draw;
+
+    if (cmd->opcode == MW_DRAW_RESIDENT_INDEXED || cmd->opcode == MW_DRAW_RESIDENT_BOTH)
+        return mw_execute_resident_draw(c, cmd);
+    if (cmd->opcode != MW_DRAW_CACHE_INDEXED)
+        return mw_execute_command(user, cmd);
+    /* The transport's handle is shared control state. The embedded handle
+     * ensures a cache command cannot be replayed in another live context. */
+    if (mw_be32(p) != c->handle)
+        return 0;
+    slot = mw_be32(p + 4U);
+    serial = mw_be32(p + 8U);
+    p += MW_DRAW_CACHE_HEADER;
+    bytes = cmd->bytes - MW_DRAW_CACHE_HEADER;
+    if (!mw_packed_layout(mw_be32(p + 12U), &constants, &words))
+        return 0;
+    prefix = 16U + constants * 4U;
+    draw.opcode = MW_DRAW_PACKED_INDEXED;
+    if (bytes != prefix) {
+        if (serial <= c->draw_cache_serial)
+            return 0;
+        if (!c->draw_cache) {
+            uint32_t i;
+            c->draw_cache = malloc(sizeof(*c->draw_cache));
+            if (!c->draw_cache) {
+                mw_ctx_set_error(c, MW_GL_OUT_OF_MEMORY);
+                return 0;
+            }
+            for (i = 0U; i < MW_DRAW_CACHE_SLOTS; ++i)
+                c->draw_cache->slot[i].serial = 0U;
+        }
+        memcpy(c->draw_cache->slot[slot].draw, p, bytes);
+        c->draw_cache->slot[slot].serial = serial;
+        c->draw_cache_serial = serial;
+        draw.payload = p;
+        draw.bytes = bytes;
+        minigl_profile_count(MGLP_N_DRAW_CACHE_STORES, 1U);
+    } else {
+        uint8_t *stored;
+        if (!c->draw_cache || serial <= c->draw_cache_retired ||
+            c->draw_cache->slot[slot].serial != serial)
+            return 0;
+        stored = c->draw_cache->slot[slot].draw;
+        /* Count/layout must match. Mode and constants are from this draw.
+         * All consumers decode/emit before returning, so neither the next
+         * replay nor eviction can change any queued RasterIX command. */
+        if (memcmp(p + 4U, stored + 4U, 12U))
+            return 0;
+        memcpy(stored, p, prefix);
+        draw.payload = stored;
+        draw.bytes = prefix + 4U * mw_be32(p + 4U) * words +
+                     ((2U * mw_be32(p + 8U) + 3U) & ~3U);
+        minigl_profile_count(MGLP_N_DRAW_CACHE_HITS, 1U);
+        minigl_profile_count(MGLP_N_DRAW_CACHE_REPLAY_BYTES, draw.bytes - prefix);
+    }
+    return mw_execute_command(user, &draw);
+}
+
 static uint32_t mw_host_submit_impl(mw_ctx *c, const uint8_t *packet,
                                     uint32_t bytes, uint32_t *failed_opcode,
                                     int trusted)
 {
     uint32_t status;
+    int has_resident_draw = 0;
 
     if (failed_opcode)
         *failed_opcode = 0U;
-    if (!c || !packet || bytes < 16U)
+    if (!c)
         return MW_STATUS_INVALID;
-    mw_context_select_allocation_owner(c);
+    if (!packet || bytes < 16U) {
+        if (!trusted)
+            mw_ctx_retire_wire_draws(c);
+        return MW_STATUS_INVALID;
+    }
 
     if (trusted)
         status = mw_parse_packet_trusted_report(packet, bytes, NULL, NULL,
                                                 failed_opcode);
     else
-        status = mw_validate_packet_report(packet, bytes, failed_opcode);
-    if (status != MW_STATUS_OK)
+        status = mw_validate_wire_packet_report(packet, bytes, failed_opcode, &has_resident_draw);
+    if (status == MW_STATUS_OK && has_resident_draw)
+        status = mw_preflight_resident_draws(c, packet, bytes, failed_opcode);
+    if (status != MW_STATUS_OK) {
+        if (!trusted)
+            mw_ctx_retire_wire_draws(c);
         return status;
+    }
 
+    mw_context_select_allocation_owner(c);
     if (!mw_ctx_bind_buffers(c)) {
         mw_ctx_set_error(c, MW_GL_INVALID_OPERATION);
+        if (!trusted)
+            mw_ctx_retire_wire_draws(c);
         return MW_STATUS_FAILED;
     }
     mw_ctx_sync_to_raster(c);
@@ -2706,8 +3200,10 @@ static uint32_t mw_host_submit_impl(mw_ctx *c, const uint8_t *packet,
     status = trusted ?
         mw_parse_packet_trusted_report(packet, bytes, mw_execute_command, c,
                                        failed_opcode) :
-        mw_parse_packet_validated_report(packet, bytes, mw_execute_command, c,
+        mw_parse_packet_validated_report(packet, bytes, mw_execute_wire_command, c,
                                          failed_opcode);
+    if (!trusted && status != MW_STATUS_OK)
+        mw_ctx_retire_wire_draws(c);
     /* The RGBA view of the colour surface is built on demand: every CPU
      * reader (read pixels, capture, copy-to-texture, a rasterizer fallback)
      * converts through minigl_raster_finish before it touches the buffer.
@@ -3845,7 +4341,7 @@ uint32_t mw_host_request(mw_ctx *c, const uint8_t *request, uint32_t bytes,
         }
 
         mw_sync_active_format(c);
-        if (!minigl_raster_finish())
+        if (!(format == 0x1908 ? mw_finish_color_read(c) : minigl_raster_finish()))
             return MW_STATUS_FAILED;
 
         read_idx = c->state.target.back;
@@ -3933,7 +4429,7 @@ uint32_t mw_host_readback_latest_rows(mw_ctx *c, uint8_t *out,
         return MW_STATUS_CAPACITY;
 
     mw_sync_active_format(c);
-    if (!minigl_raster_finish())
+    if (!mw_finish_color_read(c))
         return MW_STATUS_FAILED;
     if (!mw_buffer_cpu_visible(c, c->state.target.latest))
         return MW_STATUS_FAILED;

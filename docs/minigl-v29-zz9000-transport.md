@@ -142,6 +142,13 @@ Probe the SDK registers before acquiring the module:
      An old library ignores the bit and continues using Op 6, while a new
      library paired with old firmware sees no bit and does the same.
      Without bit 19, the library uses the compatible `MW_READ_PIXELS` path.
+   - Bit 21 (`MW_CAP_DRAW_PACKED_INDEXED`) enables indexed packed draws.
+   - Bit 22 (`MW_CAP_DRAW_CACHE_INDEXED`) enables the indexed geometry cache
+     below. A 68k library must observe both bits to emit cache commands.
+   - Bit 24 (`MW_CAP_DRAW_RESIDENT_INDEXED`) enables resident vertices with
+     fresh indices. A 68k library must observe bits 21 and 24 together.
+   - Bit 25 (`MW_CAP_DRAW_RESIDENT_BOTH`) enables independent resident
+     U16 indices. The library must observe bits 21, 24 and 25 together.
 7. **Transport Handshake (`BRIDGE_QUERY`)**:
    The library inspects the MiniGL Control Block at the descriptor's
    address:
@@ -256,9 +263,9 @@ typedef struct ZZ9KMiniGLControlBlock {
 typedef struct ZZ9KMiniGLStatus {
     /* Bytes 0..63: Firmware Ownership */
     uint32_t generation;                  /* Session generation counter */
-    uint32_t error;                       /* Error code (0 none, 1 packet, 2 resource, 3 reset) */
-    uint32_t error_sequence_hi;           /* High 32-bit sequence of last error */
-    uint32_t error_sequence_lo;           /* Low 32-bit sequence of last error */
+    uint32_t error;                       /* Last rejected ring packet's bridge status */
+    uint32_t error_sequence_hi;           /* Reserved, zero */
+    uint32_t error_sequence_lo;           /* Ring rejection counter (bit 22 or 24) */
     uint32_t firmware_epoch;              /* Epoch sequence counter */
     uint32_t heartbeat;                   /* Incremented by Core 1 service loop */
     uint32_t capabilities;                /* Capability bitmask (bit 18: Wire v9) */
@@ -461,6 +468,109 @@ retires that packet. It writes directly to card VRAM; no reply buffer or Op 6
 handshake is involved. The worker flushes the completed span before publishing
 its fence. Unsupported, clipped, non-card, or unaligned targets retain the
 synchronous Op 6/readback fallbacks.
+
+#### Indexed geometry cache (`MW_DRAW_CACHE_INDEXED`, opcode 52)
+
+The payload starts with three big-endian u32 words: the current context
+handle, a slot in 0..127 and a nonzero incarnation. Next come the 16-byte
+indexed draw header (mode, vertex count, index count and layout) and the
+normal per-draw constants. A store includes the packed vertices and padded
+U16 index array, exactly as in `MW_DRAW_PACKED_INDEXED`. A replay ends just
+after the constants. The reconstructed indexed draw may be at most 16 KiB.
+
+A store replaces the selected slot and draws in order. Store incarnations
+must increase within the context, including after a rejected packet. A
+replay checks the context handle, slot, incarnation, counts and layout
+before drawing. It uses this draw's mode, constants and current GL state.
+The card retains up to 128 geometry slots per context, allocating about
+2 MiB at the first store. The rasterizer consumes geometry before returning
+from each command. Its queued work does not borrow the cache.
+
+A rejected packet retires the affected context's cache entries. The ring
+publishes the failure's bridge status in `error` and bumps
+`error_sequence_lo` before retiring the packet. Later successful packets
+do not clear this information. A library observing a changed rejection
+sequence drops its pending packet, invalidates its shadow and resends state
+on the next emission. References already in the ring cannot select
+geometry with a retired or mismatched incarnation. Closing a context
+releases its entries, and reopening returns a fresh opaque handle.
+Transport generation changes invalidate the previous session. In-process ARM
+draws and peers without the capability keep the original command formats.
+
+With wire profiling enabled, `[MGLC]` gives the window's presents, cache
+stores, cache hits and replayed geometry bytes. The net reduction relative
+to opcode 21 is `geometry_bytes - 12 * (stores + hits)`.
+
+#### Resident vertices (`MW_DRAW_RESIDENT_INDEXED`, opcode 54)
+
+This native v9 command has its own slots, independent of opcode 52. Six
+big-endian u32 words precede the normal indexed draw: context handle, slot
+(0 through 63), nonzero incarnation, action (`1` STORE or `2` REUSE), U16
+index base, and an incarnation retirement watermark below this incarnation.
+The packed draw header and constants follow on both actions. STORE then
+carries the packed vertices; REUSE omits them. Both carry this draw's
+rebased U16 indices and a zero U16 pad when the count is odd.
+
+This version accepts triangle lists and packed layouts `0x011` (XYZ/ST0),
+`0x051` (XYZ/ST0/ST1) and `0x015` (XYZ/RGBA8/ST0). Counts and indices
+obey the ordinary indexed draw limits. The lock span must fit the U16
+source index range, and the reconstructed draw may not exceed 32,496 bytes.
+Before running the packet, the card checks its byte lengths, every index
+and all resident references in order, including references to stores in the
+same packet. Stores must increase the incarnation across the context.
+Reuse must match the slot's incarnation, base, vertex count and layout.
+The card allocates slots as needed, with less than 2 MiB of resident cache
+storage per context. Packed decoding and triangle setup consume geometry
+before returning; RasterIX keeps its own recorded triangles and state.
+
+With this capability the 68k library reports `GL_RGL_static_arrays`,
+`GL_RGL_dynamic_arrays` and `GL_RGL_arrays_tag`. `GLHint(0x52474c01,
+GL_NICEST)` promises immutable client vertices, including across locks.
+`GL_DONT_CARE` suspends reuse without ending the promise. Call
+`GL_FASTEST` on this target before freeing or modifying the promised data;
+the next resident draw carries the retirement watermark. Changing the
+static-arrays hint clears the current tag. `GLHint(0x52474c04, tag)` selects
+an opaque data identity within the promise (zero means no tag).
+`GLHint(0x52474c03, GL_NICEST)` overrides static caching until that hint is
+cleared. Without bit 25 the library accepts the static-indices target
+`0x52474c02` but always sends live indices. `GL_FASTEST` on either static
+target retires both sets of guest keys.
+
+The library uses residency only for a successful nonempty array lock, U16
+indices inside that lock and matching raw interleaved `GL_FLOAT` positions
+and coordinates. For `0x015` it also requires a nonzero tag and interleaved
+`MGL_UBYTE_ARGB` at offset 20 of the 24-byte client record. A store converts
+these colors to the usual packed RGBA8 wire order. Unsupported or oversized
+draws keep the existing draw paths. Rejections retire affected card slots
+and guest keys. Context closure or transport loss drops residency. Other
+v9 peers and in-process ARM producers do not use the new command.
+
+#### Independent indices (`MW_DRAW_RESIDENT_BOTH`, opcode 55)
+
+The six opcode 54 words are followed by four big-endian words for the
+index slot (0 through 63), incarnation, STORE/REUSE action and retirement
+watermark. The current packed header and constants follow. Vertices and
+indices are present only for their respective STORE actions, in that
+order. Vertex slots are shared with opcode 54. Index slots have their own
+serial space and key: index count, locked span and original index base.
+An index slot can be reused with a different vertex incarnation or layout
+if that key still matches. Each index STORE checks all rebased indices
+and the odd-count pad. Both roots are preflighted in packet order before
+executing any draw or GL state command.
+
+The 68k library uses opcode 55 only with both RGL static promises active and
+raw, aligned U16 indices. It can omit reading the list only if the client
+pointer, count, base and locked span exactly match a proof acquired on
+STORE. `GL_DONT_CARE` suspends reuse, preserving the promise and keys until
+`GL_FASTEST`, context loss or rejection. Use `GL_FASTEST` before changing
+or freeing promised indices, including when reusing their address.
+
+The limit is 2,048 U16 indices per draw (2,046 with triangle-list alignment),
+with at most 256 KiB of index payload per context and a 280 KiB cap including
+slot metadata and allocator charges. Oversize draws use the existing live
+index path. An old peer sees no opcode 55. The renderer still consumes an
+ordinary packed indexed draw; on REUSE, its index tail is copied from the
+index slot into the vertex slot's temporary draw view.
 
 ### 5.3 Synchronous Requests (`BRIDGE_REQUEST` / Op 5)
 

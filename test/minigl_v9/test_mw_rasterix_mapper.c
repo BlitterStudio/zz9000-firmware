@@ -1382,7 +1382,7 @@ static void test_direct_p96_target_rotation(void)
     uint32_t hidden = back;
 
     assert(c != NULL);
-    assert(mw_host_bind_direct_rgb565(c, front, back, 8U));
+    assert(mw_host_bind_direct_rgb565(c, front, back, 0U, 8U));
     assert((uintptr_t)minigl_raster_color_buffer() == hidden);
 
     assert(submit_single_command(c, MW_PRESENT, present, 0U) == MW_STATUS_OK);

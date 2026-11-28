@@ -43,8 +43,11 @@ enum zzm_service_id {
 #define ZZM_SERVICE_RECLAIM_V3 ZZM_SERVICE_VERSION(3U, 0U)
 #define ZZM_SERVICE_HOST_WINDOW_V3 ZZM_SERVICE_VERSION(3U, 0U)
 #define ZZM_SERVICE_PALETTE_V3 ZZM_SERVICE_VERSION(3U, 0U)
-/* V4: display_flags became display_latest (1 while the display is card-owned). */
+/* V4: display_flags became display_latest (1 while the display is card-owned).
+ * V4.1 appends the mailbox presentation calls.  A module asks for V4 and
+ * looks at the minor and the size before it uses them. */
 #define ZZM_SERVICE_APP_GL_HOST_V4 ZZM_SERVICE_VERSION(4U, 0U)
+#define ZZM_SERVICE_APP_GL_HOST_V4_1 ZZM_SERVICE_VERSION(4U, 1U)
 #define ZZM_SERVICE_PROFILE_V3 ZZM_SERVICE_VERSION(3U, 0U)
 #define ZZM_SERVICE_TRANSPORT_V3 ZZM_SERVICE_VERSION(3U, 0U)
 #define ZZM_SERVICE_GRAPHICS_HW_V3 ZZM_SERVICE_VERSION(3U, 0U)
@@ -189,7 +192,31 @@ typedef struct zzm_app_gl_host_service {
      * acknowledged, as a wait the core-1 service pass wakes.  0 when idle;
      * nonzero for a stale generation, a stop or a lost display. */
     int (*wait_flip)(uint32_t generation);
+    /*
+     * V4.1: zero-copy presentation on the LATEST (mailbox) display. A
+     * module checks the version and size before using these fields. With
+     * an older table it presents by copy. Each call rejects a stale generation.
+     *
+     * mailbox_buffers: the display's three buffers (front, back and spare as
+     *   opened) and the byte size of one.
+     * mailbox_owned: the buffers the app may write now (the back buffer and
+     *   the spare; 0 for an absent one), read under the mailbox lock.
+     * mailbox_present: submits an owned buffer as the pending frame.  With
+     *   ZZM_DISPLAY_PRESENT_NO_DIRTY the caller guarantees that no CPU cache
+     *   holds a dirty line of the buffer and no cache clean is done.  A
+     *   buffer that is not owned is refused.
+     * mailbox_lease: reserve the buffers for direct GL, or release the
+     *   reservation after draining RasterIX. Ordinary display flip and
+     *   close return busy while the lease is held.
+     */
+    int (*mailbox_buffers)(uint32_t generation, uint32_t buffers[3],
+                           uint32_t *bytes);
+    int (*mailbox_owned)(uint32_t generation, uint32_t *back, uint32_t *spare);
+    int (*mailbox_present)(uint32_t generation, uint32_t address,
+                           uint32_t flags);
+    int (*mailbox_lease)(uint32_t generation, int acquire);
 } zzm_app_gl_host_service_t;
+#define ZZM_DISPLAY_PRESENT_NO_DIRTY 1U
 
 typedef struct zzm_profile_service {
     uint32_t version;

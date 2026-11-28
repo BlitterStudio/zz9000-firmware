@@ -389,6 +389,29 @@ core1_vector_fiq:
 	bl FIQInterrupt
 	restore_frame 4
 
+/*
+ * uint32_t zzapp_svc_call_regs(uintptr_t entry, const zzapp_svc_frame_t *frame)
+ *
+ * Calls `entry` with the argument registers of the app's call exactly as the
+ * SVC vector saved them: r0-r3 and s0-s15 (d0-d7) of the compact frame (the
+ * layout in zzapp_svc.h: vfp at 12, r at 76). A scalar GL call has no pointer
+ * to check and no word on the stack, so the module entry sees the call the
+ * app made, floats and doubles included. Returns the entry's r0.
+ */
+.text
+.align 2
+.global zzapp_svc_call_regs
+.type zzapp_svc_call_regs, %function
+zzapp_svc_call_regs:
+	push {r4, lr}
+	mov r12, r0
+	add r4, r1, #12
+	vldmia r4, {d0-d7}
+	add r4, r1, #76
+	ldmia r4, {r0-r3}
+	blx r12
+	pop {r4, pc}
+
 .section .zzapp_svc_veneers, "ax", %progbits
 .align 12
 .global zzapp_svc_veneer_page

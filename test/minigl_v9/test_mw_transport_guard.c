@@ -56,7 +56,8 @@ static void test_bind_zeroes_control_memory(void)
 
     assert(mw_wire_ld32(&status->capabilities) ==
            (MW_CAP_WIRE_V9 | MW_CAP_LATEST_READBACK_ROWS |
-            MW_CAP_ASYNC_PRESENT | MW_CAP_DRAW_PACKED_INDEXED));
+            MW_CAP_ASYNC_PRESENT | MW_CAP_DRAW_PACKED_INDEXED | MW_CAP_DRAW_CACHE_INDEXED |
+            MW_CAP_DRAW_RESIDENT_INDEXED | MW_CAP_DRAW_RESIDENT_BOTH));
     assert(mw_service_has_work() == 0);
     printf("PASS: test_bind_zeroes_control_memory\n");
 }
@@ -173,6 +174,40 @@ static void test_packet_diagnostics_ring(void)
     printf("PASS: test_packet_diagnostics_ring\n");
 }
 
+static void test_ring_reject_survives_next_success_and_reopen(void)
+{
+    volatile ZZ9KMiniGLControlBlockV9 *ctrl = bind_all_ones();
+    volatile ZZ9KMiniGLStatusV9 *status =
+        (volatile ZZ9KMiniGLStatusV9 *)(void *)(g_window + MW_WINDOW_STATUS_OFFSET);
+    uint8_t *packet = g_window + MW_WINDOW_SLOT0_OFFSET + MW_WINDOW_SLOT_STRIDE_Z3;
+    uint32_t first, reopened;
+
+    assert(mw_service_open(8, 8, 1, &first) == MW_STATUS_OK);
+    set_host_u32(&ctrl->op_handle, first);
+    set_host_u32(&ctrl->producer_seq, 1U); /* slot 0 has no packet */
+    assert(mw_service_poll() == 1);
+    assert(mw_wire_ld32(&status->error) == MW_STATUS_INVALID);
+    assert(mw_wire_ld32(&status->error_sequence_lo) == 1U);
+
+    mw_put_be32(packet, MW_MAGIC);
+    mw_put_be32(packet + 4, MW_VERSION);
+    mw_put_be32(packet + 8, 24U);
+    mw_put_be32(packet + 12, 1U);
+    mw_put_be32(packet + 16, MW_PRESENT);
+    mw_put_be32(packet + 20, 0U);
+    set_host_u32(&ctrl->producer_seq, 2U);
+    assert(mw_service_poll() == 1);
+    assert(mw_wire_ld32(&ctrl->op_status) == MW_STATUS_OK);
+    assert(mw_wire_ld32(&status->error) == MW_STATUS_INVALID);
+    assert(mw_wire_ld32(&status->error_sequence_lo) == 1U);
+    assert(mw_service_close(first) == MW_STATUS_OK);
+    assert(mw_service_open(8, 8, 1, &reopened) == MW_STATUS_OK);
+    assert(reopened != first);
+    assert(mw_service_close(first) != MW_STATUS_OK);
+    assert(mw_service_close(reopened) == MW_STATUS_OK);
+    printf("PASS: sticky wire rejection and fresh handle on reopen\n");
+}
+
 int main(void)
 {
     printf("Starting ZZ9000 MiniGL Wire-v9 Transport Guard Tests...\n");
@@ -182,6 +217,7 @@ int main(void)
     test_poll_ring_drain_is_batched();
     test_reject_log_is_throttled();
     test_packet_diagnostics_ring();
+    test_ring_reject_survives_next_success_and_reopen();
     printf("All transport guard tests passed.\n");
     return 0;
 }

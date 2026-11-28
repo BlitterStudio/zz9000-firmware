@@ -32,6 +32,9 @@ uint32_t mw_validate_packet(const uint8_t *packet, uint32_t bytes);
  * packet framing fails before an opcode is available). */
 uint32_t mw_validate_packet_report(const uint8_t *packet, uint32_t bytes,
                                    uint32_t *failed_opcode);
+/* As above, also indicates whether context-owned residency needs preflight. */
+uint32_t mw_validate_wire_packet_report(const uint8_t *packet, uint32_t bytes,
+                                        uint32_t *failed_opcode, int *has_resident_draw);
 
 /*
  * Visits an already structurally validated packet.  Callers MUST first use

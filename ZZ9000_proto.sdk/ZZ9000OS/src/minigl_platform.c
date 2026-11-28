@@ -331,6 +331,8 @@ int minigl_platform_dma_stream(void *context, uintptr_t source, uint32_t words,
 int minigl_platform_abort_graphics(void)
 {
 #if defined(MINIGL_MODULE)
+    uint32_t control = 0U;
+
     /* Without the service this module never drove RasterIX or the DMAC. */
     if (!g_graphics)
         return 1;
@@ -345,10 +347,12 @@ int minigl_platform_abort_graphics(void)
      * accepted DDR list is not recalled by any of this: the caller has
      * either seen its fence and idle, or keeps every buffer RasterIX may
      * still read quarantined. */
-    g_graphics->csr_write(RIX_DRV_CSR_CONTROL, 0U);
+    (void)g_graphics->csr_read(RIX_DRV_CSR_CONTROL, &control);
+    control &= RIX_DRV_CONTROL_COLOR_SWAP;
+    g_graphics->csr_write(RIX_DRV_CSR_CONTROL, control);
     g_graphics->fifo_write(RIX_DRV_FIFO_TDFR, RIX_DRV_FIFO_RESET_KEY);
     g_graphics->barrier();
-    g_graphics->csr_write(RIX_DRV_CSR_CONTROL, RIX_DRV_CONTROL_SOFT_RESET);
+    g_graphics->csr_write(RIX_DRV_CSR_CONTROL, control | RIX_DRV_CONTROL_SOFT_RESET);
     g_graphics->barrier();
     return 1;
 #else

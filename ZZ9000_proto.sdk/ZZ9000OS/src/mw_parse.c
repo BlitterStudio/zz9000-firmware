@@ -429,46 +429,115 @@ static int mw_valid_state(const uint8_t *p, size_t bytes)
     }
 }
 
+static int mw_valid_packed_indexed(const uint8_t *p, size_t bytes, int cached)
+{
+    uint32_t mode, v_count, idx_count, constants, words, prefix, vertices, total, i;
+    const uint8_t *indices;
+    if (cached) {
+        if (bytes < MW_DRAW_CACHE_HEADER + 16U || !mw_be32(p) ||
+            mw_be32(p + 4U) >= MW_DRAW_CACHE_SLOTS || !mw_be32(p + 8U))
+            return 0;
+        p += MW_DRAW_CACHE_HEADER;
+        bytes -= MW_DRAW_CACHE_HEADER;
+    } else if (bytes < 16U) {
+        return 0;
+    }
+
+    mode = mw_be32(p);
+    v_count = mw_be32(p + 4U);
+    idx_count = mw_be32(p + 8U);
+    if (!v_count || v_count > MW_MAX_VERTICES || !idx_count || idx_count > MW_MAX_VERTICES ||
+        mode > 6U || (mode == 1U && idx_count % 2U) || (mode == 4U && idx_count % 3U) ||
+        !mw_packed_layout(mw_be32(p + 12U), &constants, &words))
+        return 0;
+    prefix = 16U + 4U * constants;
+    vertices = 4U * v_count * words;
+    total = prefix + vertices + ((idx_count * 2U + 3U) & ~3U);
+    if (cached && total > MW_DRAW_CACHE_SLOT_BYTES)
+        return 0;
+    if (cached && bytes == prefix)
+        return 1; /* geometry was validated when stored */
+    if (bytes != total)
+        return 0;
+    indices = p + prefix + vertices;
+    for (i = 0U; i < idx_count; ++i) {
+        if (mw_be16(indices + i * 2U) >= v_count)
+            return 0;
+    }
+    return 1;
+}
+
+static int mw_valid_resident_indexed(const uint8_t *p, size_t bytes, int both)
+{
+    uint32_t action, base, serial, format, vertices, count, prefix, stride, geometry, padded, i;
+    const uint32_t header = both ? MW_DRAW_RESIDENT_BOTH_HEADER : MW_DRAW_RESIDENT_HEADER;
+    uint32_t index_action = MW_DRAW_RESIDENT_STORE;
+
+    if (bytes < header + 16U || !mw_be32(p) ||
+        mw_be32(p + 4U) >= MW_DRAW_RESIDENT_SLOTS)
+        return 0;
+    serial = mw_be32(p + 8U);
+    action = mw_be32(p + 12U);
+    base = mw_be32(p + 16U);
+    if (mw_be32(p + 20U) >= serial ||
+        (action != MW_DRAW_RESIDENT_STORE && action != MW_DRAW_RESIDENT_REUSE) ||
+        base > UINT16_MAX)
+        return 0;
+    if (both) {
+        index_action = mw_be32(p + 32U);
+        if (mw_be32(p + 24U) >= MW_DRAW_RESIDENT_INDEX_SLOTS ||
+            mw_be32(p + 36U) >= mw_be32(p + 28U) ||
+            (index_action != MW_DRAW_RESIDENT_STORE && index_action != MW_DRAW_RESIDENT_REUSE))
+            return 0;
+    }
+    p += header;
+    bytes -= header;
+    vertices = mw_be32(p + 4U);
+    count = mw_be32(p + 8U);
+    format = mw_be32(p + 12U);
+    if (mw_be32(p) != 4U || !vertices || vertices > MW_MAX_VERTICES ||
+        vertices > 0x10000U - base || !count ||
+        count > (both ? MW_DRAW_RESIDENT_INDEX_MAX : MW_MAX_VERTICES) ||
+        count % 3U || !mw_resident_layout(format, &prefix, &stride))
+        return 0;
+    geometry = vertices * stride;
+    padded = (count * 2U + 3U) & ~3U;
+    if (prefix + geometry + padded > MW_DRAW_RESIDENT_SLOT_BYTES ||
+        bytes != prefix + (action == MW_DRAW_RESIDENT_STORE ? geometry : 0U) +
+                          (index_action == MW_DRAW_RESIDENT_STORE ? padded : 0U))
+        return 0;
+    if (index_action == MW_DRAW_RESIDENT_REUSE)
+        return 1; /* The original list was range-checked on STORE. */
+    p += bytes - padded;
+    for (i = 0U; i < count; ++i) {
+        if (mw_be16(p + i * 2U) >= vertices)
+            return 0;
+    }
+    return !(count & 1U) || !mw_be16(p + count * 2U);
+}
+
 static int mw_valid_command(uint32_t opcode, const uint8_t *p, size_t bytes)
 {
     switch (opcode) {
     case MW_CLEAR:
         return bytes == 24 && !(mw_be32(p) & ~3U) && mw_finite(p + 4, 5);
 
+    case MW_DRAW_CACHE_INDEXED:
+    case MW_DRAW_PACKED_INDEXED:
+        return mw_valid_packed_indexed(p, bytes, opcode == MW_DRAW_CACHE_INDEXED);
+
+    case MW_DRAW_RESIDENT_INDEXED:
+    case MW_DRAW_RESIDENT_BOTH:
+        return mw_valid_resident_indexed(p, bytes, opcode == MW_DRAW_RESIDENT_BOTH);
+
     case MW_DRAW_OBJECT:
-    case MW_DRAW_PACKED:
-    case MW_DRAW_PACKED_INDEXED: {
+    case MW_DRAW_PACKED: {
         uint32_t mode, count;
         uint64_t expected;
 
         if (bytes < 8)
             return 0;
         mode = mw_be32(p);
-
-        if (opcode == MW_DRAW_PACKED_INDEXED) {
-            uint32_t v_count, idx_count, constants, words;
-            const uint8_t *idx_ptr;
-            uint32_t i;
-
-            if (bytes < 16)
-                return 0;
-            v_count = mw_be32(p + 4);
-            idx_count = mw_be32(p + 8);
-            if (!mw_packed_layout(mw_be32(p + 12), &constants, &words))
-                return 0;
-            expected = 16 + 4 * ((uint64_t)constants + (uint64_t)v_count * words) +
-                       (((uint64_t)idx_count * 2 + 3) & ~3ULL);
-            if (bytes != expected || !v_count || v_count > MW_MAX_VERTICES ||
-                !idx_count || idx_count > MW_MAX_VERTICES || mode > 6 ||
-                (mode == 1 && (idx_count % 2 != 0)) || (mode == 4 && (idx_count % 3 != 0)))
-                return 0;
-            idx_ptr = p + 16 + 4 * (constants + v_count * words);
-            for (i = 0; i < idx_count; ++i) {
-                if (mw_be16(idx_ptr + i * 2) >= v_count)
-                    return 0;
-            }
-            return 1;
-        }
 
         count = mw_be32(p + 4);
 
@@ -583,13 +652,15 @@ static int mw_valid_command(uint32_t opcode, const uint8_t *p, size_t bytes)
 }
 
 static uint32_t mw_validate_packet_impl(const uint8_t *packet, uint32_t bytes,
-                                        uint32_t *failed_opcode)
+                                        uint32_t *failed_opcode, int *has_resident_draw)
 {
     uint32_t count, i;
     size_t offset;
 
     if (failed_opcode)
         *failed_opcode = 0U;
+    if (has_resident_draw)
+        *has_resident_draw = 0;
     if (!packet || bytes < 16 || bytes > MW_MAX_PACKET_BYTES || (bytes & 3) != 0 ||
         mw_be32(packet) != MW_MAGIC || mw_be32(packet + 8) != bytes)
         return MW_STATUS_INVALID;
@@ -614,6 +685,9 @@ static uint32_t mw_validate_packet_impl(const uint8_t *packet, uint32_t bytes,
                 *failed_opcode = opcode;
             return MW_STATUS_INVALID;
         }
+        if (has_resident_draw &&
+            (opcode == MW_DRAW_RESIDENT_INDEXED || opcode == MW_DRAW_RESIDENT_BOTH))
+            *has_resident_draw = 1;
         offset += cmd_bytes;
     }
     return (offset == bytes) ? MW_STATUS_OK : MW_STATUS_INVALID;
@@ -621,13 +695,19 @@ static uint32_t mw_validate_packet_impl(const uint8_t *packet, uint32_t bytes,
 
 uint32_t mw_validate_packet(const uint8_t *packet, uint32_t bytes)
 {
-    return mw_validate_packet_impl(packet, bytes, NULL);
+    return mw_validate_packet_impl(packet, bytes, NULL, NULL);
 }
 
 uint32_t mw_validate_packet_report(const uint8_t *packet, uint32_t bytes,
                                    uint32_t *failed_opcode)
 {
-    return mw_validate_packet_impl(packet, bytes, failed_opcode);
+    return mw_validate_packet_impl(packet, bytes, failed_opcode, NULL);
+}
+
+uint32_t mw_validate_wire_packet_report(const uint8_t *packet, uint32_t bytes,
+                                        uint32_t *failed_opcode, int *has_resident_draw)
+{
+    return mw_validate_packet_impl(packet, bytes, failed_opcode, has_resident_draw);
 }
 
 static uint32_t mw_visit_packet_commands(const uint8_t *packet, uint32_t bytes,

@@ -57,6 +57,15 @@ static struct {
     uint32_t fallback_draws[ZZ9K_MGL_FALLBACK_MAX];
     uint32_t fallback_triangles[ZZ9K_MGL_FALLBACK_MAX];
     int busy_valid;
+    /* Wire traffic of the window by opcode, and draws by vertex layout. */
+    uint32_t op_count[MGLP_OPCODES];
+    uint32_t op_bytes[MGLP_OPCODES];
+    struct {
+        uint32_t key;      /* opcode << 16 | layout word */
+        uint32_t draws;
+        uint32_t vertices;
+        uint32_t bytes;
+    } layout[MGLP_LAYOUTS];
     uint8_t stack[MGLP_STACK_DEPTH];
 } g_mglp;
 
@@ -126,6 +135,9 @@ static void mglp_window_reset(void)
     memset(g_mglp.feed_waits, 0, sizeof(g_mglp.feed_waits));
     memset(g_mglp.feed_wait_us, 0, sizeof(g_mglp.feed_wait_us));
     g_mglp.fallback_reason = ZZ9K_MGL_FALLBACK_NONE;
+    memset(g_mglp.op_count, 0, sizeof(g_mglp.op_count));
+    memset(g_mglp.op_bytes, 0, sizeof(g_mglp.op_bytes));
+    memset(g_mglp.layout, 0, sizeof(g_mglp.layout));
     memset(g_mglp.fallback_draws, 0, sizeof(g_mglp.fallback_draws));
     memset(g_mglp.fallback_triangles, 0, sizeof(g_mglp.fallback_triangles));
     g_mglp.mark = mglp_now();
@@ -190,6 +202,69 @@ void minigl_profile_packet_begin(void)
 #endif
     minigl_profile_push_on(MGLP_PARSE);
     g_mglp.packet_busy_start = mglp_packet_busy();
+}
+
+void minigl_profile_command(uint32_t opcode, uint32_t bytes, uint32_t layout,
+                            uint32_t vertices)
+{
+    uint32_t slot = opcode < MGLP_OPCODES ? opcode : 0U;
+    uint32_t key = (opcode << 16) | (layout & 0xffffU);
+    unsigned int index;
+
+    if (!g_minigl_profile_on)
+        return;
+    ++g_mglp.op_count[slot];
+    g_mglp.op_bytes[slot] += bytes + 8U;
+    if (vertices == 0U)
+        return;
+    for (index = 0U; index < MGLP_LAYOUTS; ++index) {
+        if (g_mglp.layout[index].draws != 0U && g_mglp.layout[index].key != key)
+            continue;
+        g_mglp.layout[index].key = key;
+        ++g_mglp.layout[index].draws;
+        g_mglp.layout[index].vertices += vertices;
+        g_mglp.layout[index].bytes += bytes + 8U;
+        return;
+    }
+}
+
+/* A second line per window: bytes and commands per frame for each opcode
+ * that occurred, then draws, vertices and bytes per frame for each vertex
+ * layout (opcode:layout word). */
+static void mglp_report_commands(uint32_t frames)
+{
+    static char line[768];
+    size_t used;
+    int written;
+    unsigned int index;
+
+    written = snprintf(line, sizeof(line), "[MGLO] op:n/B");
+    used = written > 0 ? (size_t)written : 0U;
+    for (index = 0U; index < MGLP_OPCODES && used < sizeof(line) - 40U; ++index) {
+        if (g_mglp.op_count[index] == 0U)
+            continue;
+        written = snprintf(line + used, sizeof(line) - used, " %u:%lu/%lu", index,
+                           (unsigned long)(g_mglp.op_count[index] / frames),
+                           (unsigned long)(g_mglp.op_bytes[index] / frames));
+        if (written > 0)
+            used += (size_t)written;
+    }
+    written = snprintf(line + used, sizeof(line) - used, " | layout:draws/verts/B");
+    if (written > 0)
+        used += (size_t)written;
+    for (index = 0U; index < MGLP_LAYOUTS && used < sizeof(line) - 48U; ++index) {
+        if (g_mglp.layout[index].draws == 0U)
+            continue;
+        written = snprintf(line + used, sizeof(line) - used, " %lu:%03lx:%lu/%lu/%lu",
+                           (unsigned long)(g_mglp.layout[index].key >> 16),
+                           (unsigned long)(g_mglp.layout[index].key & 0xffffU),
+                           (unsigned long)(g_mglp.layout[index].draws / frames),
+                           (unsigned long)(g_mglp.layout[index].vertices / frames),
+                           (unsigned long)(g_mglp.layout[index].bytes / frames));
+        if (written > 0)
+            used += (size_t)written;
+    }
+    minigl_platform_log(line);
 }
 
 void minigl_profile_packet_end(uint32_t bytes, uint32_t commands)
@@ -303,7 +378,8 @@ void minigl_profile_report(void)
     uint32_t divisor;
     static const char *const names[MGLP_STAGES] = {
         " idle=", " parse=", " geom=", " cpu=", " emit=", " fifo=", " stall=",
-        " fence=", " tgt=", " tex=", " pres=", " sdr=", " scpy=", " sfli=", " op="
+        " fence=", " tgt=", " tex=", " pres=", " sdr=", " scpy=", " sfli=", " op=",
+        " front="
     };
     static char line[1024];
     const uint32_t *n = g_minigl_profile_counts;
@@ -489,6 +565,15 @@ void minigl_profile_report(void)
     }
     /* One rate-limited line: core 0 and the worker share the UART. */
     minigl_platform_log(line);
+    mglp_report_commands(divisor);
+    if (n[MGLP_N_DRAW_CACHE_STORES] || n[MGLP_N_DRAW_CACHE_HITS]) {
+        snprintf(line, sizeof(line), "[MGLC] frames=%lu stores=%lu hits=%lu geometry_bytes=%lu",
+                 (unsigned long)n[MGLP_N_FRAMES],
+                 (unsigned long)n[MGLP_N_DRAW_CACHE_STORES],
+                 (unsigned long)n[MGLP_N_DRAW_CACHE_HITS],
+                 (unsigned long)n[MGLP_N_DRAW_CACHE_REPLAY_BYTES]);
+        minigl_platform_log(line);
+    }
     mglp_window_reset();
     g_mglp.last_log = g_mglp.mark - print_start;
 }

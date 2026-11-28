@@ -416,6 +416,9 @@ void core1_cold_restart(void)
 	/* The app's GL binding points into the module image; forget it before
 	 * zzm_loader_forget_core1_modules poisons that image. */
 	zzapp_minigl_forget();
+	/* Return launcher surfaces after stopping graphics and unhooking the
+	 * module, so app teardown cannot enter its dead stack. */
+	zzapp_on_core1_restart();
 	/* Its module state died with core 1: reload it on the next acquire. */
 	zzm_loader_forget_core1_modules();
 
