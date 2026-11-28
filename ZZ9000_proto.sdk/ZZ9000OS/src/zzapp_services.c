@@ -4057,7 +4057,9 @@ int zzapp_display_wait_flip_idle(void)
 		return AAR_E_INVAL;
 	if (display_mailbox_enabled())
 		return AAR_OK;
-	return wait_flip(state->display_flip_gen, state->present_submitting);
+	/* MiniGL may render into the old front as soon as this wait returns.
+	 * A feedback timeout does not return ownership. */
+	return wait_flip(state->display_flip_gen, 0);
 }
 
 /* A token of the client's memory is a board offset; the card address is the

@@ -3348,6 +3348,16 @@ static void client_yield_and_poll(void)
 	zzapp_services_poll();
 }
 
+static void reply_after_feedback_timeout(void)
+{
+	aar_completion late = {0};
+
+	fake_now += 7U;
+	late.op = AAR_OP_DISPLAY_FLIP;
+	late.id = zzapp_xport_req_id(cur_rec, ZZAPP_XPORT_REQ_FLIP);
+	client_post(cur_client, &late);
+}
+
 static void test_tracked_client_reply_timeout(void)
 {
 	client_t c;
@@ -3355,7 +3365,6 @@ static void test_tracked_client_reply_timeout(void)
 	uint32_t handle;
 	aar_surface s;
 	aar_present_result result;
-	aar_completion late = {0};
 	uint64_t id, start;
 
 	reset_all();
@@ -3376,14 +3385,16 @@ static void test_tracked_client_reply_timeout(void)
 	CHECK(zzapp_svc_display_refresh(&s) == AAR_E_BUSY);
 	CHECK(zzapp_svc_display_last_present_us() == 0U);
 
-	/* A late confirmation releases ownership, without a duplicate result. */
-	fake_now += 7U;
-	late.op = AAR_OP_DISPLAY_FLIP;
-	late.id = zzapp_xport_req_id(rec, ZZAPP_XPORT_REQ_FLIP);
-	client_post(&c, &late);
+	/* MiniGL must wait for the late confirmation even though the tracked
+	 * result is already available and the swap is still submitting. */
+	runtime_of(rec)->present_submitting = 1;
+	zzapp_services_test_set_yield(reply_after_feedback_timeout);
+	CHECK(zzapp_display_wait_flip_idle() == AAR_OK);
+	runtime_of(rec)->present_submitting = 0;
 	CHECK(zzapp_display_flip_idle() == 1);
 	CHECK(zzapp_svc_display_last_present_us() == fake_now);
 	CHECK(zzapp_svc_display_present_poll(&result) == 0);
+	zzapp_services_test_set_yield(client_yield_and_poll);
 
 	/* A client that promises a pan without scanout feedback is unconfirmed. */
 	cl.ignore = 0;
