@@ -733,21 +733,27 @@ extracted, before any byte is copied. `e_entry` must be even and inside a
 
 **Note v1.** An image must carry exactly one AAR note (owner `AAR`, type 1, a
 40-byte descriptor of ten little-endian words), found in a `PT_NOTE` segment.
-A note that only a section header names is not found. The loader checks, in the
-descriptor's order: magic `0x4E524141` and version 1 (`AAR_E_INVAL`); profile
-A32 (`AAR_E_PROFILE`); `api_major` 0 and `api_minor` 6
-(`AAR_E_INVAL`); `stack_bytes` 0 for the default 1 MiB, else 64 KiB to 1 MiB
-and a multiple of 16 (`AAR_E_INVAL`); the reserved word 0; every
-`groups_required` bit present in the runtime mask (`AAR_E_NOGROUP`); and
-`min_heap_mib` within the 512 MiB private window (`AAR_E_NOMEM`). No note, a
-second AAR note, or a descriptor of the wrong size is `AAR_E_INVAL`. The load
-status the client sees maps `AAR_E_INVAL` and `AAR_E_PROFILE` to
+A note that only a section header names is not found. No note, a second AAR
+note, or a descriptor of the wrong size returns `AAR_E_INVAL`. The descriptor
+must have magic `0x4E524141`, format version 1, and a zero reserved word.
+`stack_bytes` must be 0 for the default 1 MiB, or a multiple of 16 from
+64 KiB to 1 MiB. Violating any of those rules returns `AAR_E_INVAL`. A
+profile other than A32 returns `AAR_E_PROFILE`.
+
+Once the image is structurally valid, a different `api_major` or an
+`api_minor` outside the inclusive range `AAR_API_MINOR_OLDEST` through
+`AAR_API_MINOR` returns `AAR_E_VERSION`. This firmware accepts API 0.6.
+Each `groups_required` bit must be present in the runtime mask
+(`AAR_E_NOGROUP`), and `min_heap_mib` must fit within the 512 MiB private
+window (`AAR_E_NOMEM`).
+
+The mailbox maps `AAR_E_INVAL`, `AAR_E_PROFILE`, and `AAR_E_VERSION` to
 `BAD_REQUEST`, `AAR_E_NOGROUP` to `UNSUPPORTED`, and `AAR_E_NOMEM` to
-`NO_MEMORY`. The status alone cannot tell `AAR_E_INVAL` from `AAR_E_PROFILE`
-or `AAR_E_NOGROUP` from a missing call, so the refusal reply carries the code
-too (see `LOAD_END` below). A profile or group refusal prints its reason in
-the `[app] reject op` line. The groups a note names (required and optional)
-set the display, audio and GL bits of `AAR_CB_FLAGS`, which the client reads.
+`NO_MEMORY`. The refusal reply carries the AAR error code too (see
+`LOAD_END` below). Profile, API version and group refusals print their
+reason in the `[app] reject op` line. The groups a note names (required and
+optional) set the display, audio and GL bits of `AAR_CB_FLAGS`, which the
+client reads.
 An image without a v1 note does not load.
 
 **Events.** `aar_event_poll` always delivers `AAR_EV_STOP` and
@@ -843,7 +849,7 @@ A request with an opcode in `0x0c00` to `0x0c1f` that the table does not list
 is unsupported. The client reads lifecycle state from the control block and
 binds the display when it completes `AAR_OP_DISPLAY_OPEN`.
 
-`QUERY` (no handle) fills 48 bytes: the ABI major and minor words (0 and 5),
+`QUERY` (no handle) fills 48 bytes: the ABI major and minor words (0 and 6),
 `EVENTS` at 8 (the board offset of the event block, described with the
 control block below; 0 when there is none), the capability word at 12
 (`Z3`, `DISPLAY`, `AUDIO`, `GL`,
@@ -1122,8 +1128,8 @@ takes tables from the record's reserve; an image that needs more than 16
 gives `TABLES`. A failed `LOAD_END` ends the claim: the frames, tables and
 staging go back and the state reads `IDLE`. The reply of a refused
 `LOAD_BEGIN` or `LOAD_END` holds the `AAR_REASON_*` word at 0 (`NONE` when no
-resource ran out) and, for `AAR_E_INVAL`, `AAR_E_NOMEM`, `AAR_E_PROFILE` and
-`AAR_E_NOGROUP`, that code as a positive number at 4
+resource ran out) and, for `AAR_E_INVAL`, `AAR_E_NOMEM`, `AAR_E_PROFILE`,
+`AAR_E_NOGROUP` and `AAR_E_VERSION`, that code as a positive number at 4
 (`ZZAPP_REFUSAL_CODE`; the reply is then 8 bytes). `aar.library` returns the
 code, except that a reason makes it return `AAR_E_NORESOURCE` with the reason.
 A reply of 4 bytes or none, as an older firmware sends, leaves the library on

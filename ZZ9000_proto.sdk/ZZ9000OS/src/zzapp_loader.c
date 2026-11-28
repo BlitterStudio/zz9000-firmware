@@ -75,6 +75,7 @@ struct load_image {
     uint32_t min_heap_bytes;
     uint32_t image_end;
     uint32_t nseg;
+    int unsupported_api;
     /* Relocation tables found in PT_DYNAMIC, as file offsets (0 bytes: none). */
     uint32_t rel_off;
     uint32_t rel_bytes;
@@ -1130,9 +1131,6 @@ static int note_descriptor_ok(const uint8_t *desc, struct load_image *img)
     /* The image is ELF32 ARM: profile A32. */
     if (profile != AAR_PROFILE_A32)
         return AAR_E_PROFILE;
-    if (api_major != AAR_API_MAJOR || api_minor < AAR_API_MINOR_OLDEST ||
-        api_minor > AAR_API_MINOR)
-        return AAR_E_INVAL;
     if (stack_bytes == 0u)
         stack_bytes = ZZAPP_STACK_DEFAULT;
     if (stack_bytes < ZZAPP_STACK_MIN || stack_bytes > ZZAPP_STACK_MAX ||
@@ -1140,12 +1138,17 @@ static int note_descriptor_ok(const uint8_t *desc, struct load_image *img)
         return AAR_E_INVAL;
     if (reserved != 0u)
         return AAR_E_INVAL;
+    img->stack_bytes = stack_bytes;
+    if (api_major != AAR_API_MAJOR || api_minor < AAR_API_MINOR_OLDEST ||
+        api_minor > AAR_API_MINOR) {
+        img->unsupported_api = 1;
+        return AAR_OK; /* Finish structural validation before refusing it. */
+    }
     if (groups_required & ~zzapp_runtime_groups())
         return AAR_E_NOGROUP;
     if (min_heap_mib >
         ZZAPP_MEM_PRIVATE_WINDOW_BYTES / ZZAPP_MEM_FRAME_BYTES)
         return AAR_E_NOMEM;
-    img->stack_bytes = stack_bytes;
     img->note_flags = note_wire_flags(groups_required | groups_optional);
     img->min_heap_bytes = min_heap_mib << 20;
     return AAR_OK;
@@ -1546,34 +1549,39 @@ static int place_segments(const struct load_image *img)
 
 static int prepare_loaded_image(void)
 {
-    uint32_t copied = 0U;
+    uint8_t *saved;
+    uint32_t processed = 0U;
 
     if (!g_reloc_prepare_started) {
-        uint32_t entries;
-        uint32_t saved_n;
         int rc = parse_elf(&g_image);
 
         if (rc != AAR_OK)
             return rc;
-        if (!image_commit_fits_limit(&g_image)) {
-            zzapp_services_note_refusal(AAR_REASON_MEMORY);
-            return AAR_E_NOMEM;
+        if (!g_image.unsupported_api) {
+            uint32_t entries = g_image.rel_bytes / LOADER_REL_BYTES +
+                               g_image.rela_bytes / LOADER_RELA_BYTES;
+            uint32_t saved_n;
+
+            if (!image_commit_fits_limit(&g_image)) {
+                zzapp_services_note_refusal(AAR_REASON_MEMORY);
+                return AAR_E_NOMEM;
+            }
+            if (entries > UINT32_MAX / 16u)
+                return AAR_E_NOMEM;
+            saved_n = entries * 16u;
+            g_relocs = saved_n ? (uint8_t *)malloc(saved_n) : NULL;
+            if (saved_n && !g_relocs)
+                return AAR_E_NOMEM;
+            g_relocs_bytes = saved_n;
         }
-        entries = g_image.rel_bytes / LOADER_REL_BYTES +
-                  g_image.rela_bytes / LOADER_RELA_BYTES;
-        if (entries > UINT32_MAX / 16u)
-            return AAR_E_NOMEM;
-        saved_n = entries * 16u;
-        g_relocs = saved_n ? (uint8_t *)malloc(saved_n) : NULL;
-        if (saved_n && !g_relocs)
-            return AAR_E_NOMEM;
-        g_relocs_bytes = saved_n;
         g_reloc_prepare_started = 1U;
     }
 
+    /* Validate unsupported images too, but without saving relocations. */
+    saved = g_relocs;
     /* Table 0 is DT_REL, table 1 is DT_RELA; g_reloc_section counts them. */
     while (g_reloc_section < 2u &&
-           copied < ZZAPP_LOADER_RELOC_CHUNK_ENTRIES) {
+           processed < ZZAPP_LOADER_RELOC_CHUNK_ENTRIES) {
         uint32_t kind = g_reloc_section == 0u ? LOADER_RELOC_REL :
                                                 LOADER_RELOC_RELA;
         uint32_t stride = kind == LOADER_RELOC_REL ? LOADER_REL_BYTES :
@@ -1585,7 +1593,7 @@ static int prepare_loaded_image(void)
                            stride;
 
         while (g_reloc_entry < entries &&
-               copied < ZZAPP_LOADER_RELOC_CHUNK_ENTRIES) {
+               processed < ZZAPP_LOADER_RELOC_CHUNK_ENTRIES) {
             const uint8_t *rel = g_mem + table + g_reloc_entry * stride;
             uint32_t roff = rd32(rel);
             uint32_t info = rd32(rel + 4u);
@@ -1594,24 +1602,30 @@ static int prepare_loaded_image(void)
                 (roff & 3u) != 0u ||
                 !in_load_memory(&g_image, roff, 4u))
                 return AAR_E_INVAL;
-            memcpy(g_relocs + g_reloc_written, rel, 8u);
-            memcpy(g_relocs + g_reloc_written + 8u, &kind, 4u);
-            if (kind == LOADER_RELOC_RELA)
-                memcpy(g_relocs + g_reloc_written + 12u, rel + 8u, 4u);
-            else
-                memset(g_relocs + g_reloc_written + 12u, 0, 4u);
-            g_reloc_written += 16u;
+            if (saved) {
+                uint8_t *entry = saved + g_reloc_written;
+
+                memcpy(entry, rel, 8u);
+                memcpy(entry + 8u, &kind, 4u);
+                if (kind == LOADER_RELOC_RELA)
+                    memcpy(entry + 12u, rel + 8u, 4u);
+                else
+                    memset(entry + 12u, 0, 4u);
+                g_reloc_written += 16u;
+            }
             g_reloc_entry++;
-            copied++;
+            processed++;
         }
         if (g_reloc_entry == entries) {
             g_reloc_section++;
             g_reloc_entry = 0U;
         }
     }
-    loader_note_work(copied * 16U, ZZAPP_LOADER_WORK_RELOC);
+    loader_note_work(processed * 16U, ZZAPP_LOADER_WORK_RELOC);
     if (g_reloc_section != 2u)
         return ZZAPP_LOADER_IN_PROGRESS;
+    if (g_image.unsupported_api)
+        return AAR_E_VERSION;
     g_image_prepared = 1;
     /* Do not combine the final extraction slice with allocation or zeroing. */
     return ZZAPP_LOADER_IN_PROGRESS;

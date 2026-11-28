@@ -752,36 +752,43 @@ static void test_relocation_validation_is_sliced(void)
     const uint32_t relocation_count = 2U * LOADER_RELOC_PREPARE_ENTRIES + 1U;
     const uint32_t bytes = RELA_OFF + relocation_count * 12U + 40U;
     uint8_t *image = malloc(bytes);
-    uint32_t in_progress = 0U;
-    uint32_t offset;
-    int rc;
+    unsigned unsupported;
 
     /* The malformed entry sits in the third extraction chunk: a loader
      * that validates every entry in parse_elf's single pass rejects the
      * image on the first zzapp_loader_end() call, before any relocation
      * work has been reported. */
     assert(image != NULL);
-    zzapp_boot_init();
     make_relocation_stress_image(image, bytes, relocation_count);
     put32(image + RELA_OFF + (relocation_count - 1U) * 12U + 4U, 22U);
-    assert(zzapp_loader_begin() == AAR_OK);
-    for (offset = 0U; offset < bytes;) {
-        uint32_t chunk = bytes - offset;
+    for (unsupported = 0U; unsupported < 2U; unsupported++) {
+        uint32_t in_progress = 0U;
+        uint32_t offset;
+        int rc;
 
-        if (chunk > LOADER_UPLOAD_CHUNK_BYTES)
-            chunk = LOADER_UPLOAD_CHUNK_BYTES;
-        assert(zzapp_loader_chunk(offset, image + offset, chunk) == AAR_OK);
-        offset += chunk;
+        zzapp_boot_init();
+        if (unsupported)
+            test_note_set(image + NOTE_OFF, TEST_NOTE_W_API_MINOR,
+                          AAR_API_MINOR + 1u);
+        assert(zzapp_loader_begin() == AAR_OK);
+        for (offset = 0U; offset < bytes;) {
+            uint32_t chunk = bytes - offset;
+
+            if (chunk > LOADER_UPLOAD_CHUNK_BYTES)
+                chunk = LOADER_UPLOAD_CHUNK_BYTES;
+            assert(zzapp_loader_chunk(offset, image + offset, chunk) == AAR_OK);
+            offset += chunk;
+        }
+        do {
+            rc = zzapp_loader_end();
+            if (rc == ZZAPP_LOADER_IN_PROGRESS)
+                in_progress++;
+        } while (rc == ZZAPP_LOADER_IN_PROGRESS);
+        assert(rc == AAR_E_INVAL);
+        assert(in_progress >= 2U);
+        assert(zzapp_test_arena_mem() == NULL);
+        assert(zzapp_loader_state() == ZZAPP_ST_IDLE);
     }
-    do {
-        rc = zzapp_loader_end();
-        if (rc == ZZAPP_LOADER_IN_PROGRESS)
-            in_progress++;
-    } while (rc == ZZAPP_LOADER_IN_PROGRESS);
-    assert(rc == AAR_E_INVAL);
-    assert(in_progress >= 2U);
-    assert(zzapp_test_arena_mem() == NULL);
-    assert(zzapp_loader_state() == ZZAPP_ST_IDLE);
     free(image);
 }
 
@@ -933,10 +940,11 @@ static void test_note_v1_load_rules(void)
         { TEST_NOTE_W_VERSION, 2u, AAR_E_INVAL },
         { TEST_NOTE_W_PROFILE, AAR_PROFILE_A64, AAR_E_PROFILE },
         { TEST_NOTE_W_PROFILE, 0u, AAR_E_PROFILE },
-        { TEST_NOTE_W_API_MAJOR, AAR_API_MAJOR + 1u, AAR_E_INVAL },
-        { TEST_NOTE_W_API_MINOR, AAR_API_MINOR + 1u, AAR_E_INVAL },
-        { TEST_NOTE_W_API_MINOR, AAR_API_MINOR_OLDEST - 1u, AAR_E_INVAL },
-        { TEST_NOTE_W_API_MINOR, 0u, AAR_E_INVAL },
+        { TEST_NOTE_W_API_MAJOR, AAR_API_MAJOR + 1u, AAR_E_VERSION },
+        { TEST_NOTE_W_API_MINOR, AAR_API_MINOR + 1u, AAR_E_VERSION },
+        { TEST_NOTE_W_API_MINOR, AAR_API_MINOR_OLDEST - 1u, AAR_E_VERSION },
+        { TEST_NOTE_W_API_MINOR, 0u, AAR_E_VERSION },
+        { TEST_NOTE_W_API_MINOR, AAR_API_MINOR_OLDEST, AAR_OK },
         { TEST_NOTE_W_STACK_BYTES, 16u, AAR_E_INVAL },
         { TEST_NOTE_W_STACK_BYTES, ZZAPP_STACK_MIN - 16u, AAR_E_INVAL },
         { TEST_NOTE_W_STACK_BYTES, ZZAPP_STACK_MIN + 8u, AAR_E_INVAL },
@@ -1065,6 +1073,41 @@ static void expect_load(const char *what, uint8_t image[IMAGE_BYTES],
         zzapp_loader_release();
     else if (zzapp_loader_state() != ZZAPP_ST_IDLE)
         refusal_failures++;
+}
+
+/* An incompatible API only explains the refusal if the image is valid. */
+static void test_api_version_after_image_validation(void)
+{
+    uint8_t image[IMAGE_BYTES];
+    uint8_t *note = image + NOTE_OFF;
+
+    refusal_failures = 0U;
+    make_reloc_image(image, 1);
+    test_note_set(note, TEST_NOTE_W_API_MINOR, AAR_API_MINOR + 1u);
+    expect_load("unsupported API with valid relocation", image, AAR_E_VERSION);
+
+    make_image(image);
+    test_note_set(note, TEST_NOTE_W_API_MINOR, AAR_API_MINOR + 1u);
+    put32(image + 24u, LOAD_OFF + 1u);             /* odd A32 entry */
+    expect_load("unsupported API with invalid entry", image, AAR_E_INVAL);
+    put32(image + 24u, LOAD_OFF);
+    memcpy(grow_phdrs(image, 0x120U) + 3U * 32U, image + PHOFF + 32U, 32U);
+    expect_load("unsupported API with duplicate note", image, AAR_E_INVAL);
+
+    make_image(image);
+    test_note_set(note, TEST_NOTE_W_API_MINOR, AAR_API_MINOR + 1u);
+    test_note_set(note, TEST_NOTE_W_STACK_BYTES, 16u);
+    expect_load("unsupported API with invalid stack", image, AAR_E_INVAL);
+    test_note_set(note, TEST_NOTE_W_STACK_BYTES, 0u);
+    test_note_set(note, TEST_NOTE_W_RESERVED, 1u);
+    expect_load("unsupported API with nonzero reserved word", image, AAR_E_INVAL);
+    test_note_set(note, TEST_NOTE_W_RESERVED, 0u);
+    test_note_set(note, TEST_NOTE_W_VERSION, AAR_NOTE_VERSION + 1u);
+    expect_load("unsupported API with unknown note format", image, AAR_E_INVAL);
+    test_note_set(note, TEST_NOTE_W_VERSION, AAR_NOTE_VERSION);
+    test_note_set(note, TEST_NOTE_W_MAGIC, AAR_NOTE_MAGIC + 1u);
+    expect_load("unsupported API with bad note magic", image, AAR_E_INVAL);
+    assert(refusal_failures == 0U);
 }
 
 /* Spec 2.2 items 2, 5 and 6: e_flags, DT_RELR and the entry point. */
@@ -1249,6 +1292,7 @@ int main(void)
     test_elf_header_dynamic_and_entry_rules();
     test_dynamic_presence_and_relocation_targets();
     test_note_v1_load_rules();
+    test_api_version_after_image_validation();
     zzapp_boot_init();
     make_image(image);
     assert(zzapp_loader_begin() == AAR_OK);
@@ -1317,10 +1361,6 @@ int main(void)
 
     zzapp_boot_init(); make_image(image);
     put32(image + PHOFF + 24, 3);
-    assert(load_end(image) == AAR_E_INVAL);
-
-    zzapp_boot_init(); make_image(image);
-    test_note_set(image + NOTE_OFF, TEST_NOTE_W_API_MAJOR, 2u);
     assert(load_end(image) == AAR_E_INVAL);
 
     zzapp_boot_init(); make_image(image);

@@ -1,10 +1,10 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
 /*
  * What LOAD_END reports to the client when the loader refuses an image: a
- * note whose profile this runtime does not run is BAD_REQUEST, a note that
- * requires a group the runtime lacks is UNSUPPORTED, the other refusals keep
- * their usual statuses, and the reply names the AAR_E_* code and the reason
- * (the client tells the refusals apart by the code). The claim ends either
+ * note with an unsupported profile or API version is BAD_REQUEST, a note
+ * that requires a group the runtime lacks is UNSUPPORTED. The other refusals
+ * keep their usual statuses. The reply names the AAR_E_* code and the reason
+ * so the client can tell the refusals apart. The claim ends either
  * way: its control block reads IDLE and the record is the client's to
  * release, after which a new claim loads normally. A load that completes
  * publishes AAR_CB_LOAD_BASE_*.
@@ -101,6 +101,12 @@ int main(void)
                 SDK_STATUS_BAD_REQUEST, AAR_E_PROFILE);
     expect_load(TEST_NOTE_W_PROFILE, 0U, 0U, SDK_STATUS_BAD_REQUEST,
                 AAR_E_PROFILE);
+    expect_load(TEST_NOTE_W_API_MAJOR, AAR_API_MAJOR + 1U, 0U,
+                SDK_STATUS_BAD_REQUEST, AAR_E_VERSION);
+    expect_load(TEST_NOTE_W_API_MINOR, AAR_API_MINOR + 1U, 0U,
+                SDK_STATUS_BAD_REQUEST, AAR_E_VERSION);
+    expect_load(TEST_NOTE_W_API_MINOR, AAR_API_MINOR_OLDEST - 1U, 0U,
+                SDK_STATUS_BAD_REQUEST, AAR_E_VERSION);
     expect_load(TEST_NOTE_W_GROUPS_REQUIRED, 0x80000000U, 0U,
                 SDK_STATUS_UNSUPPORTED, AAR_E_NOGROUP);
     expect_load(TEST_NOTE_W_GROUPS_REQUIRED, AAR_GROUP_DISPLAY,
@@ -115,10 +121,6 @@ int main(void)
                 AAR_E_INVAL);
     expect_load(TEST_NOTE_W_VERSION, 2U, 0U, SDK_STATUS_BAD_REQUEST,
                 AAR_E_INVAL);
-    expect_load(TEST_NOTE_W_API_MAJOR, AAR_API_MAJOR + 1U, 0U,
-                SDK_STATUS_BAD_REQUEST, AAR_E_INVAL);
-    expect_load(TEST_NOTE_W_API_MINOR, AAR_API_MINOR + 1U, 0U,
-                SDK_STATUS_BAD_REQUEST, AAR_E_INVAL);
     expect_load(TEST_NOTE_W_STACK_BYTES, 16U, 0U, SDK_STATUS_BAD_REQUEST,
                 AAR_E_INVAL);
     expect_load(TEST_NOTE_W_RESERVED, 1U, 0U, SDK_STATUS_BAD_REQUEST,
@@ -141,7 +143,8 @@ int main(void)
         rt_boot(RT_MB(256), 8U);
         start = rt_counts();
         rt_image(image, 1U);
-        test_note_set(image + TEST_NOTE_OFF, TEST_NOTE_W_PROFILE, AAR_PROFILE_A64);
+        test_note_set(image + TEST_NOTE_OFF, TEST_NOTE_W_API_MINOR,
+                      AAR_API_MINOR_OLDEST - 1U);
         assert(load_status(image) == SDK_STATUS_BAD_REQUEST);
         assert(RT_STATE(0U) == AAR_STATE_IDLE);
         assert(rt_simple(0U, ZZAPP_OP_RELEASE) == SDK_STATUS_OK);

@@ -126,10 +126,9 @@
 #define ZZAPP_REFUSAL_REPLY_BYTES  4u
 
 /* A refused LOAD_BEGIN or LOAD_END adds the AAR_E_* code of the refusal as a
- * positive number (13 for AAR_E_PROFILE) after the reason, for INVAL, NOMEM,
- * PROFILE and NOGROUP, which the mailbox statuses cannot tell apart. Word 0
- * is AAR_REASON_NONE when no resource ran out. A reply of 4 bytes or none
- * has no code: the client maps the status. */
+ * positive number (18 for AAR_E_VERSION) after the reason, for INVAL, NOMEM,
+ * PROFILE, NOGROUP and VERSION. Word 0 is AAR_REASON_NONE when no resource
+ * ran out. A reply of 4 bytes or none has no code: the client maps the status. */
 #define ZZAPP_REFUSAL_CODE         4u
 #define ZZAPP_REFUSAL_CODE_REPLY_BYTES 8u
 
