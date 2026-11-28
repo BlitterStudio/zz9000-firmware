@@ -692,6 +692,79 @@ static void test_file_request_pointers(void)
     teardown_dispatch();
 }
 
+static unsigned requester_calls;
+static int requester_result;
+
+static int mock_requester(const char *title, const char *text,
+                          const char *buttons, uint32_t *choice)
+{
+    requester_calls++;
+    CHECK(title == NULL);
+    CHECK(text && strcmp(text, "100% done") == 0);
+    CHECK(buttons && strcmp(buttons, "OK|Retry") == 0);
+    CHECK(choice && choice != (uint32_t *)(void *)(user_page + 0x100U));
+    if (choice)
+        *choice = 2U;
+    return requester_result;
+}
+
+static void test_requester_pointers(void)
+{
+    zzapp_svc_frame_t frame;
+    uint32_t slot = api_slot(offsetof(aar_api, requester));
+    uint32_t args[4], good[4], i;
+    const uint32_t max_bytes[] = { AAR_REQUESTER_TITLE_MAX + 1U,
+        AAR_REQUESTER_TEXT_MAX + 1U, AAR_REQUESTER_BUTTONS_MAX + 1U };
+    uint32_t *choice;
+
+    setup_dispatch();
+    if (!user_page) {
+        teardown_dispatch();
+        return;
+    }
+    api.requester = mock_requester;
+    requester_calls = 0U;
+    good[0] = 0U;
+    good[1] = user_va + 0x110U;
+    good[2] = user_va + 0x120U;
+    good[3] = user_va + 0x100U;
+    memcpy(user_page + 0x110U, "100% done", sizeof("100% done"));
+    memcpy(user_page + 0x120U, "OK|Retry", sizeof("OK|Retry"));
+    choice = (uint32_t *)(void *)(user_page + 0x100U);
+    *choice = 99U;
+
+    /* Each string starts on a readable page but runs into an unmapped page. */
+    user_page[0xfffU] = 'x';
+    for (i = 0U; i < 3U; i++) {
+        memcpy(args, good, sizeof(args));
+        args[i] = user_va + 0xfffU;
+        dispatch_words(slot, &frame, args, 4U);
+        CHECK((int32_t)frame.r[0] == AAR_E_FAULT && requester_calls == 0U);
+
+        memset(user_page + 0x200U, 'x', max_bytes[i]);
+        user_page[0x200U + max_bytes[i]] = '\0';
+        args[i] = user_va + 0x200U;
+        dispatch_words(slot, &frame, args, 4U);
+        CHECK((int32_t)frame.r[0] == AAR_E_INVAL && requester_calls == 0U);
+    }
+    memcpy(args, good, sizeof(args));
+    args[3] = WINDOW + 0x1000U;
+    dispatch_words(slot, &frame, args, 4U);
+    CHECK((int32_t)frame.r[0] == AAR_E_FAULT && requester_calls == 0U);
+    args[3] = user_va + 0xffeU;
+    dispatch_words(slot, &frame, args, 4U);
+    CHECK((int32_t)frame.r[0] == AAR_E_FAULT && requester_calls == 0U);
+    CHECK(*choice == 99U);
+
+    requester_result = AAR_E_NOSYS;
+    dispatch_words(slot, &frame, good, 4U);
+    CHECK((int32_t)frame.r[0] == AAR_E_NOSYS && requester_calls == 1U && *choice == 99U);
+    requester_result = AAR_OK;
+    dispatch_words(slot, &frame, good, 4U);
+    CHECK((int32_t)frame.r[0] == AAR_OK && requester_calls == 2U && *choice == 2U);
+    teardown_dispatch();
+}
+
 static void test_table_copy_uses_only_veneers(void)
 {
     aar_api direct;
@@ -768,6 +841,7 @@ static void test_descriptors_cover_callable_slots(void)
     uint32_t i;
 
     CHECK(zzapp_svc_api_count() == AAR_API_SLOT_COUNT);
+    CHECK(api_slot(offsetof(aar_api, requester)) == 83U);
     for (i = 0U; i < zzapp_svc_api_count(); ++i)
         CHECK(zzapp_svc_api_descriptor(i) != NULL);
     for (i = 0U; i < zzapp_svc_gl_count(); ++i)
@@ -2646,15 +2720,10 @@ static void test_vertex3fv_body(void)
     teardown_dispatch();
 }
 
-/* The host build is 64-bit and the dispatcher hands pointers to the module as
- * 32-bit words (the card's ABI), so a module that reads one needs the kernel
- * buffers below 4 GiB. Run the test body on a stack mapped there. */
-static ucontext_t v3_main_context, v3_body_context;
-static void v3_entry(void)
-{
-    test_vertex3fv_body();
-}
-static void test_vertex3fv(void)
+/* The host build is 64-bit, but the dispatcher hands kernel buffers to
+ * handlers as 32-bit words. Tests that dereference one need a low stack. */
+static ucontext_t caller_context, body_context;
+static void run_on_low_stack(void (*body)(void))
 {
     const size_t bytes = 1U << 19;
     void *stack = mmap(NULL, bytes, PROT_READ | PROT_WRITE,
@@ -2663,23 +2732,24 @@ static void test_vertex3fv(void)
     CHECK(stack != MAP_FAILED);
     if (stack == MAP_FAILED)
         return;
-    CHECK(getcontext(&v3_body_context) == 0);
-    v3_body_context.uc_stack.ss_sp = stack;
-    v3_body_context.uc_stack.ss_size = bytes;
-    v3_body_context.uc_link = &v3_main_context;
-    makecontext(&v3_body_context, v3_entry, 0);
-    CHECK(swapcontext(&v3_main_context, &v3_body_context) == 0);
+    CHECK(getcontext(&body_context) == 0);
+    body_context.uc_stack.ss_sp = stack;
+    body_context.uc_stack.ss_size = bytes;
+    body_context.uc_link = &caller_context;
+    makecontext(&body_context, body, 0);
+    CHECK(swapcontext(&caller_context, &body_context) == 0);
     munmap(stack, bytes);
 }
 
 int main(void)
 {
     test_scalar_gl_fast_path();
-    test_vertex3fv();
+    run_on_low_stack(test_vertex3fv_body);
     test_table_copy_uses_only_veneers();
     test_gl_table_copy_preserves_missing_calls();
     test_pointer_checks();
     test_file_request_pointers();
+    run_on_low_stack(test_requester_pointers);
     test_large_and_section_pointer_checks();
     test_gl_span_validation();
     test_gl_bad_array_pointer_fails_at_draw();

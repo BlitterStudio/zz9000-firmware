@@ -291,7 +291,8 @@ static struct {
 	uint32_t comment_set_len;
 	const char *picked_path;
 	uint32_t picked_bytes, picked_len;
-	uint8_t requester_input[512];
+	uint32_t picked_choice;
+	uint8_t requester_input[ZZAPP_XPORT_SCRATCH_BYTES];
 	const uint8_t *clip_data;
 	uint32_t clip_len, clip_cap, clip_seq, clip_max_len;
 	int clip_drift, clip_stall;
@@ -379,6 +380,12 @@ static void client_handle(client_t *c, const aar_request *r)
 		d.out[AAR_R_FILE_REQUEST_LEN] = cl.picked_len;
 		break;
 	}
+	case AAR_OP_REQUESTER:
+		CHECK(buf && r->buf_len <= sizeof(cl.requester_input));
+		if (buf && r->buf_len <= sizeof(cl.requester_input))
+			memcpy(cl.requester_input, buf, r->buf_len);
+		d.out[AAR_R_REQUESTER_CHOICE] = cl.picked_choice;
+		break;
 	case AAR_OP_FILE_READ: {
 		uint32_t left = cl.file_size - cl.file_pos;
 		uint32_t n = r->arg[AAR_A_FILE_LEN] < left ? r->arg[AAR_A_FILE_LEN] : left;
@@ -1439,6 +1446,118 @@ static void test_file_requester_stop(void)
 	CHECK(zzapp_xport_pump(rec) >= 0);
 	CHECK(!zzapp_xport_buffer_held(rec, ZZAPP_XPORT_NAMES_AREA(ZZAPP_XPORT_AREA_SCRATCH)));
 	CHECK(strcmp(path, "unchanged") == 0);
+	CHECK(mbox(ZZAPP_OP_RELEASE, handle, 0U, 0U, NULL, NULL) == SDK_STATUS_OK);
+}
+
+static void test_message_requester(void)
+{
+	static const char input[] = "Title\0Text: 100% \xc3\xa9\0First|100% done";
+	static const char default_input[] = "\0Message\0OK";
+	static const char *const invalid_buttons[] = {
+		NULL, "", "|A", "A|", "A||B", "A|B|C|D|E|F|G|H|I"
+	};
+	static const struct {
+		int result;
+		uint32_t choice;
+		int expected;
+	} replies[] = {
+		{ AAR_E_NOSYS, 1U, AAR_E_NOSYS },
+		{ AAR_E_IO, 1U, AAR_E_IO },
+		{ 1, 1U, AAR_E_IO },
+		{ AAR_OK, 0U, AAR_E_IO },
+		{ AAR_OK, 2U, AAR_E_IO },
+		{ AAR_OK, UINT32_MAX, AAR_E_IO },
+	};
+	char title[AAR_REQUESTER_TITLE_MAX + 2U];
+	char text[AAR_REQUESTER_TEXT_MAX + 2U];
+	char buttons[AAR_REQUESTER_BUTTONS_MAX + 2U];
+	const aar_request *r = &cl.last[AAR_OP_REQUESTER];
+	const volatile uint8_t *slot;
+	client_t c;
+	zzapp_rec_t *rec;
+	uint32_t handle, i, choice = 99U;
+
+	reset_all();
+	rec = claim(&c, &handle);
+	memset(title, 't', sizeof(title) - 1U);
+	memset(text, 'm', sizeof(text) - 1U);
+	memset(buttons, 'b', sizeof(buttons) - 1U);
+	title[sizeof(title) - 1U] = text[sizeof(text) - 1U] =
+		buttons[sizeof(buttons) - 1U] = '\0';
+	CHECK(zzapp_svc_requester(title, "Message", "OK", &choice) == AAR_E_INVAL);
+	CHECK(zzapp_svc_requester(NULL, text, "OK", &choice) == AAR_E_INVAL);
+	CHECK(zzapp_svc_requester(NULL, "Message", buttons, &choice) == AAR_E_INVAL);
+	CHECK(zzapp_svc_requester(NULL, NULL, "OK", &choice) == AAR_E_INVAL);
+	CHECK(zzapp_svc_requester(NULL, "", "OK", &choice) == AAR_E_INVAL);
+	CHECK(zzapp_svc_requester(NULL, "Message", "OK", NULL) == AAR_E_INVAL);
+	for (i = 0U; i < sizeof(invalid_buttons) / sizeof(invalid_buttons[0]); i++)
+		CHECK(zzapp_svc_requester(NULL, "Message", invalid_buttons[i], &choice) == AAR_E_INVAL);
+	CHECK(choice == 99U && aar_queue_peek(&c.sq, NULL, &slot) == 0);
+
+	cl.picked_choice = 2U;
+	zzapp_services_test_set_yield(requester_delayed_yield);
+	CHECK(zzapp_svc_requester("Title", "Text: 100% \xc3\xa9", "First|100% done", &choice) == AAR_OK);
+	CHECK(choice == 2U && cl.yields == 2U && fake_now > 31000000U);
+	CHECK(!zzapp_services_wait_registered(rec->hdr.pid));
+	CHECK(r->flags == 0U && r->buf_len == sizeof(input));
+	for (i = 0U; i < AAR_ENTRY_ARGS; i++)
+		CHECK(r->arg[i] == 0U);
+	CHECK(memcmp(cl.requester_input, input, sizeof(input)) == 0);
+
+	title[AAR_REQUESTER_TITLE_MAX] = text[AAR_REQUESTER_TEXT_MAX] =
+		buttons[AAR_REQUESTER_BUTTONS_MAX] = '\0';
+	memcpy(buttons, "A|B|C|D|E|F|G|", 14U);
+	cl.picked_choice = AAR_REQUESTER_MAX_CHOICES;
+	zzapp_services_test_set_yield(client_yield);
+	CHECK(zzapp_svc_requester(title, text, buttons, &choice) == AAR_OK);
+	CHECK(choice == AAR_REQUESTER_MAX_CHOICES);
+	CHECK(r->buf_len == sizeof(title) + sizeof(text) + sizeof(buttons) - 3U);
+	CHECK(memcmp(cl.requester_input, title, sizeof(title) - 1U) == 0);
+	CHECK(memcmp(cl.requester_input + sizeof(title) - 1U, text, sizeof(text) - 1U) == 0);
+	CHECK(memcmp(cl.requester_input + sizeof(title) + sizeof(text) - 2U,
+	             buttons, sizeof(buttons) - 1U) == 0);
+
+	cl.picked_choice = 1U;
+	CHECK(zzapp_svc_requester(NULL, "Message", "OK", &choice) == AAR_OK);
+	CHECK(choice == 1U && r->buf_len == sizeof(default_input));
+	CHECK(memcmp(cl.requester_input, default_input, sizeof(default_input)) == 0);
+	choice = 99U;
+	for (i = 0U; i < sizeof(replies) / sizeof(replies[0]); i++) {
+		cl.result = replies[i].result;
+		cl.picked_choice = replies[i].choice;
+		CHECK(zzapp_svc_requester("", "Message", "OK", &choice) == replies[i].expected);
+		CHECK(choice == 99U);
+	}
+	CHECK(r->buf_len == sizeof(default_input));
+	CHECK(memcmp(cl.requester_input, default_input, sizeof(default_input)) == 0);
+	CHECK(mbox(ZZAPP_OP_RELEASE, handle, 0U, 0U, NULL, NULL) == SDK_STATUS_OK);
+}
+
+static void test_message_requester_stop(void)
+{
+	client_t c;
+	zzapp_rec_t *rec;
+	aar_completion late = { 0 };
+	uint32_t handle, choice = 99U;
+
+	reset_all();
+	rec = claim(&c, &handle);
+	cl.ignore = 1;
+	zzapp_services_test_set_yield(requester_stop_yield);
+	CHECK(zzapp_svc_requester(NULL, "Message", "OK", &choice) == AAR_E_IO);
+	CHECK(choice == 99U && cl.yields == 1U && zzapp_services_stop_requested());
+	CHECK(!zzapp_services_wait_registered(rec->hdr.pid));
+	CHECK(zzapp_xport_buffer_held(rec, ZZAPP_XPORT_NAMES_AREA(ZZAPP_XPORT_AREA_SCRATCH)));
+	CHECK(zzapp_svc_requester(NULL, "Message", "OK", &choice) == AAR_E_IO);
+	CHECK(cl.nreq[AAR_OP_REQUESTER] == 1U);
+
+	late.id = cl.last[AAR_OP_REQUESTER].id;
+	late.op = AAR_OP_REQUESTER;
+	late.out[AAR_R_REQUESTER_CHOICE] = 1U;
+	client_post(&c, &late);
+	CHECK(zzapp_xport_pump(rec) >= 0);
+	CHECK(!zzapp_xport_buffer_held(rec, ZZAPP_XPORT_NAMES_AREA(ZZAPP_XPORT_AREA_SCRATCH)));
+	CHECK(choice == 99U);
 	CHECK(mbox(ZZAPP_OP_RELEASE, handle, 0U, 0U, NULL, NULL) == SDK_STATUS_OK);
 }
 
@@ -5100,6 +5219,8 @@ int main(void)
 	test_files();
 	test_file_requester();
 	test_file_requester_stop();
+	test_message_requester();
+	test_message_requester_stop();
 	test_file_timeout();
 	test_async_file_tickets();
 	test_async_file_abandon();

@@ -56,7 +56,9 @@ typedef enum {
     /* The pointer names a structure whose first uint32_t is its size, as
      * aar_info does. The checked and copied extent is that size clamped to
      * element_bytes; the rest of the caller's size is zero-filled. */
-    ZZAPP_SVC_LENGTH_SIZE_FIELD
+    ZZAPP_SVC_LENGTH_SIZE_FIELD,
+    /* An API-specific byte limit; no NUL within it is AAR_E_INVAL. */
+    ZZAPP_SVC_LENGTH_BOUNDED_STRING
 } zzapp_svc_length_t;
 
 typedef struct {
@@ -78,6 +80,8 @@ enum {
     ZZAPP_SVC_COPY_OUT_ON_NOSPC = 2U
 };
 
+#define ZZAPP_SVC_POINTERS 4U
+
 typedef struct {
     /* AAPCS core words, including stack words after r0-r3. */
     uint8_t arguments;
@@ -86,7 +90,7 @@ typedef struct {
     uint8_t result;
     uint8_t copy_out_on_positive;
     uint8_t flags;
-    zzapp_svc_pointer_t pointers[3];
+    zzapp_svc_pointer_t pointers[ZZAPP_SVC_POINTERS];
 } zzapp_svc_descriptor_t;
 
 #define ZZAPP_SVC_GL_FIRST 128U

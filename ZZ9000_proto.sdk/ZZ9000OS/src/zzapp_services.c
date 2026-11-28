@@ -1878,7 +1878,7 @@ static int req_post(zzapp_xport_req_kind_t kind, const aar_request *req,
  * Wait for the completion of request `id` of entry `kind`: pump, test, a
  * bounded poll before parking, then park under `wk` (the system pass wakes
  * the app when the completion is in). `deadline` is absolute microseconds, 0
- * for none (console, display and audio waits end only by completion or stop).
+ * for none (for example a native requester, which waits for a reply or stop).
  * A request that is given up on (timeout, stop) is abandoned: its id is
  * remembered and the late completion is dropped by the pump.
  */
@@ -2277,6 +2277,73 @@ int zzapp_svc_file_request(uint32_t flags, const char *title,
 		return AAR_E_IO;
 	memcpy(path, buf.ptr, len + 1U);
 	return 1;
+}
+
+/* A result greater than max means there was no NUL within the limit. */
+static uint32_t requester_string_len(const char *s, uint32_t max)
+{
+	uint32_t len = 0U;
+
+	while (len <= max && s[len] != '\0')
+		len++;
+	return len;
+}
+
+int zzapp_svc_requester(const char *title, const char *text, const char *buttons,
+			uint32_t *choice)
+{
+	zzapp_rec_t *rec = service_rec();
+	zzapp_xport_buf_t buf;
+	aar_completion c;
+	uint32_t title_len, text_len, buttons_len;
+	uint32_t count = 1U;
+	uint32_t label_start = 0U;
+	char *payload;
+	int rc;
+
+	_Static_assert(AAR_REQUESTER_TITLE_MAX + AAR_REQUESTER_TEXT_MAX +
+		       AAR_REQUESTER_BUTTONS_MAX + 3U <= ZZAPP_XPORT_SCRATCH_BYTES,
+		       "message requester input fits scratch");
+	if (!text || !buttons || !choice)
+		return AAR_E_INVAL;
+	if (!rec || stop_requested_rec(rec))
+		return AAR_E_IO;
+	title = title ? title : "";
+	title_len = requester_string_len(title, AAR_REQUESTER_TITLE_MAX);
+	text_len = requester_string_len(text, AAR_REQUESTER_TEXT_MAX);
+	if (title_len > AAR_REQUESTER_TITLE_MAX ||
+	    text_len == 0U || text_len > AAR_REQUESTER_TEXT_MAX)
+		return AAR_E_INVAL;
+	for (buttons_len = 0U; buttons_len <= AAR_REQUESTER_BUTTONS_MAX; buttons_len++) {
+		char ch = buttons[buttons_len];
+
+		if (ch == '\0')
+			break;
+		if (ch == '|') {
+			if (buttons_len == label_start || ++count > AAR_REQUESTER_MAX_CHOICES)
+				return AAR_E_INVAL;
+			label_start = buttons_len + 1U;
+		}
+	}
+	if (buttons_len > AAR_REQUESTER_BUTTONS_MAX || buttons_len == label_start)
+		return AAR_E_INVAL;
+
+	rc = zzapp_xport_service_area(rec, ZZAPP_XPORT_AREA_SCRATCH, &buf);
+	if (rc != AAR_OK)
+		return rc;
+	payload = buf.ptr;
+	memcpy(payload, title, title_len + 1U);
+	memcpy(payload + title_len + 1U, text, text_len + 1U);
+	memcpy(payload + title_len + text_len + 2U, buttons, buttons_len + 1U);
+	rc = blocking_request(AAR_OP_REQUESTER, ZZAPP_WAIT_FILE, 0U, NULL, 0U,
+			      &buf, title_len + text_len + buttons_len + 3U, &c);
+	if (rc != AAR_OK)
+		return rc;
+	if (c.result != AAR_OK || c.out[AAR_R_REQUESTER_CHOICE] == 0U ||
+	    c.out[AAR_R_REQUESTER_CHOICE] > count)
+		return AAR_E_IO;
+	*choice = c.out[AAR_R_REQUESTER_CHOICE];
+	return AAR_OK;
 }
 
 /* AAR file open flags (spec 7.1). At least one of READ and WRITE; CREATE
