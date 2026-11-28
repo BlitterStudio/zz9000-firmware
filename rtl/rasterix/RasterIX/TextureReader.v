@@ -81,11 +81,16 @@ module TextureReader #(
     input  wire                             m_axi_rvalid,
     output wire                             m_axi_rready
 );
-    wire [ 1 : 0]                   ttcmTexelPos;
-    wire [BYTE_ADDR_WIDTH - 1 : 0]  ttcmAddr;
-    wire                            ttcmCmd;
-    wire                            ttcmValid;
-    wire                            ttcmReady;
+    // Fetch command of the controller: up to two texel loads (slots A and B)
+    // and the lane select of the TextureReaderContext
+    localparam LANE_SEL_WIDTH = 12;
+
+    wire [ 1 : 0]                       ttcmLoad;
+    wire [2 * BYTE_ADDR_WIDTH - 1 : 0]  ttcmAddr;
+    wire [LANE_SEL_WIDTH - 1 : 0]       ttcmLaneSel;
+    wire                                ttcmSample;
+    wire                                ttcmValid;
+    wire                                ttcmReady;
     TextureReaderController #(
         .TEX_ADDR_WIDTH(TEX_ADDR_WIDTH),
         .TEXEL_WIDTH(TEXEL_WIDTH),
@@ -104,39 +109,42 @@ module TextureReader #(
         .s_tr_valid(s_tr_valid),
         .s_tr_ready(s_tr_ready),
 
-        .m_trc_texel_pos(ttcmTexelPos),
-        .m_trc_cmd(ttcmCmd),
         .m_trc_valid(ttcmValid),
         .m_trc_ready(ttcmReady),
-        .m_trc_addr(ttcmAddr)
+        .m_trc_load(ttcmLoad),
+        .m_trc_addr(ttcmAddr),
+        .m_trc_lane_sel(ttcmLaneSel),
+        .m_trc_sample(ttcmSample)
     );
 
-    wire [ 1 : 0]                   bcTexelPos0;
-    wire [BYTE_ADDR_WIDTH - 1 : 0]  bcAddr0;
-    wire                            bcCmd0;
-    wire                            bcValid0;
-    wire                            bcReady0;
-    wire [ 1 : 0]                   bcTexelPos1;
-    wire [BYTE_ADDR_WIDTH - 1 : 0]  bcAddr1;
-    wire                            bcCmd1;
-    wire                            bcValid1;
-    wire                            bcReady1;
-    wire [ID_WIDTH - 1 : 0]         cacheAxiId;
-    wire [BYTE_ADDR_WIDTH - 1 : 0]  cacheAxiAddr;
-    wire [ 7 : 0]                   cacheAxiLen;
-    wire [ 2 : 0]                   cacheAxiSize;
-    wire [ 1 : 0]                   cacheAxiBurst;
-    wire                            cacheAxiLock;
-    wire [ 3 : 0]                   cacheAxiCache;
-    wire [ 2 : 0]                   cacheAxiProt;
-    wire                            cacheAxiValid;
-    wire                            cacheAxiReady;
-    wire [TEXEL_WIDTH - 1 : 0]      cacheTexel;
-    wire                            cacheValid;
-    wire                            cacheReady;
+    wire [ 1 : 0]                       bcLoad0;
+    wire [2 * BYTE_ADDR_WIDTH - 1 : 0]  bcAddr0;
+    wire [LANE_SEL_WIDTH - 1 : 0]       bcLaneSel0;
+    wire                                bcSample0;
+    wire                                bcValid0;
+    wire                                bcReady0;
+    wire [ 1 : 0]                       bcLoad1;
+    wire [2 * BYTE_ADDR_WIDTH - 1 : 0]  bcAddr1;
+    wire [LANE_SEL_WIDTH - 1 : 0]       bcLaneSel1;
+    wire                                bcSample1;
+    wire                                bcValid1;
+    wire                                bcReady1;
+    wire [ID_WIDTH - 1 : 0]             cacheAxiId;
+    wire [BYTE_ADDR_WIDTH - 1 : 0]      cacheAxiAddr;
+    wire [ 7 : 0]                       cacheAxiLen;
+    wire [ 2 : 0]                       cacheAxiSize;
+    wire [ 1 : 0]                       cacheAxiBurst;
+    wire                                cacheAxiLock;
+    wire [ 3 : 0]                       cacheAxiCache;
+    wire [ 2 : 0]                       cacheAxiProt;
+    wire                                cacheAxiValid;
+    wire                                cacheAxiReady;
+    wire [2 * TEXEL_WIDTH - 1 : 0]      cacheTexel;
+    wire                                cacheValid;
+    wire                                cacheReady;
     axis_broadcast #(
         .M_COUNT(2),
-        .DATA_WIDTH(2 + BYTE_ADDR_WIDTH + 1),
+        .DATA_WIDTH(2 + (2 * BYTE_ADDR_WIDTH) + LANE_SEL_WIDTH + 1),
         .KEEP_ENABLE(0),
         .LAST_ENABLE(1),
         .ID_ENABLE(0),
@@ -147,9 +155,10 @@ module TextureReader #(
         .rst(!resetn),
 
         .s_axis_tdata({
-            ttcmTexelPos,
+            ttcmLoad,
             ttcmAddr,
-            ttcmCmd
+            ttcmLaneSel,
+            ttcmSample
         }),
         .s_axis_tkeep(~0),
         .s_axis_tvalid(ttcmValid),
@@ -160,12 +169,14 @@ module TextureReader #(
         .s_axis_tuser(0),
 
         .m_axis_tdata({
-            bcTexelPos1,
+            bcLoad1,
             bcAddr1,
-            bcCmd1,
-            bcTexelPos0,
+            bcLaneSel1,
+            bcSample1,
+            bcLoad0,
             bcAddr0,
-            bcCmd0
+            bcLaneSel0,
+            bcSample0
         }),
         .m_axis_tkeep(),
         .m_axis_tvalid({ bcValid1, bcValid0 }),
@@ -191,6 +202,7 @@ module TextureReader #(
         .invalidate(s_axis_tvalid),
         .enable(enable),
 
+        .s_tc_slot_valid(bcLoad0),
         .s_tc_addr(bcAddr0),
         .s_tc_valid(bcValid0),
         .s_tc_ready(bcReady0),
@@ -255,14 +267,18 @@ module TextureReader #(
         .m_axi_arready(m_axi_arready)
     );
 
-    wire [TEXEL_WIDTH - 1 : 0]   fifoTexel;
-    wire [ 1 : 0]                fifoTexelPos;
-    wire                         fifoCmd;
-    wire                         fifoValid;
-    wire                         fifoReady;
+    // Joins the texels of a command with the lane select of the command
+    wire [LANE_SEL_WIDTH - 1 : 0]   fifoLaneSel;
+    wire                            fifoSample;
+    wire [2 * TEXEL_WIDTH - 1 : 0]  fifoTexel;
+    wire                            fifoValid;
+    wire                            fifoReady;
+    // Stream 0: texels, stream 1: lane select and sample flag, streams 2 and 3 are unused
+    wire [(2 * TEXEL_WIDTH) + LANE_SEL_WIDTH + 2 : 0] fifoData;
+    assign { fifoLaneSel, fifoSample, fifoTexel } = fifoData[0 +: (2 * TEXEL_WIDTH) + LANE_SEL_WIDTH + 1];
     StreamConcatFifo #(
-        .STREAM0_WIDTH(TEXEL_WIDTH),
-        .STREAM1_WIDTH(2 + 1),
+        .STREAM0_WIDTH(2 * TEXEL_WIDTH),
+        .STREAM1_WIDTH(LANE_SEL_WIDTH + 1),
         .STREAM2_WIDTH(1),
         .STREAM3_WIDTH(1),
 
@@ -282,8 +298,8 @@ module TextureReader #(
         .s_stream1_tenable(1'b1),
         .s_stream1_tvalid(bcValid1),
         .s_stream1_tdata({ 
-            bcTexelPos1,
-            bcCmd1
+            bcLaneSel1,
+            bcSample1
         }),
         .s_stream1_tready(bcReady1),
 
@@ -298,13 +314,7 @@ module TextureReader #(
         .s_stream3_tready(),
 
         .m_stream_tvalid(fifoValid),
-        .m_stream_tdata({
-            1'b0,
-            1'b0,
-            fifoTexelPos,
-            fifoCmd,
-            fifoTexel
-        }),
+        .m_stream_tdata(fifoData),
         .m_stream_tready(fifoReady)
     );
 
@@ -314,9 +324,9 @@ module TextureReader #(
         .aclk(aclk),
         .resetn(resetn),
         
-        .s_trc_texel_pos(fifoTexelPos),
+        .s_trc_lane_sel(fifoLaneSel),
         .s_trc_texel(fifoTexel),
-        .s_trc_cmd(fifoCmd),
+        .s_trc_sample(fifoSample),
         .s_trc_valid(fifoValid),
         .s_trc_ready(fifoReady),
 

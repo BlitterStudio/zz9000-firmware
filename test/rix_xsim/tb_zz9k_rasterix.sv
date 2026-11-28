@@ -21,9 +21,10 @@ module tb_zz9k_rasterix;
     localparam integer MINIGL_DEPTH_MEMORY_BYTES = 3 * 1024 * 1024;
     localparam integer TEXTURE_POOL_BYTES = 24 * 1024 * 1024;
     // textures.hex: white and lightmap 8x8 pages, the 256x256 ef-stress
-    // block texture and the 64x64 ef-texenv gradient (70 pages of 2 KiB at
-    // 0x00340000), one little-endian byte per line.
-    localparam integer TEXTURE_BYTES = 70 * 2048;
+    // block texture, the 64x64 ef-texenv gradient (70 pages of 2 KiB at
+    // 0x00340000) and the texture-throughput textures (pages 70..341),
+    // one little-endian byte per line.
+    localparam integer TEXTURE_BYTES = 342 * 2048;
 
     reg clk;
     reg resetn;
@@ -1743,6 +1744,10 @@ module tb_zz9k_rasterix;
                         if (shared_channel)
                             $display("SHARED_READS served=%0d reordered=%0d rand_seed=%0d",
                                      shared_served, shared_reordered, rand_seed);
+                        $display("TEXPERF scene=%0s frags=%0d first=%0d last=%0d span=%0d stall=%0d fills=%0d texels=%0d",
+                                 scene, tex_frag_count, tex_first_cycle, tex_last_cycle,
+                                 tex_last_cycle - tex_first_cycle, tex_stall_cycles,
+                                 tex_fill_count, tex_texel_count);
                         command_complete = 1;
                     end
                 end
@@ -1772,6 +1777,29 @@ module tb_zz9k_rasterix;
         axi_read(16'h0018, status);
         if (status != 0) $fatal(1, "busy-cycle CSR did not reset on soft reset: %08x", status);
         dump_ppm(ppm_file);
+        begin : fb_digest
+            // FNV-1a over the stored bytes: the colour buffer as stored, as 16-bit pairs
+            // with the two bytes exchanged, and the depth buffer.  With the colour byte
+            // swap on, `raw` of a scene must equal `pairswapped` with the swap off (and
+            // vice versa), and `depth` must not change.
+            reg [31:0] raw_hash, swapped_hash, depth_hash;
+            reg [31:0] depth_base;
+            integer k;
+            raw_hash = 32'h811c9dc5;
+            swapped_hash = 32'h811c9dc5;
+            depth_hash = 32'h811c9dc5;
+            depth_base = capture_mode ? MINIGL_DEPTH_ADDR : 32'h002A_0000;
+            for (k = 0; k < COLOR_BYTES; k = k + 2) begin
+                raw_hash = (raw_hash ^ byte_at(framebuffer_addr + k)) * 32'h01000193;
+                raw_hash = (raw_hash ^ byte_at(framebuffer_addr + k + 1)) * 32'h01000193;
+                swapped_hash = (swapped_hash ^ byte_at(framebuffer_addr + k + 1)) * 32'h01000193;
+                swapped_hash = (swapped_hash ^ byte_at(framebuffer_addr + k)) * 32'h01000193;
+            end
+            for (k = 0; k < DEPTH_BYTES; k = k + 1)
+                depth_hash = (depth_hash ^ byte_at(depth_base + k)) * 32'h01000193;
+            $display("FB_DIGEST scene=%0s swap=%0d raw=%08x pairswapped=%08x depth=%08x",
+                     scene, color_byte_swap, raw_hash, swapped_hash, depth_hash);
+        end
         for (i = 0; i < COLOR_BYTES; i = i + 1)
             if (^byte_at(framebuffer_addr + i) === 1'bx)
                 $fatal(1, "framebuffer contains unknown byte at %0d", i);
@@ -1829,4 +1857,31 @@ module tb_zz9k_rasterix;
         end
         $finish;
     end
+`ifdef RASTERIX_VARIANT_EF
+    // Texture reader (TMU0) throughput counters: fragments accepted by the
+    // reader, cycles the TMU waits for it, texel quads returned, and line
+    // fills requested on the TMU0 AXI port.
+    integer tex_frag_count = 0;
+    integer tex_first_cycle = 0;
+    integer tex_last_cycle = 0;
+    integer tex_stall_cycles = 0;
+    integer tex_fill_count = 0;
+    integer tex_texel_count = 0;
+    always @(posedge clk) begin
+        if (resetn) begin
+            if (dut.renderer.rixef.graphicCore.tr0_valid && dut.renderer.rixef.graphicCore.tr0_ready) begin
+                if (tex_frag_count == 0) tex_first_cycle <= cycle_count;
+                tex_frag_count <= tex_frag_count + 1;
+            end
+            if (dut.renderer.rixef.graphicCore.tr0_valid && !dut.renderer.rixef.graphicCore.tr0_ready)
+                tex_stall_cycles <= tex_stall_cycles + 1;
+            if (dut.renderer.rixef.graphicCore.tr0_texel_valid && dut.renderer.rixef.graphicCore.tr0_texel_ready) begin
+                tex_last_cycle <= cycle_count;
+                tex_texel_count <= tex_texel_count + 1;
+            end
+            if (dut.renderer.rixef.graphicCore.m_tmu0_axi_arvalid && dut.renderer.rixef.graphicCore.m_tmu0_axi_arready)
+                tex_fill_count <= tex_fill_count + 1;
+        end
+    end
+`endif
 endmodule

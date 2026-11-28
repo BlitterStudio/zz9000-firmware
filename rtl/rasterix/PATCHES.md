@@ -299,3 +299,55 @@ reordering, seeds 1-4).
   excluding only the unsupported-request checks from synthesized hardware.
   The accepted single-beat INCR transaction datapath and all valid-cycle
   assignments are unchanged.
+
+## Texture reader: lane forwarding and two texel loads per cycle
+
+- Files: `RasterIX/TextureReaderController.v`, `TextureReaderContext.v`,
+  `TextureReader.v`, `TextureCacheDirectMapped.v`,
+  `TextureCacheDirectMappedController.v`, `TextureCacheDirectMappedContext.v`
+- Upstream blobs: `fdc43678` (Controller), `3b40bd0e` (Context, before patch
+  0003), `442d1348`, `23d476e9`, `084acf24`, `5c0fa312`; local blobs are those
+  of the files in this tree.
+- Patch: `patches/0011-texture-reader-lane-forwarding.patch` (diff against the
+  tree with patches 0001-0010; supersedes the lane reset of patch 0003, which the
+  new `TextureReaderContext.v` keeps).
+- Evidence: measured on the card (640x480), bilinear sampling at about one
+  texel step per pixel cost 40-43 ns per pixel against 10.3 ns for a flat
+  fill. The controller compared each requested address only with the address
+  of the same lane, so a unit step in s (new 00 = old 01, new 10 = old 11) made
+  all four lanes miss and cost four cycles. In xsim (`tp-*` scenes, LATENCY=2)
+  the reader cost per fragment drops from 4.22 to 1.29 cycles (256x256
+  GL_LINEAR, 1 texel per pixel), 2.60 to 1.11 (0.5 texel per pixel), 4.10 to
+  1.11 (mipmap minified) and 1.22 to 1.03 (16x magnified); the remainder is
+  cache line fills. `tb_texture_reader.sv` (ideal memory) measures 4.0 to 1.0
+  cycles per fragment for unit steps in s, half steps and back steps, 4.05 to
+  2.06 for four arbitrary cache-resident addresses.
+  Every frame of the pre-existing and new scenes is byte identical to the frame
+  of the previous RTL (`test/rix_xsim/refs/frames.sha256`).
+- Change: (1) the controller keeps the address held in each lane and forwards
+  the lane contents between lanes when a requested address is held in any
+  lane; (2) a fragment needs at most two loaded texels per command, so the
+  controller issues one command when at most two texels are missing and two
+  otherwise; every command carries per-lane selects (hold, copy lane j, load
+  slot A, load slot B) that the context applies to all lanes at once; (3) the
+  cache serves two slots per request: the tag memory and the data memory exist
+  twice, so two texels are read in one cycle. If either slot misses, the cache
+  controller serves the slots one after the other (load, read, load, read), so
+  two slots with the same index cannot evict each other; (4) the data memory is
+  read with a registered output (block RAM, was distributed RAM) and the texel
+  is selected in a second stage; (5) tag updates of a miss are written one
+  cycle later; (6) the controller skid copy and the fill-wait compare are
+  narrowed for timing; (7) the XSim-only edits of `TextureReader.v` and
+  `TextureCacheDirectMappedContext.v` are no longer needed (declaration order and
+  output-port connection are written legally in the source).
+  Module ports: the reader's own ports are unchanged; the internal controller,
+  cache and context interfaces carry two slots (`m_trc_*`, `s_tc_*`, `m_tc_texel`).
+- Synthesis safety: Vivado 2018.3 maps `rCacheMemoryA/B` to four RAMB36 (READ_FIRST
+  write port, registered read port, no async set/reset on the enables) and the
+  tag memories to RAM64M; the cache data memory leaves distributed RAM, so the
+  reader shrinks from 2503 to 1273 LUTs in out-of-context synthesis. A word is
+  never read in the cycle it is written: a read only passes while the fill
+  pointer is above its word. `ENABLE_EARLY_FETCH` keeps its meaning.
+- Not changed: the 256-cycle cache invalidation sweep. In `tp-alt` (eight page
+  table writes) the sweep is about 2k of the 29k extra cycles; the rest is the
+  refill of the invalidated cache, which an epoch scheme would not avoid.

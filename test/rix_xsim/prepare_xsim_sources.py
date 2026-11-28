@@ -57,18 +57,6 @@ def main() -> int:
         "    always @(posedge clk)\n"
         "    if (ce) begin : Prepare\n",
     )
-    replace_once(
-        output / "RasterIX/TextureCacheDirectMappedContext.v",
-        "    function [ADDR_WIDTH - 1 : 0] GetCacheGroupAddress;\n",
-        "    reg  [DATA_WIDTH - 1 : 0]       rCacheMemory [0 : (CACHE_SIZE / (DATA_WIDTH / 8)) - 1];\n\n"
-        "    function [ADDR_WIDTH - 1 : 0] GetCacheGroupAddress;\n",
-    )
-    replace_once(
-        output / "RasterIX/TextureCacheDirectMappedContext.v",
-        "    reg  [DATA_WIDTH - 1 : 0]       rCacheMemory [0 : (CACHE_SIZE / (DATA_WIDTH / 8)) - 1];\n\n"
-        "    reg                             rSkidValid;\n",
-        "    reg                             rSkidValid;\n",
-    )
     render = output / "RasterIX/RasterIXRenderCore.v"
     replace_once(
         render,
@@ -103,27 +91,6 @@ def main() -> int:
         "    wire                            framebuffer_pfp_wlast;\n"
         "    wire                            framebuffer_pfp_wready;\n",
         "    wire                            framebuffer_pfp_wlast;\n",
-    )
-    reader = output / "RasterIX/TextureReader.v"
-    replace_once(
-        reader,
-        "    wire                         fifoReady;\n"
-        "    StreamConcatFifo #(\n",
-        "    wire                         fifoReady;\n"
-        "    wire [TEXEL_WIDTH + 2 : 0]   fifoData;\n"
-        "    assign { fifoTexelPos, fifoCmd, fifoTexel } = fifoData;\n"
-        "    StreamConcatFifo #(\n",
-    )
-    replace_once(
-        reader,
-        "        .m_stream_tdata({\n"
-        "            1'b0,\n"
-        "            1'b0,\n"
-        "            fifoTexelPos,\n"
-        "            fifoCmd,\n"
-        "            fifoTexel\n"
-        "        }),\n",
-        "        .m_stream_tdata(fifoData),\n",
     )
     core_if = output / "RasterIX/RasterIXCoreIF.v"
     replace_once(

@@ -18,6 +18,13 @@
 // Direct-mapped texture cache controller which manages the cache.
 // It checks for cache hits and misses and loads new data into the 
 // context or overwrites data from the context (TextureCacheDirectMappedContext).
+//
+// A request has two slots (A and B), each of them reads one texel or is
+// unused. When all used slots hit, the controller issues one read of both
+// slots. Otherwise it serves the request slot by slot, in order: it loads the
+// cache line of a missing slot, reads a slot which hits on its own (without
+// `emit`), and issues the last read with `emit`. This keeps two slots, which
+// map to the same cache line index, from evicting each other.
 // Pipelined: yes
 // Depth: 1
 module TextureCacheDirectMappedController #(
@@ -42,14 +49,17 @@ module TextureCacheDirectMappedController #(
     input  wire                             enable,
 
     // Input interface
-    input  wire [ADDR_WIDTH - 1 : 0]        s_tc_addr,
+    input  wire [ 1 : 0]                    s_tc_slot_valid, // Slots which read a texel { B, A }
+    input  wire [2 * ADDR_WIDTH - 1 : 0]    s_tc_addr,       // Byte address of slot { B, A }
     input  wire                             s_tc_valid,
     output reg                              s_tc_ready,
 
     output reg                              m_tc_valid,
     input  wire                             m_tc_ready,
     output reg                              m_tc_cmd,
-    output reg  [ADDR_WIDTH - 1 : 0]        m_tc_addr,
+    output reg  [ 1 : 0]                    m_tc_read,       // Slots which are read { B, A }
+    output reg                              m_tc_emit,       // Last operation of the request
+    output reg  [2 * ADDR_WIDTH - 1 : 0]    m_tc_addr,       // Byte address of slot { B, A }, a load uses slot A
 
     // Output interface
     output wire [ID_WIDTH - 1 : 0]          m_axi_arid,
@@ -104,21 +114,49 @@ module TextureCacheDirectMappedController #(
     assign m_axi_arcache = 0;
     assign m_axi_arprot = 0;
 
-    reg [TAG_ENTRY_WIDTH - 1 : 0]   rTagEntries [0 : CACHE_LINES - 1];
+    // The tag memory exists twice, one copy for each slot. Both are written alike.
+    reg [TAG_ENTRY_WIDTH - 1 : 0]   rTagEntriesA [0 : CACHE_LINES - 1];
+    reg [TAG_ENTRY_WIDTH - 1 : 0]   rTagEntriesB [0 : CACHE_LINES - 1];
 
     reg                             rInvalidate;
     reg [INDEX_WIDTH - 1 : 0]       rI;
 
     reg                             rSkidValid;
-    reg  [ADDR_WIDTH - 1 : 0]       rSkidAddr;
+    reg  [ 1 : 0]                   rSkidSlots;
+    reg  [2 * ADDR_WIDTH - 1 : 0]   rSkidAddr;
     reg                             rLoadLinePending;
 
-    wire [ADDR_WIDTH - 1 : 0]       wAddr;
+    wire [ 1 : 0]                   wSlots = (rSkidValid) ? rSkidSlots : s_tc_slot_valid;
+    wire [2 * ADDR_WIDTH - 1 : 0]   wAddr = (rSkidValid) ? rSkidAddr : s_tc_addr;
+    wire [ADDR_WIDTH - 1 : 0]       wAddrA = wAddr[0 +: ADDR_WIDTH];
+    wire [ADDR_WIDTH - 1 : 0]       wAddrB = wAddr[ADDR_WIDTH +: ADDR_WIDTH];
 
-    assign wAddr = (rSkidValid) ? rSkidAddr
-                                : s_tc_addr;
+    wire                            wHitA = !wSlots[0] || TagMatch(rTagEntriesA[GetIndexFromAddress(wAddrA)], wAddrA);
+    wire                            wHitB = !wSlots[1] || TagMatch(rTagEntriesB[GetIndexFromAddress(wAddrB)], wAddrB);
+    // Write port of the tag memory. The invalidation sweep writes the entry
+    // rI directly. A miss registers its update (rTagUpdate...) and the entry
+    // is written in the following cycle, which is before the request is
+    // looked up again: the load command of the miss stays in the output
+    // register for at least one cycle, and the request is only looked up
+    // after that command has been taken.
+    reg                             rTagUpdate;
+    reg [INDEX_WIDTH - 1 : 0]       rTagUpdateIndex;
+    reg [TAG_ENTRY_WIDTH - 1 : 0]   rTagUpdateEntry;
+    always @(posedge aclk)
+    begin
+        if (resetn && (invalidate || rInvalidate))
+        begin
+            rTagEntriesA[rI] <= { TAG_ENTRY_WIDTH { 1'b0 } };
+            rTagEntriesB[rI] <= { TAG_ENTRY_WIDTH { 1'b0 } };
+        end
+        else if (rTagUpdate)
+        begin
+            rTagEntriesA[rTagUpdateIndex] <= rTagUpdateEntry;
+            rTagEntriesB[rTagUpdateIndex] <= rTagUpdateEntry;
+        end
+    end
 
-    always @(posedge aclk) 
+    always @(posedge aclk)
     begin
         if (!resetn) 
         begin
@@ -129,20 +167,22 @@ module TextureCacheDirectMappedController #(
             s_tc_ready <= 1'b0;
             m_tc_valid <= 1'b0;
             m_axi_arvalid <= 1'b0;
+            rTagUpdate <= 1'b0;
         end 
         else 
         begin
+            rTagUpdate <= 1'b0;
             if (invalidate || rInvalidate)
             begin
                 rInvalidate <= 1'b1;
                 if (rI != { INDEX_WIDTH { 1'b1 } })
                 begin
                     rI <= rI + 1'b1;
-                    rTagEntries[rI] <= { TAG_ENTRY_WIDTH { 1'b0 } };
+                    // The tag memory is cleared by the write port below
                 end
                 else
                 begin
-                    rTagEntries[rI] <= { TAG_ENTRY_WIDTH { 1'b0 } };
+                    // The tag memory is cleared by the write port below
                     rInvalidate <= 1'b0;
                     rI <= { INDEX_WIDTH { 1'b0 } };
                     s_tc_ready <= !rSkidValid;
@@ -151,6 +191,7 @@ module TextureCacheDirectMappedController #(
                 if (s_tc_valid && s_tc_ready)
                 begin
                     rSkidValid <= 1'b1;
+                    rSkidSlots <= s_tc_slot_valid;
                     rSkidAddr <= s_tc_addr;
                     s_tc_ready <= 1'b0;
                 end
@@ -169,28 +210,69 @@ module TextureCacheDirectMappedController #(
                 m_tc_valid <= 1'b1;
                 m_tc_addr <= wAddr;
                 m_tc_cmd <= READ_CACHE_ENTRY;
+                m_tc_read <= wSlots;
+                m_tc_emit <= 1'b1;
                 rSkidValid <= 1'b0;
 
                 s_tc_ready <= 1'b1;
 
-                if (!TagMatch(rTagEntries[GetIndexFromAddress(wAddr)], wAddr))
+                if (!wHitA)
                 begin
+                    // Load the line of slot A. The request is served again afterwards.
                     m_tc_cmd <= LOAD_CACHE_LINE;
                     
                     rSkidValid <= 1'b1;
+                    rSkidSlots <= wSlots;
                     rSkidAddr <= wAddr;
                     rLoadLinePending <= 1'b1;
                     s_tc_ready <= 1'b0;
                     
                     m_axi_arvalid <= 1'b1;
-                    m_axi_araddr <= GetBaseAddress(wAddr);
+                    m_axi_araddr <= GetBaseAddress(wAddrA);
                     
-                    rTagEntries[GetIndexFromAddress(wAddr)] <= { 1'b1, GetTagFromAddress(wAddr) };
+                    rTagUpdate <= 1'b1;
+                    rTagUpdateIndex <= GetIndexFromAddress(wAddrA);
+                    rTagUpdateEntry <= { 1'b1, GetTagFromAddress(wAddrA) };
+                end
+                else if (!wHitB)
+                begin
+                    if (wSlots[0])
+                    begin
+                        // Slot A hits. Read it before the line of slot B is loaded, because
+                        // this load might replace the line of slot A.
+                        m_tc_read <= 2'b01;
+                        m_tc_emit <= 1'b0;
+
+                        rSkidValid <= 1'b1;
+                        rSkidSlots <= { wSlots[1], 1'b0 };
+                        rSkidAddr <= wAddr;
+                        s_tc_ready <= 1'b0;
+                    end
+                    else
+                    begin
+                        // Load the line of slot B. The request is served again afterwards.
+                        m_tc_cmd <= LOAD_CACHE_LINE;
+                        m_tc_addr <= { wAddrB, wAddrB };
+
+                        rSkidValid <= 1'b1;
+                        rSkidSlots <= wSlots;
+                        rSkidAddr <= wAddr;
+                        rLoadLinePending <= 1'b1;
+                        s_tc_ready <= 1'b0;
+
+                        m_axi_arvalid <= 1'b1;
+                        m_axi_araddr <= GetBaseAddress(wAddrB);
+
+                        rTagUpdate <= 1'b1;
+                        rTagUpdateIndex <= GetIndexFromAddress(wAddrB);
+                        rTagUpdateEntry <= { 1'b1, GetTagFromAddress(wAddrB) };
+                    end
                 end
             end
             else if (m_tc_valid && !m_tc_ready && s_tc_valid && s_tc_ready)
             begin
                 rSkidAddr <= wAddr;
+                rSkidSlots <= wSlots;
                 rSkidValid <= 1'b1;
                 s_tc_ready <= 1'b0;
             end
@@ -208,4 +290,4 @@ module TextureCacheDirectMappedController #(
         end
     end
 
-endmodule 
+endmodule
