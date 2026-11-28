@@ -1796,6 +1796,7 @@ static uint16_t zz_to_sdk(int zz)
 	case AAR_E_ACCES:
 	case AAR_E_BADF:
 	case AAR_E_PROFILE:
+	case AAR_E_VERSION:
 		return SDK_STATUS_BAD_REQUEST;
 	case AAR_E_NOGROUP:
 		return SDK_STATUS_UNSUPPORTED;
@@ -6465,7 +6466,8 @@ static int finish_deferred(zzapp_rec_t *rec, int rc, uint32_t publish_state)
 		if (defer->opcode == ZZAPP_OP_LOAD_BEGIN ||
 		    defer->opcode == ZZAPP_OP_LOAD_END) {
 			uint32_t code = (rc == AAR_E_INVAL || rc == AAR_E_NOMEM ||
-					 rc == AAR_E_PROFILE || rc == AAR_E_NOGROUP)
+					 rc == AAR_E_PROFILE || rc == AAR_E_NOGROUP ||
+					 rc == AAR_E_VERSION)
 				? (uint32_t)-rc : 0U;
 
 			if (rec->claim.refusal_reason != AAR_REASON_NONE || code) {
@@ -6625,6 +6627,8 @@ static void run_deferred(zzapp_rec_t *rec)
 		}
 		if (rc == AAR_E_PROFILE)
 			reject_reason = "note profile is not A32";
+		else if (rc == AAR_E_VERSION)
+			reject_reason = "note requires an unsupported AAR API version";
 		else if (rc == AAR_E_NOGROUP)
 			reject_reason = "note requires a group this runtime lacks";
 		if (rc == AAR_OK)

@@ -71,10 +71,9 @@ AAR_DIR=$HOME/src/aar make -C test/zzapp test
 Without a checkout, the makefiles stop with an error that names the missing
 `include/aar/app.h`.
 
-The firmware implements AAR API 0.5 (`AAR_API_MAJOR` and `AAR_API_MINOR` in
-that header, reported by the mailbox `QUERY`). `sdk/AAR_REF` must therefore
-name a commit whose header is API 0.5; the hardware-facing `ZZ_*` names in the
-firmware are separate and do not follow it. See
+The firmware reports its AAR API version in the mailbox `QUERY`. The pinned
+AAR headers supply the application interfaces and error codes. The
+hardware-facing `ZZ_*` names in the firmware are separate. See
 [docs/app-runtime.md](docs/app-runtime.md#app-interface) for the choices the
 firmware makes where the standard leaves room.
 

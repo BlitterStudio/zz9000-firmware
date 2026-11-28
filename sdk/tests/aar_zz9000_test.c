@@ -2422,6 +2422,7 @@ static void test_load_refusal_codes(void)
         int expected;
     } cases[] = {
         { ZZ9K_STATUS_BAD_REQUEST, 8U, 0U, 13U, AAR_E_PROFILE },
+        { ZZ9K_STATUS_BAD_REQUEST, 8U, 0U, 18U, AAR_E_VERSION },
         { ZZ9K_STATUS_UNSUPPORTED, 8U, 0U, 14U, AAR_E_NOGROUP },
         { ZZ9K_STATUS_BAD_REQUEST, 8U, 0U, 2U, AAR_E_INVAL },
         { ZZ9K_STATUS_NO_MEMORY, 8U, 0U, 3U, AAR_E_NOMEM },

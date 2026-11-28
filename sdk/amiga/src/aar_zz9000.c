@@ -151,9 +151,8 @@ static int board_call(const struct zz_state *s, uint16_t op,
 
 /* A refusal reply carries the AAR_REASON_* word and, from a card that sends
  * it, the AAR_E_* code of the refusal (ZZAPP_REFUSAL_CODE). The mailbox status
- * maps PROFILE and INVAL to one value and NOGROUP to NOSYS, so the code wins
- * when the reply has one the library knows; otherwise the status mapping
- * stands, as for a card that sends no code. */
+ * maps PROFILE, VERSION and INVAL to one value and NOGROUP to NOSYS. The
+ * library returns a code it knows and uses the status mapping otherwise. */
 static int refusal(int rc, const aar_zz_reply *reply, uint32_t *reason)
 {
 	uint32_t why, code;
@@ -170,7 +169,8 @@ static int refusal(int rc, const aar_zz_reply *reply, uint32_t *reason)
 		return rc;
 	code = be32(reply->payload + ZZAPP_REFUSAL_CODE);
 	if (code == (uint32_t)-AAR_E_INVAL || code == (uint32_t)-AAR_E_NOMEM ||
-	    code == (uint32_t)-AAR_E_PROFILE || code == (uint32_t)-AAR_E_NOGROUP)
+	    code == (uint32_t)-AAR_E_PROFILE || code == (uint32_t)-AAR_E_NOGROUP ||
+	    code == (uint32_t)-AAR_E_VERSION)
 		return -(int)code;
 	return rc;
 }
