@@ -185,6 +185,8 @@ static void mw_service_cache_maintain_span(uint32_t arm_base, const uint8_t *req
 #endif
 
 #define MW_MAX_CONTEXTS 8U
+#define MW_CONTEXT_SLOT_BITS 4U
+#define MW_CONTEXT_SLOT_MASK ((1U << MW_CONTEXT_SLOT_BITS) - 1U)
 
 static volatile ZZ9KMiniGLControlBlockV9 *g_ctrl = NULL;
 static volatile ZZ9KMiniGLStatusV9       *g_status = NULL;
@@ -195,6 +197,7 @@ static uint32_t g_reply_capacity = 0U;
 static mw_ctx *g_contexts[MW_MAX_CONTEXTS];
 static uint32_t g_active_handle = 0;
 static uint32_t g_generation = 1U;
+static uint32_t g_next_context_id = 1U;
 static int      g_doorbell_pending = 0;
 static int      g_is_bound = 0;
 
@@ -203,7 +206,7 @@ static mw_ctx *mw_service_find_context(uint32_t handle)
     uint32_t slot;
     if (!handle)
         return NULL;
-    slot = (handle & 0xffffU);
+    slot = handle & MW_CONTEXT_SLOT_MASK;
     if (slot >= 1U && slot <= MW_MAX_CONTEXTS) {
         mw_ctx *c = g_contexts[slot - 1U];
         if (c && c->handle == handle)
@@ -357,7 +360,9 @@ void mw_service_init(void)
         mw_wire_st32(&g_status->heartbeat, 0);
         mw_wire_st32(&g_status->capabilities,
                      MW_CAP_WIRE_V9 | MW_CAP_LATEST_READBACK_ROWS |
-                     MW_CAP_ASYNC_PRESENT | MW_CAP_DRAW_PACKED_INDEXED);
+                     MW_CAP_ASYNC_PRESENT | MW_CAP_DRAW_PACKED_INDEXED |
+                     MW_CAP_DRAW_CACHE_INDEXED | MW_CAP_DRAW_RESIDENT_INDEXED |
+                     MW_CAP_DRAW_RESIDENT_BOTH);
     }
     g_doorbell_pending = 0;
     MW_DIAG("[MGL9] publish magic=%08lx wire=%u transport=%u slot_bytes=%lu slots=%lu caps=%08lx\n",
@@ -518,13 +523,19 @@ int mw_service_open(uint32_t width, uint32_t height, uint32_t flags,
     if (slot == MW_MAX_CONTEXTS)
         return MW_STATUS_CAPACITY;
 
-    new_handle = (g_generation << 16) | (slot + 1U);
+    /* A new occupant of a service slot must not inherit the old handle.
+     * Keep ids below bridge error values and don't recycle within a worker. */
+    if (g_next_context_id > INT32_MAX >> MW_CONTEXT_SLOT_BITS)
+        return MW_STATUS_CAPACITY;
+    new_handle = (g_next_context_id++ << MW_CONTEXT_SLOT_BITS) | (slot + 1U);
     owner = CARD_POOL_OWNER(CARD_POOL_CLASS_MINIGL, new_handle);
 #if defined(MINIGL_MODULE)
     if (!mw_service_create_context_owner(&owner))
         return MW_STATUS_FAILED;
 #endif
-    context = mw_host_create_owned(width, height, owner, 0);
+    /* Wire contexts use the asynchronous ring too: RasterIX renders the
+     * lists of a packet while the service is still decoding the rest. */
+    context = mw_host_create_owned(width, height, owner, 1);
     if (!context) {
 #if defined(MINIGL_MODULE)
         mw_service_close_context_owner(owner);
@@ -543,7 +554,7 @@ int mw_service_open(uint32_t width, uint32_t height, uint32_t flags,
 
 int mw_service_close(uint32_t handle)
 {
-    uint32_t slot = handle & 0xffffU;
+    uint32_t slot = handle & MW_CONTEXT_SLOT_MASK;
     mw_ctx *context;
 #if defined(MINIGL_MODULE)
     uint32_t owner;
@@ -671,6 +682,18 @@ void mw_service_report_amiga_reset(void)
 #endif
 }
 
+static void mw_ring_reject(uint32_t status, uint32_t opcode)
+{
+    /* Publish before the fence. op_status alone can be overwritten by the
+     * next successful packet before the asynchronous producer checks it. */
+    if (g_status) {
+        mw_wire_st32(&g_status->error, status);
+        mw_wire_st32(&g_status->error_sequence_lo,
+                     mw_wire_ld32(&g_status->error_sequence_lo) + 1U);
+    }
+    mw_log_reject(status, opcode);
+}
+
 int mw_service_poll(void)
 {
     int work_done = 0;
@@ -678,20 +701,36 @@ int mw_service_poll(void)
     if (!g_ctrl)
         return 0;
 
-    /* 68k packets wait until the ARM ring has retired: they may switch the
-     * shared backend to another context.  Waiting work is a demand, so this
-     * step polls fences.  A fence that never lands must not defer wire-v9
-     * forever: the wait shares the feed watchdog, and on expiry the backend
-     * is disabled and outstanding owners are quarantined. */
-    if (minigl_raster_work_outstanding())
+    /* Packets wait until the ring of another context (an ARM app's) has
+     * retired: dispatching them switches the shared backend to a wire
+     * context.  Waiting work is a demand, so this step polls fences.  A
+     * fence that never lands must not defer wire-v9 forever: the wait shares
+     * the feed watchdog, and on expiry the backend is disabled and
+     * outstanding owners are quarantined.  Work a wire context queued itself
+     * needs no such wait; its next packet continues behind it in the ring. */
+    if (minigl_raster_work_outstanding()) {
+        const mw_ctx *platform = mw_host_rix_platform_context();
+        uint32_t slot;
+        int own = 0;
+
+        for (slot = 0; platform != NULL && slot < MW_MAX_CONTEXTS; ++slot)
+            if (g_contexts[slot] == platform)
+                own = 1;
         (void)minigl_raster_try_feed(RIX_DRV_FEED_SOURCE_PARKED);
-    if (minigl_raster_service_wait_blocks())
+        if (!own && minigl_raster_service_wait_blocks())
+            return 1;
+    } else if (minigl_raster_service_wait_blocks()) {
         return 1;
+    }
 
     g_doorbell_pending = 0;
     mw_wire_st32(&g_ctrl->firmware_heartbeat, mw_wire_ld32(&g_ctrl->firmware_heartbeat) + 1U);
+#if defined(ZZM_MINIGL_DRAW_CACHE_PROFILE)
+    minigl_profile_set_enabled(g_status != NULL);
+#else
     minigl_profile_set_enabled(g_status != NULL &&
                                mw_wire_ld32(&g_status->trace_enabled) != 0U);
+#endif
     if (g_status) {
         mw_wire_st32(&g_status->heartbeat, mw_wire_ld32(&g_ctrl->firmware_heartbeat));
         mw_wire_st32(&g_status->trace_draws_hardware, minigl_raster_draws_hardware());
@@ -710,9 +749,13 @@ int mw_service_poll(void)
     uint32_t batch;
 
     if (outstanding > MW_RING_MAX_OUTSTANDING) {
+        uint32_t i;
+        for (i = 0U; i < MW_MAX_CONTEXTS; ++i)
+            if (g_contexts[i])
+                mw_ctx_retire_wire_draws(g_contexts[i]);
+        mw_ring_reject(MW_STATUS_INVALID, 0U);
         mw_wire_st32(&g_ctrl->consumer_seq, producer);
         mw_wire_st32(&g_ctrl->completion_fence, producer);
-        mw_log_reject(MW_STATUS_INVALID, 0U);
         work_done++;
     } else {
         batch = (outstanding < MW_POLL_MAX_RING_BATCH) ? outstanding
@@ -736,15 +779,16 @@ int mw_service_poll(void)
                     minigl_profile_packet_end(packet_bytes, mw_be32(slot_buf + 12U));
                     mw_wire_st32(&g_ctrl->op_status, status);
                     if (status != MW_STATUS_OK)
-                        mw_log_reject(status, opcode);
+                        mw_ring_reject(status, opcode);
                 } else if (!c) {
                     mw_wire_st32(&g_ctrl->op_status, MW_STATUS_CONTEXT_LOST);
-                    mw_log_reject(MW_STATUS_CONTEXT_LOST,
-                                  mw_packet_first_opcode(slot_buf, packet_bytes));
+                    mw_ring_reject(MW_STATUS_CONTEXT_LOST,
+                                   mw_packet_first_opcode(slot_buf, packet_bytes));
                 } else {
                     mw_wire_st32(&g_ctrl->op_status, MW_STATUS_INVALID);
-                    mw_log_reject(MW_STATUS_INVALID,
-                                  mw_packet_first_opcode(slot_buf, packet_bytes));
+                    mw_ctx_retire_wire_draws(c);
+                    mw_ring_reject(MW_STATUS_INVALID,
+                                   mw_packet_first_opcode(slot_buf, packet_bytes));
                 }
                 mw_diag_record(mw_wire_ld32(&g_ctrl->consumer_seq), slot_buf,
                                packet_bytes, mw_wire_ld32(&g_ctrl->op_status));

@@ -1,7 +1,6 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
 #include <stddef.h>
 #include <stdint.h>
-#include <stdio.h>
 
 #include "minigl_transport.h"
 #include "minigl_platform.h"
@@ -418,7 +417,7 @@ int zzm_module_init(const zzm_services_t *services)
                                 sizeof(g_registration)))
         return -1;
     g_module.initialized = 1;
-    printf("[ZZM] MINIGL loaded v1 build %s\r\n", ZZM_MINIGL_BUILD_ID);
+    minigl_platform_logf("MINIGL loaded v1 build %s", ZZM_MINIGL_BUILD_ID);
     return 0;
 }
 

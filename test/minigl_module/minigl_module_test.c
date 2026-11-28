@@ -22,6 +22,7 @@
 #include "ff.h"
 #include "aar/app.h"
 #include "aar/ext_zz9000.h"
+#include "zzapp_services.h"
 #include "mw_ctx.h"
 #include "minigl_platform.h"
 #include "rix_drv.h"
@@ -34,6 +35,7 @@
 extern int zzm_module_entry(const zzm_services_t *services);
 extern void zzm_module_exit(void);
 extern mw_ctx *amiberry_transport_inproc_ctx(void);
+extern int zzapp_gl_set_module_host(const zzm_app_gl_host_service_t *host);
 void zzapp_gl_test_set_p96(uint8_t *pixels, uint32_t bytes);
 void zzapp_gl_test_reset_invalidates(void);
 int minigl_raster_test_level_size(uint32_t id, uint16_t level,
@@ -47,7 +49,7 @@ int zzapp_gl_test_copy_bound(const uint32_t *src, int rgb565,
 extern struct AmiberryContext *amiberry_context(void *context);
 extern uint8_t *amiberry_command(struct AmiberryContext *context,
                                  uint32_t opcode, uint32_t payload);
-extern int amiberry_flush(struct AmiberryContext *context);
+extern uint8_t amiberry_flush(struct AmiberryContext *context);
 extern void *mini_CurrentContext;
 
 
@@ -88,6 +90,14 @@ static uint32_t display_front = 0x08000000U;
 static uint32_t display_back = 0x08000000U;
 static uint32_t display_layout = 5U;
 static int display_latest;
+static const uint32_t mailbox_pages[3] = { 0x08002100U, 0x08004100U, 0x08006100U };
+static uint32_t mailbox_spare, mailbox_pending;
+static uint32_t mailbox_presented[16];
+static uint64_t mailbox_presented_ids[16];
+static unsigned mailbox_presents, mailbox_cleans, mailbox_invalidates;
+static int mailbox_model, mailbox_leased, mailbox_vblank_on_yield;
+static uint32_t mailbox_stale_address;
+static uint16_t mailbox_current_pixel;
 static int flip_idle = 1;
 static int hold_flip;
 static int rotate_display_on_wait;
@@ -242,6 +252,8 @@ static uint32_t g_test_rix_status = RIX_DRV_STATUS_IDLE;
  * fetcher between bursts) and then busy with reads outstanding. */
 static unsigned g_test_rix_idle_first;
 static unsigned g_test_rix_soft_resets;
+static int g_test_rix_has_byte_swap;
+static uint32_t g_test_rix_control;
 static int test_rix_csr_read(uint32_t offset, uint32_t *value)
 {
     if (!value)
@@ -261,6 +273,8 @@ static int test_rix_csr_read(uint32_t offset, uint32_t *value)
         }
     } else if (offset == RIX_DRV_CSR_STATUS)
         *value = g_test_rix_status;
+    else if (offset == RIX_DRV_CSR_CONTROL)
+        *value = g_test_rix_control;
     else
         *value = 0U;
     return 1;
@@ -270,6 +284,13 @@ static int test_rix_csr_write(uint32_t offset, uint32_t value)
 {
     if (g_in_gl_call)
         ++g_gl_call_device_ops;
+    if (offset == RIX_DRV_CSR_CONTROL) {
+        if (!g_test_rix_has_byte_swap)
+            value &= ~RIX_DRV_CONTROL_COLOR_SWAP;
+        assert(!((value ^ g_test_rix_control) & RIX_DRV_CONTROL_COLOR_SWAP) ||
+               g_fetch_count == 0U);
+        g_test_rix_control = value;
+    }
     if (offset == RIX_DRV_CSR_CONTROL &&
         (value & RIX_DRV_CONTROL_SOFT_RESET) != 0U) {
         /* Only a wedged GPU may be reset while it still owns a fetch. */
@@ -336,10 +357,16 @@ static void test_rix_fsc_word(uint32_t word)
             g_fsc.color_address != 0U) {
             if (g_fsc.color_address == g_fsc.watch_address)
                 g_fsc.watch_hit = 1;
-            *(uint16_t *)(uintptr_t)g_fsc.color_address = (uint16_t)(
-                ((g_fsc.clear_color >> 27U) << 11U) |
+            uint16_t pixel = (uint16_t)(((g_fsc.clear_color >> 27U) << 11U) |
                 (((g_fsc.clear_color >> 18U) & 63U) << 5U) |
                 ((g_fsc.clear_color >> 11U) & 31U));
+            if (mailbox_leased) {
+                assert(g_fsc.color_address != display_front);
+                assert(g_fsc.color_address != mailbox_pending);
+            }
+            if (g_test_rix_control & RIX_DRV_CONTROL_COLOR_SWAP)
+                pixel = __builtin_bswap16(pixel);
+            *(uint16_t *)(uintptr_t)g_fsc.color_address = pixel;
         }
         break;
     case 3U:
@@ -527,9 +554,11 @@ static struct {
 static unsigned tracked_flip_count;
 static unsigned tracked_finish_count;
 static int reject_tracked_flip;
+static unsigned g_flips;
 int zzapp_svc_display_flip(uint32_t surface_id)
 {
     (void)surface_id;
+    ++g_flips;
     if (g_flip_src)
         memcpy(g_shown, g_flip_src, sizeof(g_shown));
     if (hold_flip)
@@ -590,10 +619,85 @@ int zzapp_display_wait_flip_idle(void)
 }
 int zzapp_display_latest(void) { return display_latest; }
 int zzapp_services_stop_requested(void) { return display_stop_requested; }
+
+int zzapp_display_mailbox_buffers(uint32_t buffers[3], uint32_t *bytes)
+{
+    if (!mailbox_model)
+        return AAR_E_INVAL;
+    memcpy(buffers, mailbox_pages, sizeof(mailbox_pages));
+    *bytes = display_height * display_pitch;
+    return AAR_OK;
+}
+
+int zzapp_display_mailbox_owned(uint32_t *back, uint32_t *spare)
+{
+    assert(mailbox_model);
+    *back = display_back;
+    *spare = mailbox_spare;
+    return AAR_OK;
+}
+
+int zzapp_display_mailbox_lease(int acquire)
+{
+    assert(mailbox_model && mailbox_leased != acquire);
+    if (!acquire)
+        assert(g_fetch_count == 0U);
+    mailbox_leased = acquire;
+    return AAR_OK;
+}
+
+int zzapp_display_mailbox_present(uint32_t address, uint32_t flags, uint64_t frame_id)
+{
+    uint32_t next = mailbox_pending;
+
+    assert(mailbox_leased && address && address != display_front &&
+           address != mailbox_pending);
+    assert(address == display_back || address == mailbox_spare);
+    if (address == mailbox_spare)
+        mailbox_spare = display_back;
+    if (!next)
+        next = mailbox_spare;
+    assert(next && next != address);
+    display_back = next;
+    mailbox_spare = 0U;
+    mailbox_pending = address;
+    assert(mailbox_presents < sizeof(mailbox_presented) / sizeof(mailbox_presented[0]));
+    mailbox_presented_ids[mailbox_presents] = frame_id;
+    mailbox_presented[mailbox_presents++] = address;
+    if (!(flags & ZZAPP_DISPLAY_PRESENT_NO_DIRTY))
+        ++mailbox_cleans;
+    return AAR_OK;
+}
+
+int zzapp_display_invalidate(uint32_t address, uint32_t bytes)
+{
+    if (!mailbox_leased || (address != mailbox_pages[0] &&
+        address != mailbox_pages[1] && address != mailbox_pages[2]))
+        return AAR_E_INVAL;
+    assert(bytes == display_pitch * display_height);
+    ++mailbox_invalidates;
+    if (mailbox_stale_address == address) {
+        *(uint16_t *)(uintptr_t)address = mailbox_current_pixel;
+        mailbox_stale_address = 0U;
+    }
+    return AAR_OK;
+}
+
+static void test_mailbox_vblank(void)
+{
+    assert(mailbox_pending && !mailbox_spare);
+    mailbox_spare = display_front;
+    display_front = mailbox_pending;
+    mailbox_pending = 0U;
+}
 void zzapp_host_yield_wait(void)
 {
     ++wait_yields;
     flip_idle = 1;
+    if (mailbox_vblank_on_yield) {
+        mailbox_vblank_on_yield = 0;
+        test_mailbox_vblank();
+    }
     if (g_yield_runs_worker) {
         g_yield_runs_worker = 0;
         (void)zzm_minigl_service_tick(0);
@@ -1096,7 +1200,7 @@ static void test_gl_swap_tracked(const zzm_minigl_ops_v1_t *ops, void *context)
     assert(ops->size >= offsetof(zzm_minigl_ops_v1_t, app_swap_tracked) +
                         sizeof(ops->app_swap_tracked));
     assert(ops->app_swap_tracked != NULL);
-    host = services->get_service(ZZM_SERVICE_APP_GL_HOST, ZZM_SERVICE_APP_GL_HOST_V4_1);
+    host = services->get_service(ZZM_SERVICE_APP_GL_HOST, ZZM_SERVICE_APP_GL_HOST_V4_2);
     assert(host != NULL);
     assert(host->flip_bound_tracked(2U, first) == AAR_E_INVAL);
     host->finish_tracked(2U, first, AAR_PRESENT_REASON_CANCELLED);
@@ -1469,9 +1573,217 @@ static void test_rix_user_clipping(const aar_gl *draw)
     draw->End();
     draw->Finish();
     assert(g_test_rix_triangles - before == 2U);
+
+    /* The first packed strip triangle is inside. The next shares two
+     * vertices and must clip them using eye coordinates, not projection. */
+    {
+        struct AmiberryContext *guest = amiberry_context(mini_CurrentContext);
+        const double left[4] = { -1.0, 0.0, 0.0, 0.0 };
+        const float packed[] = {
+            1.0f, 0.0f, 0.0f, 1.0f, /* constant RGBA */
+            0.0f, 0.0f, 0.0f, 1.0f, /* texture coordinates 0 */
+            0.0f, 0.0f, 0.0f, 1.0f, /* texture coordinates 1 */
+            0.0f, 0.0f, 1.0f,       /* normal */
+            -0.125f, -0.78f, 0.0f,
+            -0.25f, -0.78f, 0.0f,
+            -0.125f, -0.76f, 0.0f,
+             0.25f, -0.76f, 0.0f
+        };
+        uint8_t *payload;
+
+        draw->ClipPlane(0x3000U, left);
+        before = g_test_rix_triangles;
+        payload = amiberry_command(guest, MW_DRAW_PACKED, 12U + sizeof(packed));
+        assert(payload != NULL);
+        mw_put_be32(payload, 5U); /* GL_TRIANGLE_STRIP */
+        mw_put_be32(payload + 4U, 4U);
+        mw_put_be32(payload + 8U, 0x001U); /* XYZ and per-draw constants */
+        for (unsigned i = 0U; i < sizeof(packed) / sizeof(packed[0]); ++i)
+            mw_put_bef(payload + 12U + 4U * i, packed[i]);
+        assert(amiberry_flush(guest));
+        draw->Finish();
+        assert(g_test_rix_triangles - before == 3U);
+    }
     draw->Disable(0x3000U);
 }
 
+static void test_direct_mailbox(const zzm_minigl_ops_v1_t *ops, void *context)
+{
+    const zzm_app_gl_host_service_t *host = zzm_runtime_services()->get_service(
+        ZZM_SERVICE_APP_GL_HOST, ZZM_SERVICE_APP_GL_HOST_V4_2);
+    zzm_app_gl_host_service_t old_host = *host;
+    const uint32_t front = mailbox_pages[0], back = mailbox_pages[1], spare = mailbox_pages[2];
+    const uint64_t first_id = UINT64_C(0x100000001);
+    const uint64_t second_id = UINT64_C(0x100000002);
+    const uint32_t direct = AAR_ZZ9000_GL_BIND_DIRECT_PRESENT;
+    const void *gl = NULL;
+    const aar_gl *draw;
+    mw_ctx *mw;
+    unsigned yields, index;
+    uint32_t active;
+    uint8_t rgba[4];
+
+    display_width = 4U;
+    display_height = 4U;
+    display_pitch = 8U;
+    display_format = AAR_FMT_RGB565;
+    display_layout = AAR_LAYOUT_RGB565_BE;
+    display_front = front;
+    display_back = back;
+    mailbox_spare = spare;
+    display_latest = mailbox_model = 1;
+    assert(minigl_platform_set_graphics(&test_rix_service, &graphics_caps,
+                                        ZZM_MODULE_OWNER(ZZM_MODULE_MINIGL)));
+    assert(host->mailbox_present(2U, back, ZZM_DISPLAY_PRESENT_NO_DIRTY,
+                                 first_id) == AAR_E_INVAL);
+
+    /* With a full mailbox table but no readback bit, BE stays on copy. */
+    assert(ops->app_bind_flags(context, 1U, direct, &gl) == AAR_OK);
+    assert(!amiberry_transport_inproc_ctx()->present_select && !mailbox_leased);
+    ops->app_unbind(context);
+
+    /* A short V4.0 table still binds, even on hardware that supports BE. */
+    g_test_rix_has_byte_swap = 1;
+    old_host.version = ZZM_SERVICE_APP_GL_HOST_V4;
+    old_host.size = offsetof(zzm_app_gl_host_service_t, mailbox_buffers);
+    assert(zzapp_gl_set_module_host(&old_host) == AAR_OK);
+    assert(ops->app_bind_flags(context, 1U, direct, &gl) == AAR_OK);
+    assert(!amiberry_transport_inproc_ctx()->present_select && !mailbox_leased);
+    assert(ops->app_swap_tracked(context, first_id) == AAR_E_NOSYS);
+    ops->app_unbind(context);
+    assert(zzapp_gl_set_module_host(host) == AAR_OK);
+
+    /* A tightly packed frame that ends partway through a cache line cannot
+     * be leased for direct CPU/GPU handoff. */
+    display_height = 2U;
+    assert(ops->app_bind_flags(context, 1U, direct, &gl) == AAR_OK);
+    assert(!amiberry_transport_inproc_ctx()->present_select && !mailbox_leased);
+    ops->app_unbind(context);
+    display_height = 4U;
+
+    assert(ops->app_bind_flags(context, 1U, direct, &gl) == AAR_OK);
+    draw = gl;
+    mw = amiberry_transport_inproc_ctx();
+    assert(mw->direct_color_be && mailbox_leased);
+    assert((uintptr_t)minigl_raster_color_buffer() == back);
+    draw->ClearColor(1.0f, 0.0f, 0.0f, 1.0f);
+    draw->Clear(0x4000U);
+    assert(ops->app_swap_tracked(context, first_id) == AAR_OK);
+    assert(mailbox_pending == back && mailbox_presents == 1U);
+    assert(mailbox_presented_ids[0] == first_id);
+    assert(memcmp((void *)(uintptr_t)back, swap_colours[0].pixel, 2U) == 0);
+    assert((uintptr_t)minigl_raster_color_buffer() == spare);
+
+    /* Pending frame A is taken while B's GPU list is still held. The swap
+     * can give back the freed front without waiting for B's GPU writes. */
+    g_fetch_hold = mailbox_vblank_on_yield = 1;
+    g_fetch_release_us = UINT64_MAX;
+    yields = wait_yields;
+    draw->ClearColor(0.0f, 1.0f, 0.0f, 1.0f);
+    draw->Clear(0x4000U);
+    assert(ops->app_swap_tracked(context, second_id) == AAR_OK);
+    assert(wait_yields == yields + 1U && g_fetch_count != 0U);
+    assert(mailbox_presents == 1U && display_front == back && !mailbox_pending);
+    assert((uintptr_t)minigl_raster_color_buffer() == front);
+
+    /* Fast GPU: finish B and C; both make it to the mailbox in order. */
+    g_fetch_hold = 0;
+    test_rix_run_fetches();
+    draw->ClearColor(0.0f, 0.0f, 1.0f, 1.0f);
+    draw->Clear(0x4000U);
+    assert(ops->app_swap(context) == AAR_OK);
+    assert(mailbox_presents == 3U && mailbox_pending == front);
+    assert(mailbox_presented[1] == spare && mailbox_presented[2] == front);
+    assert(mailbox_presented_ids[1] == second_id && mailbox_presented_ids[2] == 0U);
+    assert(memcmp((void *)(uintptr_t)spare, swap_colours[1].pixel, 2U) == 0);
+    assert(memcmp((void *)(uintptr_t)front, swap_colours[2].pixel, 2U) == 0);
+    assert(!mailbox_cleans && !mailbox_invalidates);
+    test_mailbox_vblank();
+
+    /* A CPU read invalidates when needed and leaves the draw target direct.
+     * Make the CPU's old view different from what the GPU wrote. */
+    active = (uint32_t)(uintptr_t)minigl_raster_color_buffer();
+    draw->ClearColor(1.0f, 0.0f, 0.0f, 1.0f);
+    draw->Clear(0x4000U);
+    draw->Finish();
+    assert(memcmp((void *)(uintptr_t)active, swap_colours[0].pixel, 2U) == 0);
+    mailbox_stale_address = active;
+    mailbox_current_pixel = *(uint16_t *)(uintptr_t)active;
+    *(uint16_t *)(uintptr_t)active = 0U;
+    memset(rgba, 0, sizeof(rgba));
+    draw->ReadPixels(0, display_height - 1U, 1, 1, 0x1908U, 0x1401U, rgba);
+    assert(rgba[0] == 255U && rgba[1] == 0U && rgba[2] == 0U && rgba[3] == 255U);
+    assert(mailbox_invalidates == 1U && !mailbox_stale_address);
+    assert(mw->color_direct[mw->state.target.back]);
+    assert(ops->app_swap(context) == AAR_OK);
+    assert(mailbox_invalidates == 1U && !mailbox_cleans);
+    test_mailbox_vblank();
+
+    /* A CPU-only draw sees the current direct pixels and demotes only its
+     * own target. Its swap copies the shadow into that display page. */
+    index = mw->state.target.back;
+    active = (uint32_t)(uintptr_t)mw->direct_color_buffers[index];
+    draw->ClearColor(0.0f, 1.0f, 0.0f, 1.0f);
+    draw->Clear(0x4000U);
+    draw->Finish();
+    mw->state.force_cpu = 1U;
+    draw->Clear(0x4000U);
+    draw->Finish();
+    assert(!mw->color_direct[index] && mailbox_invalidates == 2U);
+    mw->state.force_cpu = 0U;
+    assert(ops->app_swap(context) == AAR_OK);
+    assert(mailbox_cleans == 1U && mailbox_pending == active);
+    assert(memcmp((void *)(uintptr_t)active, swap_colours[1].pixel, 2U) == 0);
+    test_mailbox_vblank();
+
+    /* An in-flight frame plus an owned spare must not block swap. Unbind
+     * drains it before calling the host's lease-release callback. */
+    g_fetch_hold = 1;
+    g_fetch_release_us = UINT64_MAX;
+    yields = wait_yields;
+    draw->Clear(0x4000U);
+    assert(ops->app_swap(context) == AAR_OK);
+    assert(g_fetch_count && wait_yields == yields);
+    g_fetch_release_us = now_us + 4U;
+    ops->app_unbind(context);
+    assert(!mailbox_leased && !g_fetch_count && !mailbox_pending);
+    assert(card_pool.block_count == 0U);
+
+    mailbox_model = display_latest = 0;
+    g_test_rix_has_byte_swap = 0;
+}
+
+/* A colour clear: one command, 48 bytes. */
+static void write_clear_packet(uint8_t packet[48])
+{
+    memset(packet, 0, 48U);
+    mw_put_be32(packet, MW_MAGIC);
+    mw_put_be32(packet + 4, MW_VERSION);
+    mw_put_be32(packet + 8, 48U);
+    mw_put_be32(packet + 12, 1U);
+    mw_put_be32(packet + 16, MW_CLEAR);
+    mw_put_be32(packet + 20, 24U);
+    mw_put_be32(packet + 24, 1U);
+    mw_put_be32(packet + 28, 0x3f800000U);
+    mw_put_be32(packet + 40, 0x3f800000U);
+}
+
+/* Clear plus present: the present hands the clear's list to RasterIX. */
+static void write_clear_present_packet(uint8_t packet[56])
+{
+    memset(packet, 0, 56U);
+    mw_put_be32(packet, MW_MAGIC);
+    mw_put_be32(packet + 4, MW_VERSION);
+    mw_put_be32(packet + 8, 56U);
+    mw_put_be32(packet + 12, 2U);
+    mw_put_be32(packet + 16, MW_CLEAR);
+    mw_put_be32(packet + 20, 24U);
+    mw_put_be32(packet + 24, 1U);
+    mw_put_be32(packet + 28, 0x3f800000U);
+    mw_put_be32(packet + 40, 0x3f800000U);
+    mw_put_be32(packet + 48, MW_PRESENT);
+    mw_put_be32(packet + 52, 0U);
+}
 
 int main(void)
 {
@@ -1819,6 +2131,51 @@ int main(void)
         zzm_module_set_worker_context(0);
         assert(zzm_module_can_park() == 1);
         zzm_module_api_leave();
+    }
+    {
+        /* The oldest queued frame is presented once RasterIX has finished
+         * its own colour target, not once the whole ring is idle: the first
+         * two frames' fences have landed, the engine still reports busy, and
+         * the swap that follows flips the first frame while the second is
+         * still held back. */
+        const aar_gl *draw;
+        float quad[8] = { -0.5f, -0.5f, 0.5f, -0.5f, 0.5f, 0.5f, -0.5f, 0.5f };
+        unsigned flips_before;
+
+        ops->app_unbind(context);
+        ops->app_reclaim(context, 1U);
+        assert(minigl_platform_set_graphics(&test_rix_service, &graphics_caps,
+                                            ZZM_MODULE_OWNER(ZZM_MODULE_MINIGL)));
+        assert(ops->app_bind_flags(context, 1U, 0U, &gl) == 0 && gl != NULL);
+        draw = (const aar_gl *)gl;
+        assert(minigl_raster_drain());
+        g_fetch_hold = 1;
+        g_fetch_release_us = ~(uint64_t)0;
+        flips_before = g_flips;
+
+        draw->VertexPointer(2, 0x1406U, 8, quad);
+        draw->EnableClientState(0x8074U);
+        draw->DrawArrays(0x0005U, 0, 4);
+        assert(ops->app_swap(context) == 0);
+        draw->DrawArrays(0x0005U, 0, 4);
+        assert(ops->app_swap(context) == 0);
+        draw->DisableClientState(0x8074U);
+        assert(minigl_raster_work_outstanding() != 0);
+        assert(g_flips == flips_before);
+
+        /* Both lists have been fetched; the engine is not idle. */
+        g_fetch_hold = 0;
+        test_rix_run_fetches();
+        g_test_rix_status = RIX_DRV_STATUS_BUSY;
+        draw->EnableClientState(0x8074U);
+        draw->DrawArrays(0x0005U, 0, 4);
+        draw->DisableClientState(0x8074U);
+        assert(ops->app_swap(context) == 0);
+        assert(g_flips == flips_before + 1U);
+        assert(minigl_raster_work_outstanding() != 0);
+
+        g_test_rix_status = RIX_DRV_STATUS_IDLE;
+        assert(minigl_raster_drain());
     }
     {
         /* The app's GL calls feed its own ring: a call made while a sealed
@@ -2194,16 +2551,20 @@ int main(void)
         assert(minigl_raster_hardware_available());
     }
     {
-        /* P2 (per-context ring): a 68k wire context created while an ARM app
-         * owns the async ring is sync, allocates exactly the two sync
-         * command buffers, and does not retire the app's platform. */
+        /* Wire contexts use the asynchronous ring too: the same command
+         * buffer depth as an ARM app, not the old two-buffer sync ring.
+         * Opening one installs that platform and leaves RasterIX available. */
         uint32_t handle68k;
+        mw_ctx *wire;
 
         assert(minigl_raster_hardware_available());
         assert(minigl_raster_test_command_buffer_count() == MINIGL_RIX_COMMAND_BUFFERS);
         assert(ops->open_68k(context, &request, &handle68k));
+        wire = mw_service_test_context(handle68k);
+        assert(wire != NULL && wire->rix_async != 0U);
+        assert(mw_host_rix_platform_context() == wire);
         assert(minigl_raster_test_command_buffer_count() ==
-               MINIGL_RIX_SYNC_COMMAND_BUFFERS);
+               MINIGL_RIX_COMMAND_BUFFERS);
         assert(minigl_raster_hardware_available());
         ops->close_68k(context, handle68k);
         /* The wire context's teardown retired the platform; the next block
@@ -2240,6 +2601,179 @@ int main(void)
         assert(minigl_platform_set_graphics(&test_rix_service, &graphics_caps,
                                             ZZM_MODULE_OWNER(ZZM_MODULE_MINIGL)));
         assert(ops->app_bind(context, 1U, &gl) == 0 && gl != NULL);
+    }
+    {
+        /* A wire context's second packet is dispatched while its own first
+         * packet's list is still rendering.  The service only defers packets
+         * for another context's ring. */
+        ZZ9KMiniGLTransportDescriptor desc;
+        volatile ZZ9KMiniGLControlBlockV9 *ctrl;
+        uint32_t handle = 0U;
+        uint32_t generation = 0U;
+        uint32_t consumer;
+        uint32_t slot_idx;
+        uint8_t *slot_buf;
+        uint8_t first[56];
+        uint8_t second[48];
+        mw_ctx *wire;
+
+        assert(zzm_minigl_transport_acquire(&generation));
+        assert(mw_service_get_transport_descriptor(&desc) == 0);
+        ctrl = (volatile ZZ9KMiniGLControlBlockV9 *)(void *)(
+            desc.window_address + desc.ctrl_offset);
+        assert(ops->open_68k(context, &request, &handle));
+        wire = mw_service_test_context(handle);
+        assert(wire != NULL && wire->rix_async != 0U);
+        assert(mw_host_rix_platform_context() == wire);
+        mw_wire_st32((volatile uint32_t *)&ctrl->op_handle, handle);
+
+        g_fetch_hold = 1;
+        g_fetch_wedged = 1;
+        g_fetch_count = 0U;
+        write_clear_present_packet(first);
+        consumer = mw_wire_ld32(&ctrl->consumer_seq);
+        slot_idx = consumer % mw_wire_ld32(&ctrl->slot_count);
+        slot_buf = (uint8_t *)(void *)desc.window_address +
+            (slot_idx == 0U ? desc.slot0_offset : desc.slot1_offset);
+        memcpy(slot_buf, first, sizeof(first));
+        mw_wire_st32((volatile uint32_t *)&ctrl->producer_seq, consumer + 1U);
+        (void)zzm_minigl_service_tick(0);
+        assert(mw_wire_ld32(&ctrl->consumer_seq) == consumer + 1U);
+        assert(minigl_raster_work_outstanding() != 0);
+        assert(g_fetch_count != 0U);
+
+        write_clear_packet(second);
+        consumer = mw_wire_ld32(&ctrl->consumer_seq);
+        slot_idx = consumer % mw_wire_ld32(&ctrl->slot_count);
+        slot_buf = (uint8_t *)(void *)desc.window_address +
+            (slot_idx == 0U ? desc.slot0_offset : desc.slot1_offset);
+        memcpy(slot_buf, second, sizeof(second));
+        mw_wire_st32((volatile uint32_t *)&ctrl->producer_seq, consumer + 1U);
+        (void)zzm_minigl_service_tick(0);
+        assert(mw_wire_ld32(&ctrl->consumer_seq) == consumer + 1U);
+        assert(minigl_raster_work_outstanding() != 0);
+        assert(g_fetch_count != 0U);
+
+        g_fetch_wedged = 0;
+        g_fetch_hold = 0;
+        test_rix_run_fetches();
+        mw_wire_st32((volatile uint32_t *)&ctrl->op_handle, 0U);
+        ops->close_68k(context, handle);
+    }
+    {
+        /* Worker context cannot park.  A wire present, span and sync still
+         * complete when the fences land during the bounded wait, and the
+         * span copies the frame the list produced, not the bytes from
+         * before it ran. */
+        extern void zzm_module_set_worker_context(int active);
+        const zzm_minigl_wire_open_t small = { 2U, 2U, 0U };
+        static uint8_t vram[0x20010];
+        uint32_t handle = 0U;
+        mw_ctx *wire;
+        uint8_t target[48];
+        uint8_t clear[48];
+        uint8_t present[24];
+        uint8_t again[56];
+        uint8_t span_packet[72];
+        uint8_t sync_packet[28];
+        uint8_t *span;
+        uint32_t before;
+        unsigned yields;
+        uint8_t *payload;
+
+        assert(ops->open_68k(context, &small, &handle));
+        wire = mw_service_test_context(handle);
+        assert(wire != NULL && wire->rix_async != 0U);
+        memset(target, 0, sizeof(target));
+        mw_put_be32(target, MW_MAGIC);
+        mw_put_be32(target + 4, MW_VERSION);
+        mw_put_be32(target + 8, sizeof(target));
+        mw_put_be32(target + 12, 1U);
+        mw_put_be32(target + 16, MW_TARGET);
+        mw_put_be32(target + 20, 24U);
+        mw_put_be32(target + 24, 2U);
+        mw_put_be32(target + 28, 2U);
+        mw_put_be32(target + 32, 1U);
+        mw_put_be32(target + 36, 16U);
+        mw_put_be32(target + 40, 2U);
+        mw_put_be32(target + 44, 2U);
+        assert(mw_host_submit(wire, target, sizeof(target)) == MW_STATUS_OK);
+        assert(wire->state.target.buffer_count == 1U);
+
+        g_fetch_hold = 1;
+        g_fetch_wedged = 0;
+        g_fetch_release_us = ~(uint64_t)0;
+        g_fetch_count = 0U;
+        write_clear_packet(clear);
+        assert(mw_host_submit(wire, clear, sizeof(clear)) == MW_STATUS_OK);
+        memset(present, 0, sizeof(present));
+        mw_put_be32(present, MW_MAGIC);
+        mw_put_be32(present + 4, MW_VERSION);
+        mw_put_be32(present + 8, sizeof(present));
+        mw_put_be32(present + 12, 1U);
+        mw_put_be32(present + 16, MW_PRESENT);
+        assert(mw_host_submit(wire, present, sizeof(present)) == MW_STATUS_OK);
+        assert(g_fetch_count != 0U);
+        assert(minigl_raster_work_outstanding() != 0);
+        before = wire->color_buffers[wire->state.target.latest][0];
+
+        memset(vram, 0xa5, sizeof(vram));
+        mw_host_set_present_vram(vram, 0x01000000U);
+        span = vram + 0x00020000U;
+        memset(span_packet, 0, sizeof(span_packet));
+        mw_put_be32(span_packet, MW_MAGIC);
+        mw_put_be32(span_packet + 4, MW_VERSION);
+        mw_put_be32(span_packet + 8, sizeof(span_packet));
+        mw_put_be32(span_packet + 12, 1U);
+        mw_put_be32(span_packet + 16, MW_PRESENT_SPAN);
+        mw_put_be32(span_packet + 20, 48U);
+        payload = span_packet + 24;
+        mw_put_be32(payload, MW_BLIT);
+        mw_put_be32(payload + 4, 4U);
+        mw_put_be32(payload + 8, 4U);
+        mw_put_be32(payload + 20, 1U);
+        mw_put_be32(payload + 32, 2U);
+        mw_put_be32(payload + 36, 2U);
+        mw_put_be32(payload + 40, 0x00020000U);
+        mw_put_be32(payload + 44, 8U);
+
+        zzm_module_set_worker_context(1);
+        yields = wait_yields;
+        g_fetch_release_us = now_us;
+        assert(mw_host_submit(wire, span_packet, sizeof(span_packet)) ==
+               MW_STATUS_OK);
+        assert(wait_yields == yields);
+        assert(g_fetch_count == 0U);
+        assert(wire->color_buffers[wire->state.target.latest][0] != before);
+        assert(span[0] != 0xa5U);
+        assert(memcmp(span, &before, 2U) != 0);
+        if (wire->color_rgb565[wire->state.target.latest])
+            assert(memcmp(span, wire->color_buffers[wire->state.target.latest],
+                          2U) == 0);
+
+        g_fetch_hold = 1;
+        g_fetch_release_us = ~(uint64_t)0;
+        g_fetch_count = 0U;
+        write_clear_present_packet(again);
+        assert(mw_host_submit(wire, again, sizeof(again)) == MW_STATUS_OK);
+        assert(minigl_raster_work_outstanding() != 0);
+        memset(sync_packet, 0, sizeof(sync_packet));
+        mw_put_be32(sync_packet, MW_MAGIC);
+        mw_put_be32(sync_packet + 4, MW_VERSION);
+        mw_put_be32(sync_packet + 8, sizeof(sync_packet));
+        mw_put_be32(sync_packet + 12, 1U);
+        mw_put_be32(sync_packet + 16, MW_SYNC);
+        mw_put_be32(sync_packet + 20, 4U);
+        g_fetch_release_us = now_us;
+        assert(mw_host_submit(wire, sync_packet, sizeof(sync_packet)) ==
+               MW_STATUS_OK);
+        assert(!minigl_raster_work_outstanding());
+        assert(wait_yields == yields);
+        zzm_module_set_worker_context(0);
+        g_fetch_hold = 0;
+        g_fetch_count = 0U;
+        mw_host_set_present_vram(NULL, 0U);
+        ops->close_68k(context, handle);
     }
     ops->app_unbind(context);
     display_width = 640U;
@@ -2387,6 +2921,7 @@ int main(void)
     test_gl_direct_swap_tracked(ops, context);
     test_gl_worker_present(ops, context);
     test_gl_present_deadline(ops, context);
+    test_direct_mailbox(ops, context);
     display_width = 640U;
     display_height = 480U;
     display_pitch = 1280U;
@@ -2612,9 +3147,10 @@ int main(void)
         g_fetch_count = 0U;
     }
     {
-        /* A fence that never lands must not defer wire packets forever.
-         * Past the wait deadline the backend is disabled and the packet
-         * is processed. */
+        /* An ARM app's outstanding ring still defers wire packets: dispatch
+         * would switch the shared backend.  Past the wait deadline the
+         * backend is disabled, that app's owners are quarantined, and the
+         * packet is processed. */
         extern void (*g_rix_test_log)(const char *fmt, ...);
         const aar_gl *draw;
         float quad[8] = { -0.5f, -0.5f, 0.5f, -0.5f, 0.5f, 0.5f, -0.5f, 0.5f };
@@ -2623,12 +3159,14 @@ int main(void)
         uint32_t consumer;
         uint32_t slot_idx;
         uint8_t *slot_buf;
+        uint32_t quarantines;
         uint64_t armed;
         unsigned step;
 
         assert(minigl_platform_set_graphics(&test_rix_service, &graphics_caps,
                                             ZZM_MODULE_OWNER(ZZM_MODULE_MINIGL)));
         assert(ops->app_bind_flags(context, 1U, 0U, &gl) == 0 && gl != NULL);
+        assert(mw_host_rix_platform_context() == amiberry_transport_inproc_ctx());
         draw = (const aar_gl *)gl;
         assert(minigl_raster_drain());
         g_fetch_hold = 1;
@@ -2670,16 +3208,61 @@ int main(void)
         now_us = armed + 1000000ULL;
         (void)zzm_minigl_service_tick(0);
         assert(mw_wire_ld32(&ctrl->consumer_seq) == consumer);
+        quarantines = mw_rix_quarantine_count();
         now_us = armed + 4000000ULL;
         (void)zzm_minigl_service_tick(0);
         assert(mw_wire_ld32(&ctrl->consumer_seq) == consumer + 1U);
         assert(strstr(g_log, "wait watchdog disabling") != NULL);
+        assert(mw_rix_quarantine_count() == quarantines + 1U);
         g_rix_test_log = NULL;
         g_fetch_hold = 0;
         g_fetch_wedged = 0;
         g_fetch_count = 0U;
         ops->app_unbind(context);
         ops->app_reclaim(context, 1U);
+    }
+
+    {
+        /* Amiga reset with a wire ring still rendering takes the same
+         * abort and quarantine as an ARM ring that has not finished:
+         * the engine is reset and the colour target and command buffer
+         * stay in the card pool. */
+        uint32_t handle = 0U;
+        mw_ctx *wire;
+        uint8_t packet[56];
+        uint32_t color;
+        uint32_t command;
+        uint32_t quarantines;
+        unsigned resets;
+        unsigned step;
+
+        assert(minigl_platform_set_graphics(&test_rix_service, &graphics_caps,
+                                            ZZM_MODULE_OWNER(ZZM_MODULE_MINIGL)));
+        assert(ops->open_68k(context, &request, &handle));
+        wire = mw_service_test_context(handle);
+        assert(wire != NULL && wire->rix_async != 0U);
+        color = wire->color_buffer_addresses[0];
+        command = wire->rix_command_buffer_addresses[0];
+        assert(color != 0U && command != 0U);
+        g_fetch_hold = 1;
+        g_fetch_wedged = 1;
+        g_fetch_count = 0U;
+        write_clear_present_packet(packet);
+        assert(mw_host_submit(wire, packet, sizeof(packet)) == MW_STATUS_OK);
+        for (step = 0U; step < 64U && minigl_raster_feed_pending(); ++step)
+            (void)minigl_raster_try_feed(RIX_DRV_FEED_SOURCE_SCHEDULER);
+        assert(g_fetch_count != 0U);
+        assert(minigl_raster_work_outstanding() != 0);
+        quarantines = mw_rix_quarantine_count();
+        resets = g_test_rix_soft_resets;
+        assert(zzm_minigl_begin_reset() == ZZM_MINIGL_RESET_QUIESCENT);
+        assert(mw_rix_quarantine_count() == quarantines + 1U);
+        assert(g_test_rix_soft_resets > resets);
+        assert(test_card_pool_holds(color));
+        assert(test_card_pool_holds(command));
+        g_fetch_wedged = 0;
+        g_fetch_hold = 0;
+        g_fetch_count = 0U;
     }
 
     zzm_loader_release(ZZM_MODULE_MINIGL);

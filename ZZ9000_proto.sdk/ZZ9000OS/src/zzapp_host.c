@@ -19,6 +19,7 @@
 #include "zzapp_xport.h"
 #include "zzapp_runtime.h"
 #include "zzapp_rec.h"
+#include "zzapp_services.h"
 #include "zzapp_svc.h"
 #ifndef ZZAPP_HOST_TEST
 #include <stdio.h>
@@ -156,6 +157,14 @@ int __attribute__((weak)) zzapp_services_wait_registered(uint32_t pid)
     return 0;
 #endif
 }
+
+#ifdef ZZAPP_HOST_TEST
+/* Some lifetime harnesses link the host without display services. */
+__attribute__((weak)) int zzapp_display_mailbox_retire_ready(void)
+{
+    return 1;
+}
+#endif
 
 /* The core's heartbeat: core 1 stamps it from its timer, core 0 ages it. It
  * is one global word, not a field of record 0. */
@@ -1284,11 +1293,17 @@ static void force_stop_slot(uint32_t slot, uint32_t fault, uint32_t pc,
         fflush(stdout);
     }
 #endif
+    zzapp_minigl_reclaim(coh->generation);
+    if (!zzapp_display_mailbox_retire_ready()) {
+        /* FAULTED would allow the launcher to free a live DMA target. */
+        publish_state(ZZAPP_ST_STOPPING);
+        restore_teardown_slot(selected);
+        return;
+    }
     publish_state_end(ZZAPP_ST_FAULTED, terminal_reason(host, fault));
     host->fault_mark = now_ticks();
     zzapp_services_set_terminal(terminal_reason(host, fault));
     zzapp_services_on_app_end();
-    zzapp_minigl_reclaim(coh->generation);
     if (zzapp_api_poison_resources)
         zzapp_api_poison_resources();
     (void)zzapp_rec_retire(slot);
@@ -1398,8 +1413,13 @@ static void complete_pending_exit(uint32_t slot)
         zzapp_services_set_terminal(host->terminal_reason ?
                                     host->terminal_reason : ZZAPP_END_EXIT);
     }
-    zzapp_services_on_app_end();
     zzapp_minigl_reclaim(coh->generation);
+    if (!zzapp_display_mailbox_retire_ready()) {
+        publish_state(ZZAPP_ST_STOPPING);
+        restore_teardown_slot(selected);
+        return;
+    }
+    zzapp_services_on_app_end();
     publish_state(ZZAPP_ST_IDLE);
     /* The exit stays owed until the record is gone: a core-1 restart that
      * interrupts the retire finds it and replays it. */
@@ -1448,6 +1468,10 @@ int zzapp_rec_retire(uint32_t pid)
     if (zzapp_rec_state(pid) == ZZAPP_REC_FREE)
         return 1;
     selected = select_teardown_slot(pid);
+    if (!zzapp_display_mailbox_retire_ready()) {
+        restore_teardown_slot(selected);
+        return 0;
+    }
     /* A state that is already RETIRING or RECLAIMED stays: the transition only
      * moves forward. */
     (void)zzapp_rec_set_state(rec, ZZAPP_REC_RETIRING);
@@ -1961,12 +1985,20 @@ void zzapp_api_enter(void)
     zzapp_rec_host_t *host = host_slot(slot);
 
     if (zzapp_kernel_current_thread() >= 0) {
-        int contended;
+        int contended = 0;
 
 #if ZZAPP_PERF_COUNTERS && !defined(ZZAPP_HOST_TEST)
         zzapp_svc_gl_telemetry_lock_begin(slot);
 #endif
-        contended = api_lock_until_acquired(slot);
+        /* The common take (nobody holds the lock, or this thread does) is
+         * a few stores. The call counts as parked until it is published
+         * below, as api_lock_until_acquired does, so the watchdog does not
+         * judge the gap between the take and the count. The take leaves
+         * coh->progress alone: the tick refreshes it whenever api_calls has
+         * moved, which this call is about to do. */
+        host->api_parked = 1u;
+        if (!zzapp_kernel_api_try_lock(&g_kernel, slot))
+            contended = api_lock_until_acquired(slot);
 #if ZZAPP_PERF_COUNTERS && !defined(ZZAPP_HOST_TEST)
         zzapp_svc_gl_telemetry_lock_end(slot, contended);
         if (g_kernel.api_lock_depth == 1U) {
@@ -2010,7 +2042,8 @@ void zzapp_api_leave(void)
             zzapp_kernel_perf_service_end(&g_kernel, ZZAPP_PERF_SERVICE_SVC,
                                           scheduler_perf_stamp());
 #endif
-        (void)zzapp_kernel_api_unlock(&g_kernel, slot);
+        if (!zzapp_kernel_api_try_unlock(&g_kernel, slot))
+            (void)zzapp_kernel_api_unlock(&g_kernel, slot);
 #if ZZAPP_PERF_COUNTERS
         if (g_kernel.api_lock_depth == 0U)
             host->perf_svc_sampled = 0U;
@@ -2746,7 +2779,9 @@ void zzapp_recover_halted_core1(void)
         zzapp_kernel_reset_slice(kernel);
     }
     zzapp_kernel_set_current_thread(-1);
+#ifdef ZZAPP_HOST_TEST
     zzapp_on_core1_restart();
+#endif
 }
 
 /* One record ends without an app to stop: its claim, a load in progress, or
@@ -2789,6 +2824,12 @@ void zzapp_on_core1_restart(void)
          * its guard is dropped first. */
         visible(slot)->commit_active = 0u;
         zzapp_services_select_pid(slot);
+        /* Core 0 stopped graphics before retiring the halted app. */
+#ifndef ZZAPP_HOST_TEST
+        if (!zzapp_display_mailbox_retire_ready() &&
+            zzapp_display_mailbox_lease(0) != AAR_OK)
+            continue;
+#endif
         if (slot_owes_teardown(slot)) {
             /* An app whose exit the dead core 1 never finished tearing
              * down is torn down like a running one: its host state is

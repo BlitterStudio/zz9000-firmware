@@ -87,11 +87,16 @@ struct mw_ctx {
      * color_buffers[] allocation remains available for CPU fallback. */
     uint16_t *direct_color_buffers[3];
     uint8_t color_direct[3];
+    uint8_t direct_color_be;
     /* Per colour buffer: contents are in RasterIX's RGB565 layout and a CPU
      * reader must convert through minigl_raster_buffer_to_rgba first.  The
      * layout belongs to the buffer and survives an undefined-content swap. */
     uint8_t  color_rgb565[3];
-    /* zzapp_gl marks targets retained for an asynchronous P96 copy. */
+    /* ARM mailbox hook: after sealing outgoing, returns the next owned
+     * target or UINT32_MAX if the surface was lost. */
+    uint32_t (*present_select)(mw_ctx *c, uint32_t outgoing);
+    uint8_t present_lost;
+    /* zzapp_gl marks targets retained for presentation. */
     uint8_t  present_queued[3];
     uint8_t  present_submit_rgb565[3];
     uint32_t present_submit_frame[3];
@@ -123,6 +128,14 @@ struct mw_ctx {
     uint32_t rix_quarantined_depth_address;
     float *vertex_scratch;
     uint32_t vertex_scratch_capacity;
+    struct mw_draw_cache *draw_cache;
+    uint32_t draw_cache_serial;
+    uint32_t draw_cache_retired;
+    struct mw_draw_resident *draw_resident;
+    uint32_t draw_resident_serial;
+    uint32_t draw_resident_retired;
+    struct mw_draw_index_resident *draw_index_resident;
+    uint32_t draw_index_serial, draw_index_retired;
 
     uint32_t handle;
     uint32_t generation;
@@ -145,6 +158,13 @@ struct mw_ctx {
     uint8_t diag_frame_ready[3];
     struct mw_ctx *next_active;
 };
+
+static inline void mw_ctx_retire_wire_draws(mw_ctx *c)
+{
+    c->draw_cache_retired = c->draw_cache_serial;
+    c->draw_resident_retired = c->draw_resident_serial;
+    c->draw_index_retired = c->draw_index_serial;
+}
 
 /* zzapp_gl adds presentation timing and reads the physical RGB565 samples. */
 void mw_ctx_diag_add_wait(mw_ctx *c, uint32_t copy_us, uint32_t flip_us,

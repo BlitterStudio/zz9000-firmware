@@ -107,6 +107,11 @@ struct model {
     int fail_feed_on_yield;
     int fail_memfetch_commit;
     unsigned fail_memfetch_after_packet;
+    /* Once this many packets have been committed the FIFO reports no
+     * vacancy until the test restores it: a list stalls between envelopes. */
+    unsigned stall_after_packet;
+    /* Ring entries (bit per index) whose fences land at each yield. */
+    unsigned land_mask;
     unsigned command_count;
     /* Parser state carried across packets and envelopes: a DDR list chunk
      * may end inside a command. */
@@ -248,7 +253,9 @@ static void fifo_write(void *context, uint32_t offset, uint32_t value)
              model->packet_count >= model->fail_memfetch_after_packet))
             model->fifo[RIX_DRV_FIFO_ISR / sizeof(uint32_t)] = RIX_DRV_FIFO_ISR_ERRORS;
         model->fifo_words = 0U;
-        model->fifo_vacancy = FIFO_CAPACITY;
+        model->fifo_vacancy = model->stall_after_packet != 0U &&
+                              model->packet_count >= model->stall_after_packet ?
+                              0U : FIFO_CAPACITY;
     }
 }
 static uint32_t csr_read(void *context, uint32_t offset)
@@ -1681,6 +1688,9 @@ static void test_probe_version_compatibility(void)
     }
 }
 
+/* Inline packets (the default submit mode) still wait for a feed step after
+ * submit; only DDR lists are handed over by submit itself (see
+ * test_submit_feeds_ddr_lists_eagerly_in_order). */
 static void test_async_submit_queues_before_feed(void)
 {
     static struct model model;
@@ -1743,14 +1753,16 @@ static void test_async_memfetch_keeps_ring_and_fence_lifecycle(void)
     assert((backend.submitted_command_words[0] & 15U) == 0U);
     assert(model.cleaned_bytes ==
            backend.submitted_command_words[0] * sizeof(uint32_t));
-    assert(backend.ring_state[0] == MINIGL_RIX_RING_QUEUED);
-
-    assert(minigl_rix_backend_try_feed(&backend, RIX_DRV_FEED_SOURCE_SVC) ==
-           RIX_DRV_FEED_DONE);
+    /* Submit itself handed the list over: one two-word envelope, no wait for
+     * a later feed step. */
+    assert(backend.ring_state[0] == MINIGL_RIX_RING_RENDERING);
+    assert(model.packet_count == 2U);
     assert(model.last_tlf == 2U * sizeof(uint32_t));
     assert((model.packet[0] & 0xf0000000U) == RIX_DRV_MEMFETCH_ENVELOPE);
     assert(model.packet[1] == model.command_address[0]);
-    assert(backend.ring_state[0] == MINIGL_RIX_RING_RENDERING);
+    assert(minigl_rix_backend_try_feed(&backend, RIX_DRV_FEED_SOURCE_SVC) ==
+           RIX_DRV_FEED_DONE);
+    assert(model.packet_count == 2U);
     /* Retirement is demand-driven: the present poll observes fence and idle. */
     assert(minigl_rix_backend_poll(&backend));
     assert(backend.ring_state[0] == MINIGL_RIX_RING_FREE);
@@ -1787,11 +1799,14 @@ static void test_async_memfetch_error_publishes_accepted_envelope(void)
     minigl_rix_backend_set_state(&backend, &state);
     assert(minigl_rix_backend_clear(&backend, 64U, 64U, 0x03000000U,
                                     0x03100000U, GL_COLOR_BUFFER_BIT, 0U, 0U));
-    assert(minigl_rix_backend_submit(&backend));
+    /* A DDR list is fed at submit time: the FIFO error that follows the
+     * accepted envelope surfaces from submit itself. */
     model.fail_memfetch_after_packet = model.packet_count + 1U;
+    assert(!minigl_rix_backend_submit(&backend));
+    assert(backend.error);
+    assert(model.publish_count == 1U && model.published_address != 0U);
     assert(minigl_rix_backend_try_feed(&backend, RIX_DRV_FEED_SOURCE_SVC) ==
            RIX_DRV_FEED_ERROR);
-    assert(model.publish_count == 1U && model.published_address != 0U);
 }
 
 static void test_async_memfetch_abort_publishes_accepted_envelope(void)
@@ -1804,10 +1819,12 @@ static void test_async_memfetch_abort_publishes_accepted_envelope(void)
     minigl_rix_backend_set_state(&backend, &state);
     assert(minigl_rix_backend_clear(&backend, 64U, 64U, 0x03000000U,
                                     0x03100000U, GL_COLOR_BUFFER_BIT, 0U, 0U));
-    assert(minigl_rix_backend_submit(&backend));
+    /* Submit hands the list over at once; a full FIFO blocks that feed, which
+     * is not a submit failure. */
     model.fifo_vacancy = 1U;
-    assert(minigl_rix_backend_try_feed(&backend, RIX_DRV_FEED_SOURCE_SVC) ==
-           RIX_DRV_FEED_BLOCKED);
+    assert(minigl_rix_backend_submit(&backend));
+    assert(!backend.error);
+    assert(backend.ring_state[0] == MINIGL_RIX_RING_FEEDING);
     model.fifo_vacancy = FIFO_CAPACITY;
     model.complete_packets = 0U;
     assert(minigl_rix_backend_abort_feed(&backend) == RIX_DRV_FEED_BLOCKED);
@@ -1822,8 +1839,8 @@ static void test_queued_work_does_not_keep_a_retired_fence_published(void)
     card_pool_t pool;
     rasterix_fence_guard_hooks_t hooks = guard_hooks;
     uint32_t allocation;
-    uint8_t queued;
-    uint8_t retired;
+    uint8_t stalled;
+    uint8_t first;
 
     init_async_memfetch_backend(&backend, &model);
     hooks.context = &model;
@@ -1832,34 +1849,37 @@ static void test_queued_work_does_not_keep_a_retired_fence_published(void)
     assert(minigl_rix_backend_clear(&backend, 64U, 64U, 0x03000000U,
                                     0x03100000U, GL_COLOR_BUFFER_BIT, 0U, 0U));
     assert(minigl_rix_backend_submit(&backend));
-    assert(minigl_rix_backend_try_feed(&backend, RIX_DRV_FEED_SOURCE_SVC) ==
-           RIX_DRV_FEED_DONE);
-    for (retired = 0U; retired < 2U; ++retired)
-        if (backend.ring_state[retired] == MINIGL_RIX_RING_RENDERING)
+    for (first = 0U; first < 2U; ++first)
+        if (backend.ring_state[first] == MINIGL_RIX_RING_RENDERING)
             break;
-    assert(retired < 2U);
+    assert(first < 2U);
+    /* The first list's fence has landed and the engine is idle.  The next
+     * submit retires it before handing over its own list, whose feed stalls
+     * on a full FIFO before the first envelope is accepted: the stalled list
+     * must not keep the retired fence published. */
+    *(uint16_t *)(void *)(model.command[first] + COMMAND_BYTES -
+                          MINIGL_RIX_TEXTURE_PAGE_BYTES) =
+        (uint16_t)backend.pending_fence[first];
+    model.fifo_vacancy = 0U;
+    backend.driver.fifo_vacancy_estimate = 0U;
     assert(minigl_rix_backend_clear(&backend, 64U, 64U, 0x03200000U,
                                     0x03300000U, GL_COLOR_BUFFER_BIT, 0U, 0U));
     assert(minigl_rix_backend_submit(&backend));
-    for (queued = 0U; queued < 2U; ++queued)
-        if (backend.ring_state[queued] == MINIGL_RIX_RING_QUEUED)
+    for (stalled = 0U; stalled < 2U; ++stalled)
+        if (backend.ring_state[stalled] == MINIGL_RIX_RING_FEEDING)
             break;
-    assert(queued < 2U && queued != retired);
-    *(uint16_t *)(void *)(model.command[retired] + COMMAND_BYTES -
-                          MINIGL_RIX_TEXTURE_PAGE_BYTES) =
-        (uint16_t)backend.pending_fence[retired];
-    model.fifo_vacancy = 0U;
-    backend.driver.fifo_vacancy_estimate = 0U;
+    assert(stalled < 2U);
+    assert(backend.ring_state[1U - stalled] == MINIGL_RIX_RING_FREE);
+    assert(model.published_address == 0U && model.published_sequence == 0U);
     assert(minigl_rix_backend_try_feed(&backend, RIX_DRV_FEED_SOURCE_PARKED) ==
            RIX_DRV_FEED_BLOCKED);
-    assert(backend.ring_state[retired] == MINIGL_RIX_RING_FREE);
-    assert(backend.ring_state[queued] == MINIGL_RIX_RING_FEEDING);
+    assert(backend.ring_state[stalled] == MINIGL_RIX_RING_FEEDING);
     assert(model.published_address == 0U && model.published_sequence == 0U);
 
     assert(minigl_rix_backend_clear(&backend, 64U, 64U, 0x03400000U,
                                     0x03500000U, GL_COLOR_BUFFER_BIT, 0U, 0U));
     assert(minigl_rix_backend_submit(&backend));
-    assert(backend.ring_state[retired] == MINIGL_RIX_RING_QUEUED);
+    assert(backend.ring_state[1U - stalled] == MINIGL_RIX_RING_QUEUED);
     assert(minigl_rix_backend_abort_feed(&backend) == RIX_DRV_FEED_BLOCKED);
     minigl_rix_backend_abandon(&backend);
 
@@ -1911,20 +1931,20 @@ static void test_memfetch_triangle_batch_spans_envelopes(void)
                                          0x03100000U));
     for (index = 0U; index < 103U; ++index)
         assert(minigl_rix_backend_add_triangle(&backend, &a, &b, &c));
+    /* The idle kick in end_draw submits the batch (nothing else is queued or
+     * rendering) and submit feeds the whole list: both envelopes are
+     * accepted without any later feed step, the parser continuing inside the
+     * triangle the first chunk ends in. */
+    model.packet_count = 0U;
+    model.triangles_parsed = 0U;
+    model.publish_count = 0U;
     assert(minigl_rix_backend_end_draw(&backend, 0x03000000U, 0x03100000U));
     assert(minigl_rix_backend_submit(&backend));
     assert(backend.submitted_command_words[0] >
            RIX_DRV_MEMFETCH_CHUNK_WORDS);
-
-    model.packet_count = 0U;
-    model.triangles_parsed = 0U;
-    model.publish_count = 0U;
+    assert(backend.ring_state[0] == MINIGL_RIX_RING_RENDERING);
+    assert(model.publish_count != 0U && model.published_address != 0U);
     result = minigl_rix_backend_try_feed(&backend, RIX_DRV_FEED_SOURCE_SVC);
-    assert(result == RIX_DRV_FEED_PROGRESS);
-    assert(model.publish_count == 1U);
-    do
-        result = minigl_rix_backend_try_feed(&backend, RIX_DRV_FEED_SOURCE_SVC);
-    while (result == RIX_DRV_FEED_PROGRESS);
     assert(result == RIX_DRV_FEED_DONE);
     assert(minigl_rix_backend_available(&backend));
     assert(model.packet_count == 2U);
@@ -2009,11 +2029,17 @@ static void test_memfetch_abort_waits_for_list_fence(void)
                                          0x03100000U));
     for (index = 0U; index < 103U; ++index)
         assert(minigl_rix_backend_add_triangle(&backend, &a, &b, &c));
+    /* The first envelope is accepted at submit time and the FIFO then stalls,
+     * leaving the list half fed. */
+    model.packet_count = 0U;
+    model.stall_after_packet = 1U;
+    backend.driver.fifo_vacancy_estimate = 2U;
     assert(minigl_rix_backend_end_draw(&backend, 0x03000000U, 0x03100000U));
     assert(minigl_rix_backend_submit(&backend));
-    model.packet_count = 0U;
-    assert(minigl_rix_backend_try_feed(&backend, RIX_DRV_FEED_SOURCE_SVC) ==
-           RIX_DRV_FEED_PROGRESS);
+    assert(model.packet_count == 1U);
+    assert(backend.ring_state[0] == MINIGL_RIX_RING_FEEDING);
+    model.stall_after_packet = 0U;
+    model.fifo_vacancy = FIFO_CAPACITY;
 
     model.fifo[RIX_DRV_FIFO_TDFR / 4U] = 0U;
     assert(minigl_rix_backend_abort_feed(&backend) == RIX_DRV_FEED_BLOCKED);
@@ -2063,6 +2089,11 @@ static void test_idle_feed_steps_touch_no_hardware(void)
         assert(minigl_rix_backend_clear(&backend, 64U, 64U, 0x03000000U,
                                         0x03100000U, GL_COLOR_BUFFER_BIT, 0U, 0U));
         assert(minigl_rix_backend_submit(&backend));
+        /* DDR lists are handed over by submit; inline packets wait for a
+         * feed step. */
+        assert(backend.ring_state[0] == (mode == RIX_DRV_SUBMIT_MEMFETCH ?
+                                         MINIGL_RIX_RING_RENDERING :
+                                         MINIGL_RIX_RING_QUEUED));
         assert(minigl_rix_backend_try_feed(&backend, RIX_DRV_FEED_SOURCE_SVC) ==
                RIX_DRV_FEED_DONE);
         assert(backend.ring_state[0] == MINIGL_RIX_RING_RENDERING);
@@ -2768,6 +2799,565 @@ static void test_pinned_reupload_keeps_storage_when_drain_fails(void)
     assert(stored_texel(&backend, &backend.textures[0], 0U) == old);
 }
 
+/* ---- Eager feed, in-order retirement, per-target readiness ---- */
+
+#define TARGET_A 0x03000000U
+#define TARGET_B 0x03200000U
+#define TARGET_C 0x03400000U
+#define TARGET_D 0x03600000U
+#define TARGET_UNUSED 0x03800000U
+#define EAGER_DEPTH 0x03100000U
+
+/* Eight-buffer asynchronous DDR-list backend.  After init no fence lands on
+ * its own and the engine reports busy: the test decides when each fence
+ * arrives and when the engine goes idle. */
+static void init_eager(MiniGLRixBackend *backend, struct model *model)
+{
+    MiniGLRixPlatform io;
+    ZZ9KMiniGLPacketSetState state = state16();
+
+    memset(model, 0, sizeof(*model));
+    model->command_count = MINIGL_RIX_COMMAND_BUFFERS;
+    model->texture_bytes = sizeof(model->textures);
+    model->fifo_vacancy = FIFO_CAPACITY;
+    model->complete_packets = 1U;
+    model->csr[RIX_DRV_CSR_IDENTITY / 4U] = RIX_DRV_IDENTITY_VALUE;
+    model->csr[RIX_DRV_CSR_VERSION / 4U] = RIX_DRV_VERSION_VALUE;
+    model->csr[RIX_DRV_CSR_STATUS / 4U] = RIX_DRV_STATUS_IDLE;
+    io = platform(model);
+    io.async_feed = 1U;
+    io.command_buffer_count = MINIGL_RIX_COMMAND_BUFFERS;
+    io.submit_mode = RIX_DRV_SUBMIT_MEMFETCH;
+    minigl_rix_backend_init(backend, &io);
+    assert(minigl_rix_backend_available(backend));
+    model->complete_packets = 0U;
+    model->csr[RIX_DRV_CSR_STATUS / 4U] = RIX_DRV_STATUS_BUSY;
+    minigl_rix_backend_set_state(backend, &state);
+}
+
+static void land_fence(struct model *model, const MiniGLRixBackend *backend,
+                       unsigned index)
+{
+    *(uint16_t *)(void *)(model->command[index] + COMMAND_BYTES -
+                          MINIGL_RIX_TEXTURE_PAGE_BYTES) =
+        (uint16_t)backend->pending_fence[index];
+}
+
+static void set_engine_idle(struct model *model, int idle)
+{
+    model->csr[RIX_DRV_CSR_STATUS / 4U] = idle ? RIX_DRV_STATUS_IDLE :
+                                                 RIX_DRV_STATUS_BUSY;
+}
+
+/* Clears `color` and submits it as its own ring entry; returns the entry. */
+static unsigned submit_clear_to(MiniGLRixBackend *backend, uint32_t color)
+{
+    assert(minigl_rix_backend_clear(backend, 64U, 64U, color, EAGER_DEPTH,
+                                    GL_COLOR_BUFFER_BIT, 0U, 0U));
+    assert(minigl_rix_backend_submit(backend));
+    return backend->current_buffer;
+}
+
+/* Records one triangle into `color` without submitting. */
+static void record_draw_to(MiniGLRixBackend *backend, uint32_t color)
+{
+    MiniGLRixVertex a = vertex(10.0f, 10.0f, 0xff0000ffU);
+    MiniGLRixVertex b = vertex(60.0f, 10.0f, 0x00ff00ffU);
+    MiniGLRixVertex c = vertex(10.0f, 60.0f, 0x0000ffffU);
+
+    assert(minigl_rix_backend_begin_draw(backend, 64U, 64U, color, EAGER_DEPTH));
+    assert(minigl_rix_backend_add_triangle(backend, &a, &b, &c));
+    assert(minigl_rix_backend_end_draw(backend, color, EAGER_DEPTH));
+}
+
+static unsigned ring_busy_count(const MiniGLRixBackend *backend)
+{
+    unsigned index, count = 0U;
+
+    for (index = 0U; index < backend->command_buffer_count; ++index)
+        if (backend->ring_state[index] != MINIGL_RIX_RING_FREE)
+            ++count;
+    return count;
+}
+
+/* Lands, at every yield, the fences of the ring entries selected by
+ * land_mask, and reports idle once idle_after_yields yields have happened. */
+static void yield_land_masked(void *context)
+{
+    struct model *model = context;
+    MiniGLRixBackend *backend = model->yield_backend;
+    unsigned index;
+
+    assert(backend != NULL);
+    ++model->yield_calls;
+    for (index = 0U; index < backend->command_buffer_count; ++index)
+        if (((model->land_mask >> index) & 1U) != 0U &&
+            backend->ring_state[index] == MINIGL_RIX_RING_RENDERING)
+            land_fence(model, backend, index);
+    if (model->idle_after_yields != 0U &&
+        model->yield_calls >= model->idle_after_yields)
+        set_engine_idle(model, 1);
+}
+
+/* A DDR list is handed to RasterIX by submit itself; a stalled FIFO keeps
+ * later lists queued behind it and the feed order is the submission order. */
+static void test_submit_feeds_ddr_lists_eagerly_in_order(void)
+{
+    static struct model model;
+    MiniGLRixBackend backend;
+    unsigned first, second, third;
+    unsigned packets;
+
+    init_eager(&backend, &model);
+    packets = model.packet_count;
+    first = submit_clear_to(&backend, TARGET_A);
+    assert(backend.ring_state[first] == MINIGL_RIX_RING_RENDERING);
+    assert(model.packet_count == packets + 1U);
+    second = submit_clear_to(&backend, TARGET_B);
+    assert(backend.ring_state[second] == MINIGL_RIX_RING_RENDERING);
+    assert(model.packet_count == packets + 2U);
+    assert(minigl_rix_backend_work_outstanding(&backend));
+    assert(!minigl_rix_backend_feed_pending(&backend));
+
+    /* No vacancy: the list is accepted into the ring and waits for the FIFO,
+     * and the list behind it waits for that one. */
+    model.fifo_vacancy = 0U;
+    backend.driver.fifo_vacancy_estimate = 0U;
+    third = submit_clear_to(&backend, TARGET_C);
+    assert(backend.ring_state[third] == MINIGL_RIX_RING_FEEDING);
+    assert(model.packet_count == packets + 2U);
+    assert(minigl_rix_backend_feed_pending(&backend));
+    model.fifo_vacancy = FIFO_CAPACITY;
+    assert(minigl_rix_backend_try_feed(&backend, RIX_DRV_FEED_SOURCE_SVC) ==
+           RIX_DRV_FEED_DONE);
+    assert(backend.ring_state[third] == MINIGL_RIX_RING_RENDERING);
+    assert(model.packet_count == packets + 3U);
+    assert(!minigl_rix_backend_feed_pending(&backend));
+}
+
+/* Entries retire oldest first.  The older entry needs the next entry's fence
+ * (or an idle engine); the newest one needs an idle engine. */
+static void test_retirement_is_in_order_with_one_entry_lag(void)
+{
+    static struct model model;
+    MiniGLRixBackend backend;
+    unsigned older, newer;
+
+    /* The older fence alone proves nothing while the engine is busy. */
+    init_eager(&backend, &model);
+    older = submit_clear_to(&backend, TARGET_A);
+    newer = submit_clear_to(&backend, TARGET_B);
+    assert(older != newer);
+    assert(backend.ring_state[older] == MINIGL_RIX_RING_RENDERING &&
+           backend.ring_state[newer] == MINIGL_RIX_RING_RENDERING);
+    land_fence(&model, &backend, older);
+    assert(!minigl_rix_backend_poll(&backend));
+    assert(backend.ring_state[older] == MINIGL_RIX_RING_RENDERING &&
+           backend.ring_state[newer] == MINIGL_RIX_RING_RENDERING);
+    /* The newer fence lands: the older entry retires, the newer one stays. */
+    land_fence(&model, &backend, newer);
+    assert(!minigl_rix_backend_poll(&backend));
+    assert(backend.ring_state[older] == MINIGL_RIX_RING_FREE);
+    assert(!backend.pending[older] && backend.pending_fence[older] == 0U);
+    assert(backend.ring_state[newer] == MINIGL_RIX_RING_RENDERING);
+    assert(minigl_rix_backend_work_outstanding(&backend));
+    /* The engine going idle retires the newest. */
+    set_engine_idle(&model, 1);
+    assert(minigl_rix_backend_poll(&backend));
+    assert(backend.ring_state[newer] == MINIGL_RIX_RING_FREE);
+    assert(!minigl_rix_backend_work_outstanding(&backend));
+
+    /* A newer fence landing ahead of an older one retires nothing, idle or
+     * not: the older entry has not been proven finished. */
+    init_eager(&backend, &model);
+    older = submit_clear_to(&backend, TARGET_A);
+    newer = submit_clear_to(&backend, TARGET_B);
+    land_fence(&model, &backend, newer);
+    assert(!minigl_rix_backend_poll(&backend));
+    set_engine_idle(&model, 1);
+    assert(!minigl_rix_backend_poll(&backend));
+    assert(backend.ring_state[older] == MINIGL_RIX_RING_RENDERING &&
+           backend.ring_state[newer] == MINIGL_RIX_RING_RENDERING);
+    land_fence(&model, &backend, older);
+    assert(minigl_rix_backend_poll(&backend));
+    assert(!minigl_rix_backend_work_outstanding(&backend));
+
+    /* An idle engine retires the older entry whose fence landed even though
+     * the newer fence has not. */
+    init_eager(&backend, &model);
+    older = submit_clear_to(&backend, TARGET_A);
+    newer = submit_clear_to(&backend, TARGET_B);
+    land_fence(&model, &backend, older);
+    set_engine_idle(&model, 1);
+    assert(!minigl_rix_backend_poll(&backend));
+    assert(backend.ring_state[older] == MINIGL_RIX_RING_FREE);
+    assert(backend.ring_state[newer] == MINIGL_RIX_RING_RENDERING);
+}
+
+/* Retiring an entry releases that entry's texture pins and nothing else's. */
+static void test_retirement_releases_only_the_retired_entry_pins(void)
+{
+    static struct model model;
+    static uint32_t image[16U * 16U];
+    MiniGLRixBackend backend;
+    const MiniGLRixTexture *first, *second;
+    size_t first_slot, second_slot;
+    unsigned older, newer;
+
+    init_eager(&backend, &model);
+    assert(minigl_rix_backend_upload_texture(&backend, 1U, 0U, image, 16U, 16U,
+                                              ZZ9K_MGL_TEX_INTERNAL_RGB));
+    assert(minigl_rix_backend_upload_texture(&backend, 2U, 0U, image, 16U, 16U,
+                                              ZZ9K_MGL_TEX_INTERNAL_RGB));
+    minigl_rix_backend_tex_params(&backend, 1U, GL_NEAREST, GL_NEAREST,
+                                  GL_REPEAT, GL_REPEAT);
+    minigl_rix_backend_tex_params(&backend, 2U, GL_NEAREST, GL_NEAREST,
+                                  GL_REPEAT, GL_REPEAT);
+    first = find_texture(&backend, 1U);
+    second = find_texture(&backend, 2U);
+    assert(first != NULL && second != NULL && first != second);
+    first_slot = (size_t)(first - backend.textures);
+    second_slot = (size_t)(second - backend.textures);
+
+    assert(submit_texture(&backend, 1U));
+    assert(minigl_rix_backend_submit(&backend));
+    older = backend.current_buffer;
+    assert(submit_texture(&backend, 2U));
+    assert(minigl_rix_backend_submit(&backend));
+    newer = backend.current_buffer;
+    assert(older != newer);
+    assert(backend.ring_state[older] == MINIGL_RIX_RING_RENDERING &&
+           backend.ring_state[newer] == MINIGL_RIX_RING_RENDERING);
+    assert(backend.pending_pins[older][first_slot] != 0U &&
+           backend.pending_pins[older][second_slot] == 0U);
+    assert(backend.pending_pins[newer][second_slot] != 0U &&
+           backend.pending_pins[newer][first_slot] == 0U);
+    assert(backend.textures[first_slot].pin_count == 1U);
+    assert(backend.textures[second_slot].pin_count == 1U);
+    /* A deleted texture is freed by the retirement of the last entry using
+     * it, not before. */
+    minigl_rix_backend_delete_texture(&backend, 1U);
+    assert(backend.textures[first_slot].valid &&
+           backend.textures[first_slot].deleted);
+
+    land_fence(&model, &backend, older);
+    assert(!minigl_rix_backend_poll(&backend));
+    assert(backend.textures[first_slot].pin_count == 1U &&
+           backend.textures[second_slot].pin_count == 1U);
+
+    land_fence(&model, &backend, newer);
+    assert(!minigl_rix_backend_poll(&backend));
+    assert(backend.ring_state[older] == MINIGL_RIX_RING_FREE);
+    assert(backend.textures[first_slot].pin_count == 0U);
+    assert(!backend.textures[first_slot].valid);
+    assert(backend.pending_pins[older][first_slot] == 0U);
+    assert(backend.ring_state[newer] == MINIGL_RIX_RING_RENDERING);
+    assert(backend.textures[second_slot].valid &&
+           backend.textures[second_slot].pin_count == 1U);
+    assert(backend.pending_pins[newer][second_slot] != 0U);
+
+    set_engine_idle(&model, 1);
+    assert(minigl_rix_backend_poll(&backend));
+    assert(backend.textures[second_slot].pin_count == 0U);
+    assert(backend.pending_pins[newer][second_slot] == 0U);
+}
+
+/* target_ready is per colour address: it follows only the entries (and the
+ * recorded work) that draw into that address. */
+static void test_target_ready_follows_its_own_entries(void)
+{
+    static struct model model;
+    MiniGLRixBackend backend;
+    unsigned e0, e1, e2, e3;
+
+    init_eager(&backend, &model);
+    e0 = submit_clear_to(&backend, TARGET_A);
+    e1 = submit_clear_to(&backend, TARGET_B);
+    e2 = submit_clear_to(&backend, TARGET_C);
+    assert(!minigl_rix_backend_target_ready(&backend, TARGET_A));
+    assert(!minigl_rix_backend_target_ready(&backend, TARGET_B));
+    assert(!minigl_rix_backend_target_ready(&backend, TARGET_C));
+    assert(minigl_rix_backend_target_ready(&backend, TARGET_UNUSED));
+
+    /* The first two fences landed: the first entry retires behind the
+     * second's fence, the second waits for the third. */
+    land_fence(&model, &backend, e0);
+    land_fence(&model, &backend, e1);
+    assert(minigl_rix_backend_target_ready(&backend, TARGET_A));
+    assert(backend.ring_state[e0] == MINIGL_RIX_RING_FREE);
+    assert(!minigl_rix_backend_target_ready(&backend, TARGET_B));
+    assert(!minigl_rix_backend_target_ready(&backend, TARGET_C));
+    assert(backend.ring_state[e1] == MINIGL_RIX_RING_RENDERING &&
+           backend.ring_state[e2] == MINIGL_RIX_RING_RENDERING);
+
+    /* Work recorded for a target but not yet submitted keeps it unready,
+     * and does not affect the others. */
+    record_draw_to(&backend, TARGET_D);
+    assert(backend.op_count != 0U && ring_busy_count(&backend) == 2U);
+    assert(!minigl_rix_backend_target_ready(&backend, TARGET_D));
+    assert(minigl_rix_backend_target_ready(&backend, TARGET_A));
+    assert(minigl_rix_backend_target_ready(&backend, TARGET_UNUSED));
+    assert(!minigl_rix_backend_target_ready(&backend, TARGET_B));
+
+    land_fence(&model, &backend, e2);
+    assert(minigl_rix_backend_target_ready(&backend, TARGET_B));
+    assert(backend.ring_state[e1] == MINIGL_RIX_RING_FREE);
+    assert(!minigl_rix_backend_target_ready(&backend, TARGET_C));
+    assert(!minigl_rix_backend_target_ready(&backend, TARGET_D));
+
+    set_engine_idle(&model, 1);
+    assert(minigl_rix_backend_target_ready(&backend, TARGET_C));
+    assert(backend.ring_state[e2] == MINIGL_RIX_RING_FREE);
+    /* The recorded draw is still not handed over by a readiness query. */
+    assert(!minigl_rix_backend_target_ready(&backend, TARGET_D));
+    assert(backend.op_count != 0U);
+
+    /* Once submitted it is an entry like any other. */
+    set_engine_idle(&model, 0);
+    assert(minigl_rix_backend_submit(&backend));
+    e3 = backend.current_buffer;
+    assert(backend.ring_state[e3] == MINIGL_RIX_RING_RENDERING);
+    assert(!minigl_rix_backend_target_ready(&backend, TARGET_D));
+    land_fence(&model, &backend, e3);
+    assert(!minigl_rix_backend_target_ready(&backend, TARGET_D));
+    set_engine_idle(&model, 1);
+    assert(minigl_rix_backend_target_ready(&backend, TARGET_D));
+    assert(!minigl_rix_backend_work_outstanding(&backend));
+}
+
+/* wait_target returns when its own target's entries retire, while a later
+ * entry is still rendering; drain still waits for everything. */
+static void test_wait_target_does_not_wait_for_later_targets(void)
+{
+    static struct model model;
+    static uint32_t target[512] __attribute__((aligned(MINIGL_RIX_TEXTURE_PAGE_BYTES)));
+    MiniGLRixBackend backend;
+    unsigned e0, e1;
+    unsigned yields;
+
+    /* wait_target(A): both fences land at the first yield, the engine never
+     * goes idle within the test's yields. */
+    init_eager(&backend, &model);
+    model.yield_backend = &backend;
+    backend.platform.yield_wait = yield_land_masked;
+    e0 = submit_clear_to(&backend, TARGET_A);
+    e1 = submit_clear_to(&backend, TARGET_B);
+    model.land_mask = (1U << e0) | (1U << e1);
+    model.idle_after_yields = 6U;
+    assert(minigl_rix_backend_wait_target(&backend, TARGET_A));
+    assert(model.yield_calls != 0U && model.yield_calls < 6U);
+    yields = model.yield_calls;
+    assert(backend.ring_state[e0] == MINIGL_RIX_RING_FREE);
+    assert(backend.ring_state[e1] == MINIGL_RIX_RING_RENDERING);
+    assert(minigl_rix_backend_work_outstanding(&backend));
+    assert(!minigl_rix_backend_target_ready(&backend, TARGET_B));
+    /* A target with no work is ready without waiting. */
+    assert(minigl_rix_backend_wait_target(&backend, TARGET_UNUSED));
+    assert(model.yield_calls == yields);
+    /* The later target waits for the idle engine. */
+    assert(minigl_rix_backend_wait_target(&backend, TARGET_B));
+    assert(model.yield_calls >= 6U);
+    assert(backend.ring_state[e1] == MINIGL_RIX_RING_FREE);
+    assert(!minigl_rix_backend_work_outstanding(&backend));
+
+    /* drain waits for the later entry too. */
+    init_eager(&backend, &model);
+    model.yield_backend = &backend;
+    backend.platform.yield_wait = yield_land_masked;
+    e0 = submit_clear_to(&backend, TARGET_A);
+    e1 = submit_clear_to(&backend, TARGET_B);
+    model.land_mask = (1U << e0) | (1U << e1);
+    model.idle_after_yields = 6U;
+    assert(minigl_rix_backend_drain(&backend));
+    assert(model.yield_calls >= 6U);
+    assert(backend.ring_state[e0] == MINIGL_RIX_RING_FREE &&
+           backend.ring_state[e1] == MINIGL_RIX_RING_FREE);
+
+    /* Recorded, unsubmitted work for the awaited target is submitted first. */
+    init_eager(&backend, &model);
+    model.yield_backend = &backend;
+    backend.platform.yield_wait = yield_land_masked;
+    e0 = submit_clear_to(&backend, TARGET_A);
+    record_draw_to(&backend, TARGET_B);
+    assert(backend.op_count != 0U && ring_busy_count(&backend) == 1U);
+    model.land_mask = 0xffU;
+    model.idle_after_yields = 6U;
+    assert(minigl_rix_backend_wait_target(&backend, TARGET_B));
+    assert(backend.op_count == 0U);
+    assert(ring_busy_count(&backend) <= 1U);
+    assert(!minigl_rix_backend_work_outstanding(&backend) ||
+           model.yield_calls >= 6U);
+
+    /* prepare_target for a reused target waits for that target only. */
+    init_eager(&backend, &model);
+    model.yield_backend = &backend;
+    backend.platform.yield_wait = yield_land_masked;
+    e0 = submit_clear_to(&backend, (uint32_t)(uintptr_t)target);
+    e1 = submit_clear_to(&backend, TARGET_B);
+    model.land_mask = (1U << e0) | (1U << e1);
+    model.idle_after_yields = 6U;
+    assert(minigl_rix_backend_prepare_target(&backend, target, 4U));
+    assert(model.yield_calls != 0U && model.yield_calls < 6U);
+    assert(backend.ring_state[e0] == MINIGL_RIX_RING_FREE);
+    assert(backend.ring_state[e1] == MINIGL_RIX_RING_RENDERING);
+}
+
+/* end_draw hands the recorded ops to RasterIX at once when the ring is
+ * empty, and keeps recording when work is outstanding. */
+static void test_end_draw_idle_kick(void)
+{
+    static struct model model;
+    MiniGLRixBackend backend;
+    unsigned packets;
+
+    /* Empty ring: the first draw becomes an entry. */
+    init_eager(&backend, &model);
+    packets = model.packet_count;
+    assert(ring_busy_count(&backend) == 0U);
+    record_draw_to(&backend, TARGET_A);
+    assert(backend.op_count == 0U);
+    assert(ring_busy_count(&backend) == 1U);
+    assert(backend.ring_state[backend.current_buffer] ==
+           MINIGL_RIX_RING_RENDERING);
+    assert(model.packet_count == packets + 1U);
+    assert(backend.frame_active);
+
+    /* Work outstanding: the next draw stays recorded. */
+    record_draw_to(&backend, TARGET_A);
+    assert(backend.op_count == 1U);
+    assert(ring_busy_count(&backend) == 1U);
+    assert(model.packet_count == packets + 1U);
+    record_draw_to(&backend, TARGET_A);
+    assert(backend.op_count != 0U && ring_busy_count(&backend) == 1U);
+    assert(model.packet_count == packets + 1U);
+
+    /* The outstanding entry finished (fence landed, engine idle): end_draw
+     * observes that, retires it and hands over what was recorded. */
+    land_fence(&model, &backend, backend.current_buffer);
+    set_engine_idle(&model, 1);
+    record_draw_to(&backend, TARGET_A);
+    assert(backend.op_count == 0U);
+    assert(ring_busy_count(&backend) == 1U);
+    assert(model.packet_count == packets + 2U);
+
+    /* Inline packets are queued by the kick, not fed. */
+    init_async8(&backend, &model, 0);
+    assert(ring_busy_count(&backend) == 0U);
+    record_draw_to(&backend, TARGET_A);
+    assert(backend.op_count == 0U);
+    assert(ring_busy_count(&backend) == 1U);
+    assert(backend.ring_state[backend.current_buffer] == MINIGL_RIX_RING_QUEUED);
+    record_draw_to(&backend, TARGET_A);
+    assert(backend.op_count == 1U && ring_busy_count(&backend) == 1U);
+
+    /* A synchronous backend keeps recording until submit or drain. */
+    init_backend(&backend, &model, TEXTURE_SLOTS);
+    {
+        ZZ9KMiniGLPacketSetState state = state16();
+
+        minigl_rix_backend_set_state(&backend, &state);
+    }
+    packets = model.packet_count;
+    record_draw_to(&backend, TARGET_A);
+    assert(backend.op_count == 1U);
+    assert(model.packet_count == packets);
+    assert(minigl_rix_backend_drain(&backend));
+    assert(model.packet_count > packets);
+}
+
+/* The idle kick submits what was recorded but leaves the frame open.  A draw
+ * or clear for another colour target arriving next must start a new frame
+ * on that target, not be recorded against the previous one. */
+static void test_target_change_after_idle_kick_starts_a_new_frame(void)
+{
+    static struct model model;
+    MiniGLRixBackend backend;
+    unsigned kicked, next;
+
+    init_eager(&backend, &model);
+    record_draw_to(&backend, TARGET_A);
+    assert(backend.op_count == 0U && ring_busy_count(&backend) == 1U);
+    kicked = backend.current_buffer;
+    assert(backend.pending_color_address[kicked] == TARGET_A);
+
+    /* begin_draw for the other target must open a frame on it. */
+    assert(minigl_rix_backend_begin_draw(&backend, 64U, 64U, TARGET_B,
+                                         EAGER_DEPTH));
+    assert(backend.color_address == TARGET_B);
+    minigl_rix_backend_abort_draw(&backend);
+    record_draw_to(&backend, TARGET_B);
+    assert(backend.color_address == TARGET_B);
+    assert(backend.op_count == 1U);
+    assert(minigl_rix_backend_submit(&backend));
+    next = backend.current_buffer;
+    assert(next != kicked);
+    assert(backend.pending_color_address[next] == TARGET_B);
+    assert(backend.pending_color_address[kicked] == TARGET_A);
+    assert(!minigl_rix_backend_target_ready(&backend, TARGET_B));
+
+    /* The same through clear. */
+    init_eager(&backend, &model);
+    record_draw_to(&backend, TARGET_A);
+    assert(backend.op_count == 0U && ring_busy_count(&backend) == 1U);
+    assert(minigl_rix_backend_clear(&backend, 64U, 64U, TARGET_B, EAGER_DEPTH,
+                                    GL_COLOR_BUFFER_BIT, 0U, 0U));
+    assert(backend.color_address == TARGET_B);
+    assert(minigl_rix_backend_submit(&backend));
+    assert(backend.pending_color_address[backend.current_buffer] == TARGET_B);
+}
+
+/* The 32-bit submission and feed sequences wrap (skipping zero) while
+ * entries are outstanding: retirement keeps the submission order. */
+static void test_retirement_order_survives_sequence_wrap(void)
+{
+    static struct model model;
+    MiniGLRixBackend backend;
+    unsigned entry[4];
+    unsigned index;
+
+    init_eager(&backend, &model);
+    assert(ring_busy_count(&backend) == 0U);
+    backend.next_submission_sequence = UINT32_MAX - 2U;
+    backend.next_feed_sequence = UINT32_MAX - 1U;
+    entry[0] = submit_clear_to(&backend, TARGET_A);
+    entry[1] = submit_clear_to(&backend, TARGET_B);
+    entry[2] = submit_clear_to(&backend, TARGET_C);
+    entry[3] = submit_clear_to(&backend, TARGET_D);
+    assert(backend.submission_sequence[entry[0]] == UINT32_MAX - 1U);
+    assert(backend.submission_sequence[entry[1]] == UINT32_MAX);
+    assert(backend.submission_sequence[entry[2]] == 1U);
+    assert(backend.submission_sequence[entry[3]] == 2U);
+    assert(backend.next_feed_sequence == 3U);
+    for (index = 0U; index < 4U; ++index)
+        assert(backend.ring_state[entry[index]] == MINIGL_RIX_RING_RENDERING);
+
+    /* Landing the oldest alone retires nothing; every further landing
+     * retires the entry before it, in submission order, across the wrap. */
+    land_fence(&model, &backend, entry[0]);
+    assert(!minigl_rix_backend_poll(&backend));
+    assert(ring_busy_count(&backend) == 4U);
+    land_fence(&model, &backend, entry[1]);
+    assert(!minigl_rix_backend_poll(&backend));
+    assert(backend.ring_state[entry[0]] == MINIGL_RIX_RING_FREE);
+    assert(backend.ring_state[entry[1]] == MINIGL_RIX_RING_RENDERING);
+    land_fence(&model, &backend, entry[2]);
+    assert(!minigl_rix_backend_poll(&backend));
+    assert(backend.ring_state[entry[1]] == MINIGL_RIX_RING_FREE);
+    assert(backend.ring_state[entry[2]] == MINIGL_RIX_RING_RENDERING);
+    land_fence(&model, &backend, entry[3]);
+    assert(!minigl_rix_backend_poll(&backend));
+    assert(backend.ring_state[entry[2]] == MINIGL_RIX_RING_FREE);
+    assert(backend.ring_state[entry[3]] == MINIGL_RIX_RING_RENDERING);
+    set_engine_idle(&model, 1);
+    assert(minigl_rix_backend_poll(&backend));
+    assert(ring_busy_count(&backend) == 0U);
+
+    /* The ring keeps working after the wrap, reusing the freed entries. */
+    entry[0] = submit_clear_to(&backend, TARGET_A);
+    assert(backend.submission_sequence[entry[0]] == 3U);
+    assert(backend.ring_state[entry[0]] == MINIGL_RIX_RING_RENDERING);
+}
+
 int main(void)
 {
     test_probe_version_compatibility();
@@ -2798,6 +3388,14 @@ int main(void)
     test_bounded_drain_feed_error_is_not_success();
     test_async_poll_feed_error_is_not_success();
     test_pinned_reupload_keeps_storage_when_drain_fails();
+    test_submit_feeds_ddr_lists_eagerly_in_order();
+    test_retirement_is_in_order_with_one_entry_lag();
+    test_retirement_releases_only_the_retired_entry_pins();
+    test_target_ready_follows_its_own_entries();
+    test_wait_target_does_not_wait_for_later_targets();
+    test_end_draw_idle_kick();
+    test_target_change_after_idle_kick_starts_a_new_frame();
+    test_retirement_order_survives_sequence_wrap();
     MiniGLRixBackend backend;
     static struct model model;
     MiniGLRixPlatform io;

@@ -5,6 +5,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <sys/mman.h>
+#include <ucontext.h>
 
 #include "aar/app.h"
 #include "aar/ext_zz9000.h"
@@ -2291,8 +2292,333 @@ static void test_user_tables_and_state_are_per_record(void)
     teardown_dispatch();
 }
 
+/* ---- the scalar GL fast path ------------------------------------------- */
+
+static uint32_t fast_enable_arg;
+static unsigned fast_enable_calls;
+static uint32_t fast_bind_args[2];
+static uint32_t fast_viewport_args[4];
+static uint32_t fast_copy_args[8];
+static uint32_t fast_vertex3f_words[3];
+
+static void mock_fast_enable(uint32_t cap)
+{
+    fast_enable_arg = cap;
+    ++fast_enable_calls;
+}
+static void mock_fast_vertex3f(float x, float y, float z)
+{
+    memcpy(&fast_vertex3f_words[0], &x, sizeof(x));
+    memcpy(&fast_vertex3f_words[1], &y, sizeof(y));
+    memcpy(&fast_vertex3f_words[2], &z, sizeof(z));
+}
+static void mock_fast_bind(uint32_t target, uint32_t texture)
+{
+    fast_bind_args[0] = target;
+    fast_bind_args[1] = texture;
+}
+static void mock_fast_viewport(int32_t x, int32_t y, int32_t w, int32_t h)
+{
+    fast_viewport_args[0] = (uint32_t)x;
+    fast_viewport_args[1] = (uint32_t)y;
+    fast_viewport_args[2] = (uint32_t)w;
+    fast_viewport_args[3] = (uint32_t)h;
+}
+/* Eight words: four in registers, four on the user's stack. Written as the
+ * dispatcher hands words over on this 64-bit host (see the note above
+ * mock_file_seek_words). */
+static void mock_fast_copy_words(uint32_t w0, uint32_t w1, uint32_t w2,
+                                 uint32_t w3, uint32_t w4, uint32_t w5,
+                                 uint32_t w6, uint32_t w7, uint32_t w8,
+                                 uint32_t w9, uint32_t w10, uint32_t w11)
+{
+    (void)w8; (void)w9; (void)w10; (void)w11;
+    fast_copy_args[0] = w0; fast_copy_args[1] = w1;
+    fast_copy_args[2] = w2; fast_copy_args[3] = w3;
+    fast_copy_args[4] = w4; fast_copy_args[5] = w5;
+    fast_copy_args[6] = w6; fast_copy_args[7] = w7;
+}
+
+static void fast_state_clear(void)
+{
+    fast_enable_arg = 0U;
+    fast_enable_calls = 0U;
+    memset(fast_bind_args, 0, sizeof(fast_bind_args));
+    memset(fast_viewport_args, 0, sizeof(fast_viewport_args));
+    memset(fast_copy_args, 0, sizeof(fast_copy_args));
+    memset(fast_vertex3f_words, 0, sizeof(fast_vertex3f_words));
+}
+
+static void test_scalar_gl_fast_path(void)
+{
+    zzapp_svc_frame_t frame;
+    const uint32_t begin = ZZAPP_SVC_GL_FIRST + gl_slot(offsetof(aar_gl, Begin));
+
+    setup_dispatch();
+    fast_state_clear();
+    gl.Enable = mock_fast_enable;
+    gl.BindTexture = mock_fast_bind;
+    gl.Viewport = mock_fast_viewport;
+    gl.CopyTexSubImage2D = (void (*)(uint32_t, int32_t, int32_t, int32_t,
+                                     int32_t, int32_t, int32_t, int32_t))(void *)
+                        mock_fast_copy_words;
+    dispatch(api_slot(offsetof(aar_api, gl_bind)), &frame, (uint32_t[9]){ 1U });
+    CHECK(frame.r[0] != 0U);
+    zzapp_kernel_set_current_thread(0);
+    /* A scalar call with one word: the module entry sees it. */
+    dispatch(ZZAPP_SVC_GL_FIRST + gl_slot(offsetof(aar_gl, Enable)),
+             &frame, (uint32_t[9]){ 0x0b71U });
+    CHECK(fast_enable_calls == 1U && fast_enable_arg == 0x0b71U);
+    CHECK(frame.r[0] != (uint32_t)AAR_E_FAULT && frame.r[0] != (uint32_t)AAR_E_NOSYS);
+    /* Two and four words. */
+    dispatch(ZZAPP_SVC_GL_FIRST + gl_slot(offsetof(aar_gl, BindTexture)),
+             &frame, (uint32_t[9]){ 0x0de1U, 7U });
+    CHECK(fast_bind_args[0] == 0x0de1U && fast_bind_args[1] == 7U);
+    dispatch(ZZAPP_SVC_GL_FIRST + gl_slot(offsetof(aar_gl, Viewport)),
+             &frame, (uint32_t[9]){ 1U, 2U, 3U, 4U });
+    CHECK(fast_viewport_args[0] == 1U && fast_viewport_args[1] == 2U &&
+          fast_viewport_args[2] == 3U && fast_viewport_args[3] == 4U);
+    /* Eight words: the last four come from the checked user stack. */
+    dispatch(ZZAPP_SVC_GL_FIRST + gl_slot(offsetof(aar_gl, CopyTexSubImage2D)),
+             &frame, (uint32_t[9]){ 11U, 12U, 13U, 14U, 15U, 16U, 17U, 18U });
+    CHECK(fast_copy_args[0] == 11U && fast_copy_args[3] == 14U &&
+          fast_copy_args[4] == 15U && fast_copy_args[7] == 18U);
+    /* A float call keeps its arguments: the frame's saved s0-s2 go to the
+     * entry as floats (on the card the registers themselves are passed). */
+    gl.Vertex3f = mock_fast_vertex3f;
+    memset(&frame, 0, sizeof(frame));
+    frame.r[12] = ZZAPP_SVC_GL_FIRST + gl_slot(offsetof(aar_gl, Vertex3f));
+    frame.vfp[0] = 0x3f800000U; /* 1.0f */
+    frame.vfp[1] = 0x40000000U; /* 2.0f */
+    frame.vfp[2] = 0x40400000U; /* 3.0f */
+    frame.vfp[3] = 0x40800000U; /* 4.0f, unused by Vertex3f */
+    zzapp_svc_dispatch(&frame);
+    CHECK(fast_vertex3f_words[0] == 0x3f800000U &&
+          fast_vertex3f_words[1] == 0x40000000U &&
+          fast_vertex3f_words[2] == 0x40400000U);
+    /* The stop report's veneer number is kept. */
+    CHECK(zzapp_svc_last_number_for(0U) ==
+          ZZAPP_SVC_GL_FIRST + gl_slot(offsetof(aar_gl, Vertex3f)));
+    /* The client array state records the call (Begin/End, as the checked
+     * path does; the array rules are covered by the span tests above). */
+    dispatch(begin, &frame, (uint32_t[9]){ 4U });
+    CHECK(gl_begin_calls == 1U);
+    dispatch(ZZAPP_SVC_GL_FIRST + gl_slot(offsetof(aar_gl, End)),
+             &frame, (uint32_t[9]){ 0U });
+    CHECK(gl_end_calls == 1U);
+    /* A pending GL error is delivered by the checked path, which owns it. */
+    mock_gl_error = 0x0502U;
+    dispatch(ZZAPP_SVC_GL_FIRST + gl_slot(offsetof(aar_gl, GetError)),
+             &frame, (uint32_t[9]){ 0U });
+    CHECK(frame.r[0] == 0x0502U);
+    dispatch(ZZAPP_SVC_GL_FIRST + gl_slot(offsetof(aar_gl, GetError)),
+             &frame, (uint32_t[9]){ 0U });
+    CHECK(frame.r[0] == 0U);
+    /* A pointer call takes the checked path: the bad pointer is refused and
+     * the module never sees it. */
+    getter_calls = 0U;
+    dispatch(ZZAPP_SVC_GL_FIRST + gl_slot(offsetof(aar_gl, GetIntegerv)),
+             &frame, (uint32_t[9]){ 0x0ba2U, user_va + 0xffcU });
+    CHECK(getter_calls == 0U);
+    CHECK(frame.r[0] == (uint32_t)AAR_E_FAULT);
+    /* An empty table slot is AAR_E_NOSYS, as on the checked path. */
+    gl.LineWidth = NULL;
+    dispatch(ZZAPP_SVC_GL_FIRST + gl_slot(offsetof(aar_gl, LineWidth)),
+             &frame, (uint32_t[9]){ 0U });
+    CHECK(frame.r[0] == (uint32_t)AAR_E_NOSYS);
+    /* Not an app thread: no fast path. (With no record selected the checked
+     * path refuses with AAR_E_FAULT, which test_core_aware... covers.) */
+    zzapp_kernel_set_current_thread(-1);
+    services_pid = ZZAPP_PID_NONE;
+    fast_enable_calls = 0U;
+    dispatch(ZZAPP_SVC_GL_FIRST + gl_slot(offsetof(aar_gl, Enable)),
+             &frame, (uint32_t[9]){ 0x0b71U });
+    CHECK(fast_enable_calls == 0U);
+    CHECK(frame.r[0] == (uint32_t)AAR_E_FAULT);
+    services_pid = 0U;
+    zzapp_kernel_set_current_thread(0);
+    teardown_dispatch();
+}
+
+/*
+ * glVertex3fv through the SVC layer. The digest covers everything the test can
+ * observe (status word, call count, the bits the module read, whether the
+ * module saw a kernel copy) and equals the digest of the checked path alone.
+ */
+static uint32_t v3_digest = 2166136261U;
+static unsigned v3_calls;
+static uint32_t v3_bits[3];
+static int v3_kernel_copy;
+static uint32_t v3_user_lo, v3_user_hi;
+
+static void v3_mix(uint32_t word)
+{
+    v3_digest = (v3_digest ^ word) * 16777619U;
+}
+static void v3_mock(const float *v)
+{
+    uintptr_t address = (uintptr_t)v;
+
+    ++v3_calls;
+    memcpy(v3_bits, v, sizeof(v3_bits));
+    v3_kernel_copy = (address & 3U) == 0U &&
+                     (address < v3_user_lo || address >= v3_user_hi);
+}
+static void v3_call(uint32_t address)
+{
+    zzapp_svc_frame_t frame;
+    unsigned before = v3_calls;
+
+    v3_bits[0] = v3_bits[1] = v3_bits[2] = 0xdeadbeefU;
+    dispatch(ZZAPP_SVC_GL_FIRST + gl_slot(offsetof(aar_gl, Vertex3fv)),
+             &frame, (uint32_t[9]){ address });
+    v3_mix(frame.r[0]);
+    v3_mix(v3_calls - before);
+    if (v3_calls != before) {
+        CHECK(v3_kernel_copy);
+        v3_mix(v3_bits[0]);
+        v3_mix(v3_bits[1]);
+        v3_mix(v3_bits[2]);
+    }
+}
+static void test_vertex3fv_body(void)
+{
+    static const uint32_t words[3] = { 0x80000000U, 0x3f800000U, 0xc0490fdbU };
+    zzapp_svc_frame_t frame;
+    uint32_t extra_va = 0U;
+    unsigned before;
+
+    setup_dispatch();
+    if (!user_page) {
+        teardown_dispatch();
+        return;
+    }
+    gl.Vertex3fv = v3_mock;
+    v3_user_lo = user_va;
+    v3_user_hi = user_va + 0x3000U;
+    v3_calls = 0U;
+    /* No binding yet: nothing reaches the module, in both builds. */
+    memcpy(user_page + 0x100U, words, sizeof(words));
+    v3_call(user_va + 0x100U);
+    CHECK(v3_calls == 0U);
+    dispatch(api_slot(offsetof(aar_api, gl_bind)), &frame, (uint32_t[9]){ 1U });
+    CHECK(frame.r[0] != 0U);
+
+    /* Aligned, a signed zero first, outside Begin. */
+    v3_call(user_va + 0x100U);
+    CHECK(v3_calls == 1U && memcmp(v3_bits, words, sizeof(words)) == 0);
+    /* Offsets that are not float aligned still read the right bytes. */
+    for (uint32_t offset = 1U; offset < 4U; ++offset) {
+        memcpy(user_page + 0x200U + offset, words, sizeof(words));
+        before = v3_calls;
+        v3_call(user_va + 0x200U + offset);
+        CHECK(v3_calls == before + 1U && memcmp(v3_bits, words, sizeof(words)) == 0);
+    }
+    /* The pointer itself, not the extent, is bad. */
+    before = v3_calls;
+    v3_call(0U);
+    v3_call(0xfffffff8U);
+    v3_call(0x50000000U);
+    v3_call(user_va + 0xff8U); /* runs off the mapping */
+    CHECK(v3_calls == before);
+    /* An extent that crosses into a second page: refused while the page is
+     * unmapped, accepted when it is mapped read-only. */
+    CHECK(zzapp_as_alias_map(&proc.as, 0x02001000U, 4096U, 0, &extra_va) == AAR_OK);
+    if (extra_va == user_va + 0x1000U) {
+        memcpy(user_page + 0xff8U, words, 8U);
+        memcpy(user_page + 0x1000U, (const uint8_t *)words + 8U, 4U);
+        before = v3_calls;
+        v3_call(user_va + 0xff8U);
+        CHECK(v3_calls == before + 1U && memcmp(v3_bits, words, sizeof(words)) == 0);
+        v3_call(user_va + 0x1ffcU); /* tail beyond the read only page */
+        CHECK(v3_calls == before + 1U);
+    }
+    CHECK(zzapp_as_alias_unmap(&proc.as, extra_va, 4096U) == AAR_OK);
+    before = v3_calls;
+    v3_call(user_va + 0xff8U);
+    CHECK(v3_calls == before);
+
+    /* A pending GL error stays for the next glGetError and does not change
+     * what the module receives. */
+    mock_gl_error = 0x0500U;
+    v3_call(user_va + 0x100U);
+    CHECK(v3_calls == before + 1U);
+    dispatch(ZZAPP_SVC_GL_FIRST + gl_slot(offsetof(aar_gl, GetError)),
+             &frame, (uint32_t[9]){ 0U });
+    v3_mix(frame.r[0]);
+    CHECK(frame.r[0] == 0x0500U);
+
+    /* Begin and End around it make no difference to the call. */
+    dispatch(ZZAPP_SVC_GL_FIRST + gl_slot(offsetof(aar_gl, Begin)),
+             &frame, (uint32_t[9]){ 4U });
+    before = v3_calls;
+    v3_call(user_va + 0x100U);
+    CHECK(v3_calls == before + 1U);
+    dispatch(ZZAPP_SVC_GL_FIRST + gl_slot(offsetof(aar_gl, End)),
+             &frame, (uint32_t[9]){ 0U });
+
+    /* An empty table slot. */
+    gl.Vertex3fv = NULL;
+    before = v3_calls;
+    v3_call(user_va + 0x100U);
+    CHECK(v3_calls == before);
+    gl.Vertex3fv = v3_mock;
+
+    /* A stale generation and an ended binding. */
+    proc.generation++;
+    v3_call(user_va + 0x100U);
+    CHECK(v3_calls == before);
+    proc.generation--;
+    v3_call(user_va + 0x100U);
+    CHECK(v3_calls == before + 1U);
+    dispatch(api_slot(offsetof(aar_api, gl_unbind)), &frame, (uint32_t[9]){ 0U });
+    v3_call(user_va + 0x100U);
+    CHECK(v3_calls == before + 1U);
+
+    /* Not an app thread. */
+    dispatch(api_slot(offsetof(aar_api, gl_bind)), &frame, (uint32_t[9]){ 1U });
+    zzapp_kernel_set_current_thread(-1);
+    services_pid = ZZAPP_PID_NONE;
+    v3_call(user_va + 0x100U);
+    CHECK(v3_calls == before + 1U);
+    services_pid = 0U;
+    zzapp_kernel_set_current_thread(0);
+    /* The digest was recorded from the checked path before the fast route
+     * existed, so it pins the fast route to the old behaviour. */
+    CHECK(v3_digest == 0x8aedd21aU && v3_calls == 8U);
+    teardown_dispatch();
+}
+
+/* The host build is 64-bit and the dispatcher hands pointers to the module as
+ * 32-bit words (the card's ABI), so a module that reads one needs the kernel
+ * buffers below 4 GiB. Run the test body on a stack mapped there. */
+static ucontext_t v3_main_context, v3_body_context;
+static void v3_entry(void)
+{
+    test_vertex3fv_body();
+}
+static void test_vertex3fv(void)
+{
+    const size_t bytes = 1U << 19;
+    void *stack = mmap(NULL, bytes, PROT_READ | PROT_WRITE,
+                       MAP_PRIVATE | MAP_ANONYMOUS | MAP_32BIT, -1, 0);
+
+    CHECK(stack != MAP_FAILED);
+    if (stack == MAP_FAILED)
+        return;
+    CHECK(getcontext(&v3_body_context) == 0);
+    v3_body_context.uc_stack.ss_sp = stack;
+    v3_body_context.uc_stack.ss_size = bytes;
+    v3_body_context.uc_link = &v3_main_context;
+    makecontext(&v3_body_context, v3_entry, 0);
+    CHECK(swapcontext(&v3_main_context, &v3_body_context) == 0);
+    munmap(stack, bytes);
+}
+
 int main(void)
 {
+    test_scalar_gl_fast_path();
+    test_vertex3fv();
     test_table_copy_uses_only_veneers();
     test_gl_table_copy_preserves_missing_calls();
     test_pointer_checks();

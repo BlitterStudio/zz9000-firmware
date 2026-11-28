@@ -67,6 +67,10 @@ struct zzapp_present_flush_record {
 };
 struct zzapp_present_flush_record zzapp_test_present_flushes[32];
 unsigned zzapp_test_present_flush_count;
+int zzapp_test_display_dma_busy;
+unsigned zzapp_test_display_invalidate_count;
+uint32_t zzapp_test_display_invalidate_last_address;
+uint32_t zzapp_test_display_invalidate_last_bytes;
 __attribute__((weak)) int scheduler_core1_available(void) { return 1; }
 __attribute__((weak)) int zzapp_minigl_swap_tracked(uint32_t id, uint64_t frame_id)
 {
@@ -94,6 +98,7 @@ __attribute__((weak)) int zzapp_minigl_swap_tracked(uint32_t id, uint64_t frame_
 #include "sdk_smp_lock.h"
 #include "surface_allocator.h"
 #include "xil_cache.h"
+#include "zzm_minigl_host.h"
 #endif
 
 #ifndef ZZAPP_FILE_TIMEOUT_US
@@ -322,6 +327,7 @@ struct zzapp_service_runtime {
 	uint32_t display_scanout_ack;
 	uint32_t display_mailbox_replaced;
 	volatile int display_mailbox_active;
+	int display_mailbox_gl;
 	uint32_t display_mailbox_shown;
 	uint32_t display_mailbox_pending;
 	/* Changes hands with display_mailbox_pending, under its lock. */
@@ -1664,6 +1670,9 @@ void zzapp_services_on_app_end(void)
 
 	if (!state || !rec)
 		return;
+	if (!zzapp_display_mailbox_retire_ready())
+		return;
+	display_mailbox_disable();
 	audio_post_teardown();
 	display_unbind(rec);
 	revoke_surface_grants();
@@ -4317,6 +4326,20 @@ static void record_present_flush(unsigned long card, unsigned long bytes)
 #endif
 }
 
+/* Host recorder for display range invalidates (CPU reads of what RasterIX
+ * wrote straight into the display's buffers). */
+static void record_display_invalidate(uint32_t address, uint32_t bytes)
+{
+#ifdef ZZAPP_HOST_TEST
+	zzapp_test_display_invalidate_count++;
+	zzapp_test_display_invalidate_last_address = address;
+	zzapp_test_display_invalidate_last_bytes = bytes;
+#else
+	(void)address;
+	(void)bytes;
+#endif
+}
+
 static void flush_presented(uint32_t addr, uint32_t bytes)
 {
 	if (addr != 0U && bytes != 0U) {
@@ -4338,7 +4361,15 @@ static void flush_presented(uint32_t addr, uint32_t bytes)
 	barrier();
 }
 
-/* LATEST hands off ownership under the same lock as the native latch. */
+/* A LATEST submission hands the frame to the card without a client request.
+ * A tracked submission completes when latched or replaced.
+ *
+ * `back` is a buffer the app owns: the record's back buffer, or the spare
+ * (the two exchange roles first, so the spare is submitted and the old back
+ * becomes the spare).  Anything else is not the app's to present.  The
+ * mailbox holds shown, pending and the app's buffers in three slots:
+ * a pending frame is replaced and its buffer becomes the new back, otherwise
+ * the spare becomes the new back. */
 static int display_mailbox_flip(uint32_t back, uint64_t frame_id)
 {
 	struct zzapp_service_runtime *state = current_runtime();
@@ -4351,6 +4382,14 @@ static int display_mailbox_flip(uint32_t back, uint64_t frame_id)
 	if (!state->display_mailbox_active) {
 		display_mailbox_lock_release();
 		return AAR_E_BUSY;
+	}
+	if (back != state->display_back) {
+		if (back != state->display_spare) {
+			display_mailbox_lock_release();
+			return AAR_E_INVAL;
+		}
+		state->display_spare = state->display_back;
+		state->display_back = back;
 	}
 	if (state->display_mailbox_pending != 0U) {
 		state->display_back = state->display_mailbox_pending;
@@ -4385,6 +4424,174 @@ static int display_mailbox_flip(uint32_t back, uint64_t frame_id)
 	state->display_ack_seen = gen;
 	display_mailbox_lock_release();
 	return AAR_OK;
+}
+
+int zzapp_display_mailbox_retire_ready(void)
+{
+	struct zzapp_service_runtime *state = current_runtime();
+
+	return !state || state->display_mailbox_gl == 0;
+}
+
+static int display_mailbox_release_dma(struct zzapp_service_runtime *state)
+{
+	if (!state->display_mailbox_gl)
+		return AAR_OK;
+	/* Only release after context close or after aborting on a halted
+	 * core. An accepted DDR list can outlive the FIFO disable. */
+#ifdef ZZAPP_HOST_TEST
+	if (zzapp_test_display_dma_busy)
+		return AAR_E_BUSY;
+#else
+	uint64_t began = now_us();
+
+	while (!zzm_minigl_rasterix_idle()) {
+		if (now_us() - began < 100000U)
+			continue;
+		printf("[app] RasterIX not idle; retaining direct display buffers\r\n");
+		return AAR_E_BUSY;
+	}
+#endif
+	slot_state_lock_acquire();
+	state->display_mailbox_gl = 0;
+	slot_state_lock_release();
+	return AAR_OK;
+}
+
+int zzapp_display_mailbox_lease(int acquire)
+{
+	struct zzapp_service_runtime *state = current_runtime();
+	uint32_t i;
+
+	if (!state->display_bound || !display_mailbox_enabled())
+		return AAR_E_INVAL;
+	if (!acquire)
+		return display_mailbox_release_dma(state);
+	slot_state_lock_acquire();
+	for (i = 0U; i < set_display.count; ++i) {
+		zzapp_rec_t *rec = zzapp_rec_by_pid(set_display.pids[i]);
+
+		if (rec && runtime_of(rec)->display_mailbox_gl) {
+			slot_state_lock_release();
+			return AAR_E_BUSY;
+		}
+	}
+	state->display_mailbox_gl = 1;
+	slot_state_lock_release();
+#ifndef ZZAPP_HOST_TEST
+	/* One-time CPU -> HP handoff. Clean older CPU writes out of L1
+	 * and L2 before RasterIX can overwrite any of the three pages. */
+	for (i = 0U; i < 3U; ++i)
+		l2_maint_dcache_clean_range(state->display_mailbox_buffers[i],
+					    state->display_mailbox_bytes);
+#endif
+	return AAR_OK;
+}
+
+/*
+ * Zero-copy presentation for a module that renders straight into the
+ * mailbox display's buffers (docs/app-runtime.md, "Direct presentation on
+ * the mailbox display").  The three buffers are the display's own: front,
+ * back and spare as the client opened them, in that order.
+ */
+int zzapp_display_mailbox_buffers(uint32_t buffers[3], uint32_t *bytes)
+{
+	struct zzapp_service_runtime *state = current_runtime();
+	uint32_t i;
+
+	if (!buffers || !state->display_bound || !display_mailbox_enabled())
+		return AAR_E_INVAL;
+	display_mailbox_lock_acquire();
+	if (!state->display_mailbox_active) {
+		display_mailbox_lock_release();
+		return AAR_E_INVAL;
+	}
+	for (i = 0U; i < 3U; i++)
+		buffers[i] = state->display_mailbox_buffers[i];
+	if (bytes)
+		*bytes = state->display_mailbox_bytes;
+	display_mailbox_lock_release();
+	return AAR_OK;
+}
+
+/* The buffers the app owns right now (0 for none), read under the mailbox
+ * lock: the vblank ISR hands the old shown buffer back as the spare while
+ * it holds the same lock.  The shown buffer and the pending one are never
+ * in this pair. */
+int zzapp_display_mailbox_owned(uint32_t *back, uint32_t *spare)
+{
+	struct zzapp_service_runtime *state = current_runtime();
+
+	if (!back || !spare || !state->display_bound || !display_mailbox_enabled())
+		return AAR_E_INVAL;
+	display_mailbox_lock_acquire();
+	if (!state->display_mailbox_active) {
+		display_mailbox_lock_release();
+		return AAR_E_INVAL;
+	}
+	*back = state->display_back;
+	*spare = state->display_spare;
+	display_mailbox_lock_release();
+	return AAR_OK;
+}
+
+/* Presents `address`, which must be the app's back or spare buffer.  With
+ * ZZAPP_DISPLAY_PRESENT_NO_DIRTY the caller guarantees that no CPU cache
+ * holds a dirty line of the buffer (RasterIX wrote it and the CPU only
+ * read it, after an invalidate): no clean is done.  Without it the frame is
+ * cleaned through L1 and L2 as zzapp_svc_display_flip_async does. */
+int zzapp_display_mailbox_present(uint32_t address, uint32_t flags, uint64_t frame_id)
+{
+	struct zzapp_service_runtime *state = current_runtime();
+	uint32_t back;
+	uint32_t spare;
+
+	if ((flags & ~ZZAPP_DISPLAY_PRESENT_NO_DIRTY) != 0U || address == 0U ||
+	    !state->display_bound)
+		return AAR_E_INVAL;
+	if (!display_mailbox_enabled())
+		return AAR_E_BUSY;
+	if ((flags & ZZAPP_DISPLAY_PRESENT_NO_DIRTY) == 0U) {
+		if (zzapp_display_mailbox_owned(&back, &spare) != AAR_OK)
+			return AAR_E_BUSY;
+		if (address != back && address != spare)
+			return AAR_E_INVAL;
+		/* The ISR can only add to the owned set during the clean. */
+		flush_presented(address, state->display_bytes);
+	} else {
+		barrier();
+	}
+	return display_mailbox_flip(address, frame_id);
+}
+
+/* Invalidates L1 and L2 for a range inside one of the display's buffers, so
+ * the CPU reads what RasterIX wrote through its HP port.  A range anywhere
+ * else is refused: the module's own invalidate is limited to memory it owns,
+ * which the display's buffers are not. */
+int zzapp_display_invalidate(uint32_t address, uint32_t bytes)
+{
+	struct zzapp_service_runtime *state = current_runtime();
+	uint32_t i;
+
+	if (!state->display_bound || bytes == 0U)
+		return AAR_E_INVAL;
+	for (i = 0U; i < 3U; i++) {
+		uint32_t base = state->display_alias_phys[i];
+		uint32_t offset;
+
+		if (base == 0U || address < base)
+			continue;
+		offset = address - base;
+		if (offset > state->display_bytes ||
+		    bytes > state->display_bytes - offset)
+			continue;
+		record_display_invalidate(address, bytes);
+#ifndef ZZAPP_HOST_TEST
+		l2_maint_dcache_invalidate_range((intptr_t)address, bytes);
+#endif
+		return AAR_OK;
+	}
+	return AAR_E_INVAL;
 }
 
 /*
@@ -4607,10 +4814,11 @@ static int display_flip(uint32_t surface_id, uint32_t flags, uint64_t frame_id,
 	buffer.front = state->display_front;
 	buffer.back = state->display_back;
 	if (display_mailbox_enabled()) {
+		if (state->display_mailbox_gl)
+			return AAR_E_BUSY;
 		if ((frame_id || nonblocking) && zzapp_services_stop_requested())
 			return AAR_E_IO;
-		flush_presented(buffer.back, state->display_bytes);
-		return display_mailbox_flip(buffer.back, frame_id);
+		return zzapp_display_mailbox_present(buffer.back, 0U, frame_id);
 	}
 	if (state->display_back_owned) {
 		if (buffer.front == 0U || buffer.back == 0U)
@@ -4722,6 +4930,10 @@ int zzapp_svc_display_close(uint32_t surface_id)
 
 	if (!state->display_bound || surface_id != state->display_id)
 		return AAR_E_INVAL;
+	if (state->display_mailbox_gl)
+		return AAR_E_BUSY;
+	/* Disable the mailbox before the client can free a pending page. */
+	display_mailbox_disable();
 	id = state->display_client_id;
 	/* The client closes its screen; the surface goes whatever it answers. */
 	(void)blocking_request(AAR_OP_DISPLAY_CLOSE, ZZAPP_WAIT_DISPLAY_OPEN, 0U,

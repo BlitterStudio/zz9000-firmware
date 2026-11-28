@@ -173,6 +173,23 @@ uint32_t zzapp_svc_display_latest_dropped(void);
 /* 1 while the selected record's display is card-owned (LATEST): flips never
  * reach the client. */
 int zzapp_display_latest(void);
+/* Zero-copy presentation on the LATEST display (module host table V4.1).
+ * buffers: the display's three buffers (front, back and spare as opened),
+ * bytes: one buffer's size.  owned: the buffers the app may write now (the
+ * back buffer and the spare, 0 when absent), read under the mailbox lock.
+ * present: submits an owned buffer; with ZZAPP_DISPLAY_PRESENT_NO_DIRTY the
+ * caller guarantees the CPU holds no dirty line of it and no clean is done.
+ * A buffer the app does not own is refused (AAR_E_INVAL).  invalidate: L1
+ * and L2 invalidate of a range inside one of the display's buffers. */
+#define ZZAPP_DISPLAY_PRESENT_NO_DIRTY 1U
+int zzapp_display_mailbox_buffers(uint32_t buffers[3], uint32_t *bytes);
+int zzapp_display_mailbox_owned(uint32_t *back, uint32_t *spare);
+int zzapp_display_mailbox_present(uint32_t address, uint32_t flags, uint64_t frame_id);
+int zzapp_display_invalidate(uint32_t address, uint32_t bytes);
+/* Reserve the three mailbox buffers for direct GL; release once DMA is idle. */
+int zzapp_display_mailbox_lease(int acquire);
+/* Ready to return the display to the client. Keeps a hung DMA lease pinned. */
+int zzapp_display_mailbox_retire_ready(void);
 int zzapp_svc_display_vsync(void);
 /* API 0.6 display. Resize needs AAR_DISPCAP_RESIZE in the granted caps
  * (AAR_E_NOSYS otherwise) and no flip pending (AAR_E_BUSY); the surface is

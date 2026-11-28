@@ -745,7 +745,7 @@ int main(void)
         g_vertices, sizeof(g_vertices),
         g_staging, sizeof(g_staging),
         g_cand_pool, sizeof(g_cand_pool),
-        (uint16_t)W, (uint16_t)H
+        (uint16_t)W, (uint16_t)H, 0U
     };
     MiniGLRasterBuffers ref_buf = {
         g_ref_color, sizeof(g_ref_color),
@@ -753,7 +753,7 @@ int main(void)
         g_vertices, sizeof(g_vertices),
         g_staging, sizeof(g_staging),
         g_ref_pool, sizeof(g_ref_pool),
-        (uint16_t)W, (uint16_t)H
+        (uint16_t)W, (uint16_t)H, 0U
     };
 
     build_scene_geometry();

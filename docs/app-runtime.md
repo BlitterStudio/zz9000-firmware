@@ -524,6 +524,32 @@ touching them. Invalid, overflowed, read-only-for-output, device, and
 other-app pointers return `AAR_E_FAULT`. Firmware code never becomes a
 user-call target.
 
+A GL call with no pointer in any argument (its descriptor marshals nothing:
+`glVertex*`, `glTexCoord*`, `glColor*`, `glBegin`, `glEnd`, `glBindTexture`,
+`glEnable`, the matrix calls with scalars) takes a short path. Its r0-r3 and
+s0-s15 reach the module entry as the veneer saved them (`svc_gl_fast`,
+`zzapp_svc_call_regs`); a call with more than four words gets the rest from the
+checked user stack. The call still records the client-array state where the
+checked path does, still counts in the SVC and GL telemetry, and still goes
+through the module's `api_enter`/`api_leave`, so the API lock, the watchdog's
+`api_calls` and `in_api`, and the service pass after the call are as before.
+The scalar short path declines calls with pointers, a pending `glGetError`
+result, an empty table slot, a stale GL binding or no running app thread.
+The checked path handles those cases. The API lock's common case (nobody
+else holds or waits for it) uses `zzapp_kernel_api_try_lock` and
+`zzapp_kernel_api_try_unlock`; the general lock calls handle contention.
+
+`glVertex3fv` is the one pointer call on that short path, because it is the
+most frequent in immediate-mode apps and its pointer is a fixed 12-byte
+read-only extent. The extent must be mapped readable for the app
+(`zzapp_svc_check_user`, a cross-page extent included). It is copied once,
+at any byte alignment, into an aligned kernel frame, and the module entry gets
+that copy; the app's pointer is never kept or passed on. The path declines,
+before changing anything, for a NULL pointer, an unmapped or unreadable
+extent, an empty table slot, a stale GL binding or no running app thread, and
+the checked path then returns what it always did, `AAR_E_FAULT` for a bad
+pointer. Telemetry counts the call as any other GL call.
+
 `aar_gl_bind` and `gl_bind_flags` take the id of the app's open display
 (`aar_surface.id`). Any other id, including 0, returns `NULL` (`AAR_E_INVAL`
 inside the runtime) before the module is loaded or a GL binding is taken, so the
@@ -661,6 +687,35 @@ An acknowledgement timestamp is not a physical scanout measurement.
 exposes its supported GL 1.1 additions through the AAR table. Unavailable
 operations, including stencil, display lists and the attribute stack, are
 NULL. Test the table slot before calling an optional operation.
+
+### Direct presentation on the mailbox display
+
+An ARM app can request `AAR_ZZ9000_GL_BIND_DIRECT_PRESENT` on a
+`AAR_DISPCAP_LATEST` display. MiniGL needs three separate RGB565 buffers
+aligned to 256 bytes, a pitch of `width * 2`, and a frame length that is a
+multiple of the 32-byte cache line. Queued direct targets still require
+2 KiB alignment. RGB565 LE needs no byte swap. RGB565 BE uses the copy path
+if the RasterIX colour byte-swap control bit does not read back after it is
+set at idle. Other pixel layouts also use copy. The optional MiniGL host
+table V4.1 supplies the three pages, owned-buffer query, explicit present
+and lease calls. A V4.0 BOOT with a newer module, or an older module with
+a V4.1 BOOT, still presents by copy on LATEST. Queued presentation does
+not use this lease.
+
+RasterIX renders into a page owned by the app. Swap submits completed frames
+in order and picks an owned page that holds no unfinished frame. If no page
+is free, either a finished frame replacing the pending flip or a vertical
+blank can free one. Scanout never takes a page RasterIX still writes. The
+direct handoff does no pixel copy or cache maintenance. CPU reads invalidate
+first because RasterIX writes through an HP port; software fallback draws to
+a private target that is copied into its matching page and cleaned on
+present. The engine drains before changes between BE and private LE output.
+
+Do not write the surface through its CPU aliases while direct GL is bound.
+Ordinary display flips and display close return `AAR_E_BUSY` until GL is
+unbound. Teardown drains RasterIX before releasing the lease; if the engine
+cannot be stopped, firmware keeps the surface reserved and does not report
+the app as retired. Recovery may require a coordinated Amiga and card reset.
 
 **Image rules.** The loader reads an ELF32 ARM `ET_DYN` image. `e_flags` must
 say EABI version 5 and hard float, and must not say soft float; any other

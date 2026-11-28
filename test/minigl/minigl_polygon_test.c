@@ -311,7 +311,7 @@ int main(void)
 {
     MiniGLRasterBuffers buffers = {
         color, sizeof(color), depth, sizeof(depth), vertices, sizeof(vertices),
-        staging, sizeof(staging), textures, sizeof(textures), W, H
+        staging, sizeof(staging), textures, sizeof(textures), W, H, 0U
     };
     assert(minigl_raster_configure_buffers(&buffers));
     minigl_raster_init();

@@ -111,6 +111,11 @@ int rix_cmd_texture_state(RixCmdWriter *writer, uint8_t tmu, const RixTextureSta
 int rix_cmd_buffer_address(RixCmdWriter *writer, uint8_t reg, uint32_t address);
 int rix_cmd_framebuffer(RixCmdWriter *writer, uint32_t flags, uint32_t pixels);
 int rix_cmd_triangle(RixCmdWriter *writer, const uint32_t *words, size_t count);
+/* `triangles` back-to-back descriptors of `count` words each, every one
+ * preceded by its own stream header: the same bytes as that many
+ * rix_cmd_triangle calls, with a single capacity check. */
+int rix_cmd_triangles(RixCmdWriter *writer, const uint32_t *words, size_t count,
+                      size_t triangles);
 int rix_cmd_texture_pages(RixCmdWriter *writer, uint8_t tmu, const uint32_t *pages, size_t count);
 int rix_cmd_fog_lut(RixCmdWriter *writer, const float fog[33]);
 

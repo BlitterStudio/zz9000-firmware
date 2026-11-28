@@ -20,6 +20,8 @@ static uint32_t rix_drv_read(struct rix_drv *driver, uint32_t offset)
 static void rix_drv_write(const struct rix_drv *driver, uint32_t offset,
                           uint32_t value)
 {
+    if (offset == RIX_DRV_CSR_CONTROL && driver->color_byte_swap)
+        value |= RIX_DRV_CONTROL_COLOR_SWAP;
     driver->write(driver->context, offset, value);
 }
 
@@ -722,6 +724,23 @@ int rix_drv_poll(struct rix_drv *driver, uint32_t timeout)
     if (!rix_drv_usable(driver))
         return RIX_DRV_UNAVAILABLE;
     return rix_drv_wait_idle(driver, timeout);
+}
+
+int rix_drv_set_color_byte_swap(struct rix_drv *driver, int enabled)
+{
+    const uint32_t control = driver->enabled ? RIX_DRV_CONTROL_ENABLE : 0U;
+    const uint8_t previous = driver->color_byte_swap;
+
+    if (rix_drv_poll(driver, 0U) != RIX_DRV_OK)
+        return 0;
+    driver->color_byte_swap = enabled != 0;
+    rix_drv_write(driver, RIX_DRV_CSR_CONTROL, control);
+    if (((rix_drv_read(driver, RIX_DRV_CSR_CONTROL) &
+          RIX_DRV_CONTROL_COLOR_SWAP) != 0U) == (enabled != 0))
+        return 1;
+    driver->color_byte_swap = previous;
+    rix_drv_write(driver, RIX_DRV_CSR_CONTROL, control);
+    return 0;
 }
 
 int rix_drv_recover(struct rix_drv *driver, uint32_t timeout, int soft_reset)

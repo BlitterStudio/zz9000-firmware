@@ -2043,6 +2043,89 @@ int zzapp_kernel_api_unlock(zzapp_kernel_t *kernel, uint32_t pid)
 	return 0;
 }
 
+/*
+ * The lock as nearly every GL call takes and gives it: nobody holds it, nobody
+ * waits for it, or the caller already holds it. These do what zzapp_kernel_api_lock
+ * and zzapp_kernel_api_unlock do in that case, and nothing else; they return 0
+ * without changing anything when the case is another one, and the caller then
+ * takes the general path.
+ *
+ * A take from free is the one step that needs the IRQ mask: a tick between the
+ * test and the stores could hand the system thread the lock. The mask is one
+ * instruction each way. A nested take only adds to the depth, and the depth is
+ * the holder's own word. A last release with the only app thread on the run
+ * list has no waiter to hand the lock to (the system thread polls and never
+ * waits), so it is two stores, the depth first: a tick between them still sees
+ * the app as the holder, and the system thread cannot take a lock it holds.
+ */
+#ifdef ZZAPP_HOST_TEST
+#define KERNEL_IRQ_OFF() smp_local_irq_save()
+#define KERNEL_IRQ_RESTORE(state) smp_local_irq_restore(state)
+#else
+static inline uint32_t kernel_irq_off(void)
+{
+	uint32_t cpsr;
+
+	__asm__ __volatile__("mrs %0, cpsr\n\tcpsid i" : "=r"(cpsr) : : "memory");
+	return cpsr;
+}
+
+static inline void kernel_irq_restore(uint32_t cpsr)
+{
+	if ((cpsr & 0x80U) == 0U)
+		__asm__ __volatile__("cpsie i" : : : "memory");
+}
+#define KERNEL_IRQ_OFF() kernel_irq_off()
+#define KERNEL_IRQ_RESTORE(state) kernel_irq_restore(state)
+#endif
+
+int zzapp_kernel_api_try_lock(zzapp_kernel_t *kernel, uint32_t pid)
+{
+	zzapp_rec_kernel_t *words;
+	uint32_t irq_state;
+
+	if (kernel->api_lock_owner == (int)pid) {
+		kernel->api_lock_depth++;
+		return 1;
+	}
+	if (kernel->api_lock_owner != -1 || kernel->api_handoff != ZZAPP_PID_NONE)
+		return 0;
+	words = kernel_words(kernel, pid);
+	if (!words)
+		return 0;
+	irq_state = KERNEL_IRQ_OFF();
+	if (kernel->api_lock_owner != -1 || kernel->api_handoff != ZZAPP_PID_NONE) {
+		KERNEL_IRQ_RESTORE(irq_state);
+		return 0;
+	}
+	kernel->api_handoff_service_deferred = 0U;
+	words->api_waiting = 0U;
+	words->api_wait_sequence = 0U;
+	kernel->api_lock_depth = 1U;
+	kernel->api_lock_owner = (int)pid;
+	KERNEL_IRQ_RESTORE(irq_state);
+	return 1;
+}
+
+int zzapp_kernel_api_try_unlock(zzapp_kernel_t *kernel, uint32_t pid)
+{
+	if (kernel->api_lock_owner != (int)pid)
+		return 0;
+	if (kernel->api_lock_depth > 1U) {
+		kernel->api_lock_depth--;
+		return 1;
+	}
+	if (kernel->api_lock_depth == 1U && kernel->run_count == 1U &&
+	    kernel->api_handoff == ZZAPP_PID_NONE) {
+		kernel->api_lock_depth = 0U;
+		__asm__ __volatile__("" : : : "memory");
+		kernel->api_handoff_service_deferred = 0U;
+		kernel->api_lock_owner = -1;
+		return 1;
+	}
+	return 0;
+}
+
 /* An API wait releases the lock before parking.  Reserve the next handoff
  * only after its event wakes it, so the service thread cannot overtake the
  * suspended API body or spuriously complete an unready wait. */

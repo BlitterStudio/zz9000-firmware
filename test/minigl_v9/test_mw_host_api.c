@@ -1248,8 +1248,469 @@ static void test_clipped_line_rejects_unrepresentable_screen_coords(void)
     mw_host_destroy(c);
     printf("PASS: test_clipped_line_rejects_unrepresentable_screen_coords\n");
 }
-int main(void)
+
+enum { CACHE_PREFIX = 76, CACHE_GEOMETRY = 60, CACHE_BODY = CACHE_PREFIX + CACHE_GEOMETRY };
+
+static uint32_t cache_quad(mw_ctx *c, uint32_t opcode, uint32_t handle, uint32_t slot,
+                           uint32_t serial, int replay, float red, float green, float right)
 {
+    static const uint16_t indices[] = {0, 1, 2, 0, 2, 3};
+    uint8_t packet[16 + 32 + 8 + MW_DRAW_CACHE_HEADER + CACHE_BODY + 8] = {0};
+    uint32_t bytes = replay ? CACHE_PREFIX : CACHE_BODY;
+    uint8_t *cmd = packet + 16;
+    uint8_t *p = cmd + 32 + 8;
+    unsigned i;
+    mw_put_be32(packet, MW_MAGIC);
+    mw_put_be32(packet + 4, MW_VERSION);
+    mw_put_be32(packet + 12, 3);
+    mw_put_be32(cmd, MW_CLEAR);
+    mw_put_be32(cmd + 4, 24);
+    mw_put_be32(cmd + 8, 3);
+    mw_put_bef(cmd + 24, 1.0f);
+    mw_put_bef(cmd + 28, 1.0f);
+    cmd += 32;
+    mw_put_be32(cmd, opcode);
+    if (opcode == MW_DRAW_CACHE_INDEXED) {
+        mw_put_be32(p, handle);
+        mw_put_be32(p + 4, slot);
+        mw_put_be32(p + 8, serial);
+        p += MW_DRAW_CACHE_HEADER;
+        bytes += MW_DRAW_CACHE_HEADER;
+    }
+    mw_put_be32(cmd + 4, bytes);
+    mw_put_be32(p, 4);
+    mw_put_be32(p + 4, 4);
+    mw_put_be32(p + 8, 6);
+    mw_put_be32(p + 12, 1); /* XYZ, rest constant */
+    mw_put_bef(p + 16, red);
+    mw_put_bef(p + 20, green);
+    mw_put_bef(p + 28, 1.0f);
+    mw_put_bef(p + 44, 1.0f);
+    mw_put_bef(p + 60, 1.0f);
+    mw_put_bef(p + 72, 1.0f);
+    if (!replay) {
+        for (i = 0U; i < 4U; ++i) {
+            mw_put_bef(p + CACHE_PREFIX + i * 12U, (i == 1U || i == 2U) ? right : -0.75f);
+            mw_put_bef(p + CACHE_PREFIX + i * 12U + 4U, i >= 2U ? 0.75f : -0.75f);
+        }
+        for (i = 0U; i < 6U; ++i)
+            mw_put_be16(p + CACHE_PREFIX + 48U + i * 2U, indices[i]);
+    }
+    cmd += 8 + bytes;
+    mw_put_be32(cmd, MW_PRESENT);
+    bytes = (uint32_t)(cmd + 8 - packet);
+    mw_put_be32(packet + 8, bytes);
+    return mw_host_submit(c, packet, bytes);
+}
+
+static void test_draw_cache_indexed_oracle(void)
+{
+    mw_ctx *a = mw_host_create(32, 32), *b = mw_host_create(32, 32);
+    uint8_t image[32 * 32 * 4], expected[sizeof(image)], red[sizeof(image)];
+    const unsigned center = (16U * 32U + 16U) * 4U;
+    assert(a && b);
+    assert(cache_quad(a, MW_DRAW_PACKED_INDEXED, 0, 0, 0, 0, 1, 0, 0.75f) == MW_STATUS_OK);
+    assert(mw_host_readback_rgba8(a, red, sizeof(red)) == MW_STATUS_OK);
+    assert(red[center] == 255U && red[center + 1] == 0U);
+    assert(cache_quad(a, MW_DRAW_CACHE_INDEXED, a->handle, 7, 1, 0, 1, 0, 0.75f) == MW_STATUS_OK);
+    assert(mw_host_readback_rgba8(a, image, sizeof(image)) == MW_STATUS_OK);
+    assert(memcmp(image, red, sizeof(image)) == 0);
+    assert(cache_quad(b, MW_DRAW_PACKED_INDEXED, 0, 0, 0, 0, 0, 1, 0.75f) == MW_STATUS_OK);
+    assert(mw_host_readback_rgba8(b, expected, sizeof(expected)) == MW_STATUS_OK);
+    assert(expected[center] == 0U && expected[center + 1] == 255U);
+    assert(cache_quad(b, MW_DRAW_CACHE_INDEXED, b->handle, 7, 1, 0, 0, 1, -0.2f) == MW_STATUS_OK);
+    assert(cache_quad(a, MW_DRAW_CACHE_INDEXED, a->handle, 7, 1, 1, 0, 1, 0) == MW_STATUS_OK);
+    assert(mw_host_readback_rgba8(a, image, sizeof(image)) == MW_STATUS_OK);
+    assert(memcmp(image, expected, sizeof(image)) == 0); /* fresh constants */
+    assert(cache_quad(b, MW_DRAW_CACHE_INDEXED, b->handle, 7, 1, 1, 0, 1, 0) == MW_STATUS_OK);
+    assert(mw_host_readback_rgba8(b, image, sizeof(image)) == MW_STATUS_OK);
+    assert(image[center + 1] == 0U); /* b held other vertices in the same slot/id */
+    assert(cache_quad(b, MW_DRAW_CACHE_INDEXED, a->handle, 7, 1, 1, 1, 0, 0) == MW_STATUS_FAILED);
+    assert(cache_quad(a, MW_DRAW_CACHE_INDEXED, a->handle, 7, 2, 0, 1, 0, -0.2f) == MW_STATUS_OK);
+    assert(cache_quad(a, MW_DRAW_CACHE_INDEXED, a->handle, 7, 1, 1, 1, 0, 0) == MW_STATUS_FAILED);
+    /* Failure retires even the non-evicted valid incarnation. */
+    assert(cache_quad(a, MW_DRAW_CACHE_INDEXED, a->handle, 7, 2, 1, 1, 0, 0) == MW_STATUS_FAILED);
+    assert(cache_quad(a, MW_DRAW_CACHE_INDEXED, a->handle, 7, 3, 0, 1, 0, 0.75f) == MW_STATUS_OK);
+    assert(cache_quad(a, MW_DRAW_CACHE_INDEXED, a->handle, MW_DRAW_CACHE_SLOTS, 4, 1, 1, 0, 0) == MW_STATUS_INVALID);
+    assert(cache_quad(a, MW_DRAW_CACHE_INDEXED, a->handle, 7, 3, 1, 1, 0, 0) == MW_STATUS_FAILED);
+    assert(cache_quad(a, MW_DRAW_CACHE_INDEXED, a->handle, 7, 4, 0, 1, 0, 0.75f) == MW_STATUS_OK);
+    assert(cache_quad(a, MW_DRAW_CACHE_INDEXED, a->handle, 7, 4, 1, 1, 0, 0) == MW_STATUS_OK);
+    assert(mw_host_readback_rgba8(a, image, sizeof(image)) == MW_STATUS_OK);
+    assert(memcmp(image, red, sizeof(image)) == 0);
+    mw_host_destroy(b);
+    mw_host_destroy(a);
+    printf("PASS: test_draw_cache_indexed_oracle\n");
+}
+
+enum { RESIDENT_DRAW_PAYLOAD = 16 + 20 + 32 + 32 + 8, RESIDENT_PACKET_BYTES = 512 };
+
+static uint32_t resident_fixture(uint8_t *packet, uint32_t opcode, uint32_t action,
+                                 uint32_t handle, uint32_t slot, uint32_t serial,
+                                 uint32_t base, uint32_t retired, unsigned variant)
+{
+    static const float xy[7][2] = {
+        {-0.75f, -0.75f}, {-0.9f, 0.0f}, {0.75f, -0.75f}, {0.0f, -0.9f},
+        {0.75f, 0.75f}, {0.0f, 0.9f}, {-0.75f, 0.75f}
+    };
+    static const uint16_t indices[2][9] = {
+        {0, 2, 4, 0, 4, 6, 0, 0, 6}, {6, 4, 0, 0, 0, 0}
+    };
+    const unsigned count = variant ? 6U : 9U;
+    uint8_t *q = packet + 16, *p = packet + RESIDENT_DRAW_PAYLOAD;
+    unsigned i;
+
+    memset(packet, 0, RESIDENT_PACKET_BYTES);
+    mw_put_be32(packet, MW_MAGIC);
+    mw_put_be32(packet + 4, MW_VERSION);
+    mw_put_be32(packet + 12, 5U);
+    mw_put_be32(q, MW_STATE);
+    mw_put_be32(q + 4, 12U);
+    mw_put_be32(q + 8, MW_SCISSOR);
+    mw_put_be32(q + 12, 1U);
+    q += 20;
+    mw_put_be32(q, MW_STATE);
+    mw_put_be32(q + 4, 24U);
+    mw_put_be32(q + 8, MW_SCISSOR_BOX);
+    mw_put_be32(q + 12, 4U);
+    mw_put_be32(q + 24, variant ? 16U : 32U);
+    mw_put_be32(q + 28, 32U);
+    q += 32;
+    mw_put_be32(q, MW_CLEAR);
+    mw_put_be32(q + 4, 24U);
+    mw_put_be32(q + 8, 3U);
+    mw_put_bef(q + 24, 1.0f);
+    mw_put_bef(q + 28, 1.0f);
+    q += 32;
+    mw_put_be32(q, opcode);
+    if (opcode == MW_DRAW_RESIDENT_INDEXED) {
+        mw_put_be32(p, handle);
+        mw_put_be32(p + 4, slot);
+        mw_put_be32(p + 8, serial);
+        mw_put_be32(p + 12, action);
+        mw_put_be32(p + 16, base);
+        mw_put_be32(p + 20, retired);
+        p += MW_DRAW_RESIDENT_HEADER;
+    } else if (opcode == MW_DRAW_CACHE_INDEXED) {
+        mw_put_be32(p, handle);
+        mw_put_be32(p + 4, slot);
+        mw_put_be32(p + 8, serial);
+        p += MW_DRAW_CACHE_HEADER;
+    }
+    mw_put_be32(p, 4U);
+    mw_put_be32(p + 4, 7U);
+    mw_put_be32(p + 8, count);
+    mw_put_be32(p + 12, MW_DRAW_RESIDENT_XYZ_ST_ST);
+    mw_put_bef(p + (variant ? 20U : 16U), 1.0f);
+    mw_put_bef(p + 28, 1.0f);
+    mw_put_bef(p + 40, 1.0f);
+    p += 44;
+    if (!action || action == MW_DRAW_RESIDENT_STORE) {
+        for (i = 0; i < 7U; ++i, p += 28) {
+            mw_put_bef(p, xy[i][0]);
+            mw_put_bef(p + 4, xy[i][1]);
+            mw_put_bef(p + 8, i * 0.125f);
+            mw_put_bef(p + 12, i * 0.25f);
+            mw_put_bef(p + 16, -1.0f);
+            mw_put_bef(p + 20, i * 0.5f);
+            mw_put_bef(p + 24, 1.0f);
+        }
+    }
+    for (i = 0; i < count; ++i)
+        mw_put_be16(p + 2U * i, indices[variant != 0U][i]);
+    p += (count * 2U + 3U) & ~3U;
+    mw_put_be32(q + 4, (uint32_t)(p - q - 8));
+    mw_put_be32(p, MW_PRESENT);
+    mw_put_be32(packet + 8, (uint32_t)(p + 8 - packet));
+    return (uint32_t)(p + 8 - packet);
+}
+
+static void test_resident_indexed_oracle(void)
+{
+    mw_ctx *a = mw_host_create(32, 32), *b = mw_host_create(32, 32);
+    uint8_t packet[RESIDENT_PACKET_BYTES], extended[2 * RESIDENT_PACKET_BYTES];
+    uint8_t image[32 * 32 * 4], expected[sizeof(image)], prior[sizeof(image)];
+    uint8_t *p = packet + RESIDENT_DRAW_PAYLOAD;
+    uint32_t bytes, other_bytes, failed, i;
+    const uint32_t handle = a ? a->handle : 0U;
+    static const struct { uint32_t offset, value; } invalid[] = {
+        {0, 0}, {4, MW_DRAW_RESIDENT_SLOTS}, {8, 0}, {12, 0}, {12, 3},
+        {16, 65530}, {20, 1}, {24, 5}, {28, 0}, {28, 32768},
+        {32, 0}, {32, 7}, {32, MW_MAX_VERTICES + 1}, {36, 0x019},
+        {68, 0x00070002}, /* first index outside the lock */
+        {84, 0x00060001}, /* nonzero final padding */
+    };
+    assert(a && b && a->handle != b->handle);
+    bytes = resident_fixture(packet, MW_DRAW_RESIDENT_INDEXED, MW_DRAW_RESIDENT_STORE,
+                             handle, 7, 1, 9, 0, 0);
+    assert(mw_validate_packet(packet, bytes) == MW_STATUS_OK);
+    assert(mw_host_submit_trusted(a, packet, bytes) == MW_STATUS_FAILED);
+    assert(!a->draw_resident);
+    memcpy(extended, packet, bytes - 8U); /* same-packet STORE then REUSE */
+    other_bytes = resident_fixture(packet, MW_DRAW_RESIDENT_INDEXED, MW_DRAW_RESIDENT_REUSE,
+                                   handle, 7, 1, 9, 0, 1);
+    memcpy(extended + bytes - 8U, packet + 16U, other_bytes - 16U);
+    bytes += other_bytes - 24U;
+    mw_put_be32(extended + 8, bytes);
+    mw_put_be32(extended + 12, 9U);
+    assert(mw_host_submit(a, extended, bytes) == MW_STATUS_OK);
+    assert(mw_host_readback_rgba8(a, image, sizeof(image)) == MW_STATUS_OK);
+
+    bytes = resident_fixture(extended, MW_DRAW_PACKED_INDEXED, 0,
+                             0, 0, 0, 0, 0, 0);
+    other_bytes = resident_fixture(packet, MW_DRAW_CACHE_INDEXED, 0,
+                                   b->handle, 7, 1, 0, 0, 1);
+    memcpy(extended + bytes - 8U, packet + 16U, other_bytes - 16U);
+    bytes += other_bytes - 24U;
+    mw_put_be32(extended + 8, bytes);
+    mw_put_be32(extended + 12, 9U);
+    assert(mw_host_submit(b, extended, bytes) == MW_STATUS_OK);
+    assert(mw_host_readback_rgba8(b, expected, sizeof(expected)) == MW_STATUS_OK);
+    assert(memcmp(image, expected, sizeof(image)) == 0);
+    for (i = 0; i < sizeof(image); i += 4U) {
+        if (image[i + 1U] == 255U)
+            break;
+    }
+    assert(i < sizeof(image)); /* a current-index triangle really rendered */
+    memcpy(prior, image, sizeof(image));
+
+    /* Structural or semantic rejection leaves the previous scissor intact. */
+    for (i = 0; i < sizeof(invalid) / sizeof(invalid[0]); ++i) {
+        bytes = resident_fixture(packet, MW_DRAW_RESIDENT_INDEXED, MW_DRAW_RESIDENT_REUSE,
+                                 handle, 7, 1, 9, 0, 0);
+        mw_put_be32(p + invalid[i].offset, invalid[i].value);
+        assert(mw_host_submit_report(a, packet, bytes, &failed) == MW_STATUS_INVALID);
+        assert(failed == MW_DRAW_RESIDENT_INDEXED);
+        assert(a->state.scissor_w == 16);
+    }
+    bytes = resident_fixture(packet, MW_DRAW_RESIDENT_INDEXED, MW_DRAW_RESIDENT_REUSE,
+                             handle, 7, 1, 9, 0, 0);
+    mw_put_be32(p + 12, MW_DRAW_RESIDENT_STORE); /* REUSE length cannot be a STORE */
+    assert(mw_host_submit(a, packet, bytes) == MW_STATUS_INVALID);
+    mw_put_be32(p + 12, MW_DRAW_RESIDENT_REUSE);
+    assert(mw_host_submit_report(a, packet, bytes, &failed) == MW_STATUS_FAILED);
+    assert(failed == MW_DRAW_RESIDENT_INDEXED);
+    assert(a->state.scissor_w == 16);
+    assert(mw_host_readback_rgba8(a, image, sizeof(image)) == MW_STATUS_OK);
+    assert(memcmp(image, prior, sizeof(image)) == 0);
+    assert(mw_host_submit(b, packet, bytes) == MW_STATUS_FAILED);
+    assert(!b->draw_resident); /* v2 slot 7 is not a resident slot */
+
+    for (i = 2; i < 8U; ++i) {
+        bytes = resident_fixture(packet, MW_DRAW_RESIDENT_INDEXED, MW_DRAW_RESIDENT_STORE,
+                                 handle, 7, i, 9, i - 1U, 0);
+        assert(mw_host_submit(a, packet, bytes) == MW_STATUS_OK);
+        if (i == 2U) {
+            assert(mw_host_submit(a, packet, bytes) == MW_STATUS_FAILED); /* repeated STORE */
+        } else if (i == 3U) {
+            mw_put_be32(p + 8, i - 1U);
+            mw_put_be32(p + 20, 0U);
+            assert(mw_host_submit(a, packet, bytes) == MW_STATUS_FAILED); /* reordered STORE */
+        } else {
+            bytes = resident_fixture(packet, MW_DRAW_RESIDENT_INDEXED, MW_DRAW_RESIDENT_REUSE,
+                                     handle, 7, i, 9, i - 1U, 1);
+            if (i == 4U) mw_put_be32(p + 16, 10U);
+            if (i == 5U) mw_put_be32(p + 28, 8U);
+            if (i == 6U) mw_put_be32(p + 4, 8U);
+            assert(mw_host_submit(a, packet, bytes) == (i == 7U ? MW_STATUS_OK : MW_STATUS_FAILED));
+        }
+        assert(a->draw_resident_serial == i);
+    }
+    /* A guest lifetime retirement applies to all slots, not just eviction. */
+    bytes = resident_fixture(packet, MW_DRAW_RESIDENT_INDEXED, MW_DRAW_RESIDENT_STORE,
+                             handle, 8, 8, 9, 7, 0);
+    assert(mw_host_submit(a, packet, bytes) == MW_STATUS_OK);
+    bytes = resident_fixture(packet, MW_DRAW_RESIDENT_INDEXED, MW_DRAW_RESIDENT_REUSE,
+                             handle, 7, 7, 9, 0, 1);
+    assert(mw_host_submit(a, packet, bytes) == MW_STATUS_FAILED);
+    mw_host_destroy(b);
+    mw_host_destroy(a);
+    printf("PASS: resident dynamic indices, v2/ordinary oracle, structural and lifecycle rejection\n");
+}
+
+static uint32_t both_fixture(uint8_t *packet, uint32_t handle,
+                             uint32_t vs, uint32_t va, uint32_t is, uint32_t ia,
+                             unsigned variant)
+{
+    uint8_t *p = packet + RESIDENT_DRAW_PAYLOAD;
+    uint32_t bytes = resident_fixture(packet, MW_DRAW_RESIDENT_INDEXED, va,
+                                      handle, 7, vs, 9, 0, variant);
+    const uint32_t indices = variant ? 12U : 20U;
+    if (ia == MW_DRAW_RESIDENT_REUSE) {
+        memmove(packet + bytes - 8U - indices, packet + bytes - 8U, 8U);
+        bytes -= indices;
+    }
+    memmove(p + MW_DRAW_RESIDENT_BOTH_HEADER, p + MW_DRAW_RESIDENT_HEADER,
+            bytes - RESIDENT_DRAW_PAYLOAD - MW_DRAW_RESIDENT_HEADER);
+    bytes += MW_DRAW_RESIDENT_BOTH_HEADER - MW_DRAW_RESIDENT_HEADER;
+    mw_put_be32(p - 8U, MW_DRAW_RESIDENT_BOTH);
+    mw_put_be32(p - 4U, bytes - RESIDENT_DRAW_PAYLOAD - 8U);
+    mw_put_be32(packet + 8U, bytes);
+    mw_put_be32(p + 24U, 11U);
+    mw_put_be32(p + 28U, is);
+    mw_put_be32(p + 32U, ia);
+    mw_put_be32(p + 36U, 0);
+    return bytes;
+}
+
+extern uint32_t mw_test_resident_view_bytes;
+extern uint8_t mw_test_resident_view[];
+
+static void enable_depth_lequal(mw_ctx *c)
+{
+    uint8_t packet[16 + 20 + 20 + 8] = {0};
+    uint8_t *q = packet + 16;
+    mw_put_be32(packet, MW_MAGIC);
+    mw_put_be32(packet + 4, MW_VERSION);
+    mw_put_be32(packet + 8, sizeof(packet));
+    mw_put_be32(packet + 12, 3U);
+    mw_put_be32(q, MW_STATE); mw_put_be32(q + 4, 12U);
+    mw_put_be32(q + 8, MW_DEPTH_TEST); mw_put_be32(q + 12, 1U); mw_put_be32(q + 16, 1U);
+    q += 20;
+    mw_put_be32(q, MW_STATE); mw_put_be32(q + 4, 12U);
+    mw_put_be32(q + 8, MW_DEPTH_FUNC); mw_put_be32(q + 12, 1U); mw_put_be32(q + 16, 0x203U);
+    q += 20;
+    mw_put_be32(q, MW_PRESENT);
+    assert(mw_host_submit(c, packet, sizeof(packet)) == MW_STATUS_OK);
+}
+
+static void read_depth(mw_ctx *c, float *out)
+{
+    uint8_t request[24] = {0}, reply[32 * 32 * 4];
+    uint32_t reply_bytes = 0, i;
+    mw_put_be32(request, MW_READ_PIXELS);
+    mw_put_be32(request + 4, 0x1902U);
+    mw_put_be32(request + 16, 32U);
+    mw_put_be32(request + 20, 32U);
+    assert(mw_host_request(c, request, sizeof(request), reply, sizeof(reply), &reply_bytes) == MW_STATUS_OK);
+    assert(reply_bytes == sizeof(reply));
+    for (i = 0; i < 32U * 32U; ++i)
+        out[i] = mw_bef(reply + i * 4U);
+}
+
+/* The resident draw must hand the same packed indexed bytes to the common
+ * renderer entry, and the CPU rasterizer must leave identical depth. */
+static void assert_resident_view_and_depth(mw_ctx *resident, mw_ctx *ordinary,
+                                           const uint8_t *ordinary_packet)
+{
+    const uint8_t *payload = ordinary_packet + RESIDENT_DRAW_PAYLOAD;
+    const uint32_t payload_bytes = mw_be32(payload - 4U);
+    float actual[32 * 32], expected[32 * 32];
+    unsigned i;
+    assert(mw_test_resident_view_bytes == payload_bytes);
+    assert(memcmp(mw_test_resident_view, payload, payload_bytes) == 0);
+    read_depth(resident, actual);
+    read_depth(ordinary, expected);
+    assert(memcmp(actual, expected, sizeof(actual)) == 0);
+    for (i = 0; i < 32U * 32U && actual[i] >= 1.0f; ++i) {}
+    assert(i < 32U * 32U); /* Depth testing really wrote the fixture. */
+}
+
+static void test_resident_both_oracle(void)
+{
+    mw_ctx *a = mw_host_create(32, 32), *b = mw_host_create(32, 32);
+    uint8_t packet[RESIDENT_PACKET_BYTES], pair[2 * RESIDENT_PACKET_BYTES];
+    uint8_t actual[32 * 32 * 4], expected[sizeof(actual)];
+    uint8_t *p = packet + RESIDENT_DRAW_PAYLOAD;
+    uint32_t bytes, second, failed, i;
+    const uint32_t store = MW_DRAW_RESIDENT_STORE, reuse = MW_DRAW_RESIDENT_REUSE;
+
+    assert(a && b);
+    enable_depth_lequal(a);
+    enable_depth_lequal(b);
+    bytes = both_fixture(packet, a->handle, 1, store, 1, store, 0);
+    assert(mw_host_submit_trusted(a, packet, bytes) == MW_STATUS_FAILED);
+    assert(!a->draw_index_resident);
+    memcpy(pair, packet, bytes - 8U);
+    second = both_fixture(packet, a->handle, 2, store, 1, reuse, 0);
+    /* Same index list; same-packet new vertex incarnation and color. */
+    mw_put_bef(p + MW_DRAW_RESIDENT_BOTH_HEADER + 16U, 0.25f);
+    mw_put_bef(p + MW_DRAW_RESIDENT_BOTH_HEADER + 44U, -0.25f);
+    memcpy(pair + bytes - 8U, packet + 16U, second - 16U);
+    bytes += second - 24U;
+    mw_put_be32(pair + 8U, bytes);
+    mw_put_be32(pair + 12U, 9U);
+    assert(mw_host_submit(a, pair, bytes) == MW_STATUS_OK);
+    assert(a->draw_resident_serial == 2 && a->draw_index_serial == 1);
+    bytes = resident_fixture(packet, MW_DRAW_PACKED_INDEXED, 0, 0, 0, 0, 0, 0, 0);
+    mw_put_bef(p + 16U, 0.25f);
+    mw_put_bef(p + 44U, -0.25f);
+    assert(mw_host_submit(b, packet, bytes) == MW_STATUS_OK);
+    assert(mw_host_readback_rgba8(a, actual, sizeof(actual)) == MW_STATUS_OK);
+    assert(mw_host_readback_rgba8(b, expected, sizeof(expected)) == MW_STATUS_OK);
+    assert(memcmp(actual, expected, sizeof(actual)) == 0);
+    for (i = 0; i < sizeof(actual) && actual[i] != 64U; i += 4U) {}
+    assert(i < sizeof(actual)); /* Not two copies of a blank image. */
+    assert_resident_view_and_depth(a, b, packet);
+
+    /* A fresh index list may also draw against a retained vertex root. */
+    bytes = both_fixture(packet, a->handle, 2, reuse, 2, store, 1);
+    assert(mw_host_submit(a, packet, bytes) == MW_STATUS_OK);
+    bytes = both_fixture(packet, a->handle, 2, reuse, 2, reuse, 1);
+    assert(mw_host_submit(a, packet, bytes) == MW_STATUS_OK);
+    bytes = resident_fixture(packet, MW_DRAW_PACKED_INDEXED, 0, 0, 0, 0, 0, 0, 1);
+    mw_put_bef(p + 44U, -0.25f);
+    assert(mw_host_submit(b, packet, bytes) == MW_STATUS_OK);
+    assert(mw_host_readback_rgba8(a, actual, sizeof(actual)) == MW_STATUS_OK);
+    assert(mw_host_readback_rgba8(b, expected, sizeof(expected)) == MW_STATUS_OK);
+    assert(memcmp(actual, expected, sizeof(actual)) == 0);
+    assert(a->state.scissor_w == 16);
+    assert_resident_view_and_depth(a, b, packet);
+
+    /* The earlier valid roots in a packet do not publish on preflight failure. */
+    bytes = both_fixture(packet, a->handle, 3, store, 3, store, 0);
+    memcpy(pair, packet, bytes - 8U);
+    second = both_fixture(packet, a->handle, 3, reuse, 3, reuse, 1); /* mismatched count */
+    memcpy(pair + bytes - 8U, packet + 16U, second - 16U);
+    bytes += second - 24U;
+    mw_put_be32(pair + 8U, bytes);
+    mw_put_be32(pair + 12U, 9U);
+    assert(mw_host_submit_report(a, pair, bytes, &failed) == MW_STATUS_FAILED);
+    assert(failed == MW_DRAW_RESIDENT_BOTH && a->state.scissor_w == 16);
+    assert(a->draw_resident_serial == 2 && a->draw_index_serial == 2);
+    assert(a->draw_resident_retired == 2 && a->draw_index_retired == 2);
+    bytes = both_fixture(packet, a->handle, 3, store, 2, reuse, 1);
+    assert(mw_host_submit(a, packet, bytes) == MW_STATUS_FAILED);
+    assert(a->draw_resident_serial == 2); /* Fresh vertex root did not publish. */
+
+    for (i = 0; i < 5; ++i) {
+        uint32_t serial = 4U + i * 2U;
+        bytes = both_fixture(packet, a->handle, serial, store, serial, store, 0);
+        assert(mw_host_submit(a, packet, bytes) == MW_STATUS_OK);
+        bytes = both_fixture(packet, a->handle, serial + 1U, store, serial, reuse, 0);
+        if (i == 0) mw_put_be32(p + 16U, 10U); /* index base mismatch */
+        if (i == 1) mw_put_be32(p + 24U, 12U); /* empty index slot */
+        if (i == 2) mw_put_be32(p + 36U, serial); /* retired index in header */
+        if (i == 3) { /* Right length, different lock span. */
+            mw_put_be32(p + 12U, reuse);
+            mw_put_be32(p + MW_DRAW_RESIDENT_BOTH_HEADER + 4U, 8U);
+            bytes -= 7U * 28U;
+            memmove(packet + bytes - 8U, packet + bytes - 8U + 7U * 28U, 8U);
+            mw_put_be32(packet + 8U, bytes);
+            mw_put_be32(p - 4U, bytes - RESIDENT_DRAW_PAYLOAD - 8U);
+        }
+        if (i == 4) mw_put_be32(p + 28U, serial - 1U); /* stale index id */
+        assert(mw_host_submit(a, packet, bytes) == (i == 2 ? MW_STATUS_INVALID : MW_STATUS_FAILED));
+        assert(a->draw_resident_serial == serial);
+        assert(mw_host_submit(b, packet, bytes) != MW_STATUS_OK); /* wrong context */
+    }
+    bytes = both_fixture(packet, a->handle, 20, store, 20, store, 0);
+    mw_put_be16(packet + bytes - 8U - 20U, 7U); /* index outside the range */
+    assert(mw_host_submit(a, packet, bytes) == MW_STATUS_INVALID);
+    mw_put_be16(packet + bytes - 8U - 20U, 0U);
+    mw_put_be16(packet + bytes - 8U - 2U, 1U);
+    assert(mw_host_submit(a, packet, bytes) == MW_STATUS_INVALID);
+    mw_host_destroy(b);
+    mw_host_destroy(a);
+    printf("PASS: independent resident roots, live state, byte-exact render and atomic preflight\n");
+}
+
+int main(int argc, char **argv)
+{
+    if (argc == 2 && strcmp(argv[1], "--resident-indexed") == 0) {
+        test_resident_indexed_oracle();
+        test_resident_both_oracle();
+        return 0;
+    }
     test_create_destroy();
     test_clear_and_readback();
     test_single_buffer_front_clear_readback();
@@ -1265,6 +1726,9 @@ int main(void)
     test_draw_buffer_none_preserves_color();
     test_glquake_texture_soak();
     test_draw_packed_indexed_oracle();
+    test_draw_cache_indexed_oracle();
+    test_resident_indexed_oracle();
+    test_resident_both_oracle();
     test_direct_rgb565_read_pixels();
     test_read_pixels_activates_its_context();
     test_palette_snapshot();

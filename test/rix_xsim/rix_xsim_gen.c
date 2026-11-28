@@ -56,8 +56,18 @@
     (TEXENV_TEXTURE_SIZE * TEXENV_TEXTURE_SIZE * 2U / TEXTURE_PAGE_BYTES)
 #define TEXENV_TEXTURE_ADDRESS \
     (STRESS_TEXTURE_ADDRESS + STRESS_TEXTURE_PAGES * TEXTURE_PAGE_BYTES)
-#define TEXTURE_PAGES \
-    (SMALL_TEXTURE_PAGES + STRESS_TEXTURE_PAGES + TEXENV_TEXTURE_PAGES)
+/* Texture-throughput textures (tp-* scenes): two 256x256 RGB565 pages sets,
+ * one 256x256 texture with its full sparse mip chain, and a block of small
+ * textures of assorted shapes. */
+#define TP_TEXTURE_SIZE 256U
+#define TP_PLAIN_PAGES (TP_TEXTURE_SIZE * TP_TEXTURE_SIZE * 2U / TEXTURE_PAGE_BYTES)
+#define TP_MIP_PAGES 128U
+#define TP_SMALL_PAGES 16U
+#define TP_A_PAGE (SMALL_TEXTURE_PAGES + STRESS_TEXTURE_PAGES + TEXENV_TEXTURE_PAGES)
+#define TP_B_PAGE (TP_A_PAGE + TP_PLAIN_PAGES)
+#define TP_MIP_PAGE (TP_B_PAGE + TP_PLAIN_PAGES)
+#define TP_SMALL_PAGE (TP_MIP_PAGE + TP_MIP_PAGES)
+#define TEXTURE_PAGES (TP_SMALL_PAGE + TP_SMALL_PAGES)
 #define TEXTURE_BYTES (TEXTURE_PAGE_BYTES * TEXTURE_PAGES)
 
 #define MEMFETCH_CHUNK_BYTES 1024U
@@ -1253,6 +1263,82 @@ static void fill_texture_page(uint8_t *page, uint32_t rgba_value)
                                        RIX_TEXTURE_RGB565);
 }
 
+/*
+ * Texture-throughput textures.  Every texel is a pseudo-random RGB565 value,
+ * so a texel taken from the wrong lane or address changes the frame; the mip
+ * chain uses a different pattern per level so a wrong LOD is visible too.
+ */
+static uint32_t tp_hash(uint32_t x, uint32_t y, uint32_t seed)
+{
+    uint32_t value = (x * 0x9e3779b1U) ^ ((y + 0x7f4a7c15U) * 0x85ebca6bU) ^
+                     (seed * 0xc2b2ae35U);
+
+    value ^= value >> 15;
+    value *= 0x2c1b3c6dU;
+    value ^= value >> 12;
+    value *= 0x297a2d39U;
+    value ^= value >> 15;
+    return value;
+}
+
+static void fill_tp_plain(uint8_t *destination, uint32_t width, uint32_t height,
+                          uint32_t seed)
+{
+    static uint32_t rgba[TP_TEXTURE_SIZE * TP_TEXTURE_SIZE];
+    uint32_t x;
+    uint32_t y;
+
+    for (y = 0U; y < height; ++y) {
+        for (x = 0U; x < width; ++x) {
+            rgba[y * width + x] = (tp_hash(x, y, seed) & 0xffffff00U) | 0xffU;
+        }
+    }
+    (void)rix_texture_convert_rgba8_le(destination, width * height * 2U, rgba,
+                                       width * height, RIX_TEXTURE_RGB565);
+}
+
+typedef struct TpTexture {
+    uint32_t page;
+    uint32_t page_count;
+    uint8_t width_log2;
+    uint8_t height_log2;
+    uint8_t mipmapped;
+} TpTexture;
+
+/* Small textures of assorted shapes inside the TP_SMALL block. */
+static const TpTexture tp_small[6] = {
+    { TP_SMALL_PAGE + 0U, 4U, 6U, 6U, 0U },
+    { TP_SMALL_PAGE + 4U, 1U, 2U, 8U, 0U },
+    { TP_SMALL_PAGE + 5U, 1U, 8U, 2U, 0U },
+    { TP_SMALL_PAGE + 6U, 1U, 1U, 1U, 0U },
+    { TP_SMALL_PAGE + 7U, 1U, 0U, 0U, 0U },
+    { TP_SMALL_PAGE + 8U, 4U, 5U, 7U, 0U }
+};
+static const TpTexture tp_tex_a = { TP_A_PAGE, TP_PLAIN_PAGES, 8U, 8U, 0U };
+static const TpTexture tp_tex_b = { TP_B_PAGE, TP_PLAIN_PAGES, 8U, 8U, 0U };
+static const TpTexture tp_tex_mip = { TP_MIP_PAGE, TP_MIP_PAGES, 8U, 8U, 1U };
+
+static void fill_tp_textures(uint8_t *texture)
+{
+    uint32_t level;
+    uint32_t index;
+
+    fill_tp_plain(&texture[TP_A_PAGE * TEXTURE_PAGE_BYTES], TP_TEXTURE_SIZE, TP_TEXTURE_SIZE, 0xa1U);
+    fill_tp_plain(&texture[TP_B_PAGE * TEXTURE_PAGE_BYTES], TP_TEXTURE_SIZE, TP_TEXTURE_SIZE, 0xb2U);
+    for (level = 0U; level <= 8U; ++level) {
+        uint32_t size = TP_TEXTURE_SIZE >> level;
+        uint32_t offset = rix_texture_mip_offset(8U, 8U, (uint8_t)level);
+
+        fill_tp_plain(&texture[TP_MIP_PAGE * TEXTURE_PAGE_BYTES + offset * 2U], size, size,
+                      0x100U + level);
+    }
+    for (index = 0U; index < 6U; ++index) {
+        fill_tp_plain(&texture[tp_small[index].page * TEXTURE_PAGE_BYTES],
+                      1U << tp_small[index].width_log2, 1U << tp_small[index].height_log2,
+                      0x200U + index);
+    }
+}
+
 static void make_texture(uint8_t texture[TEXTURE_BYTES])
 {
     uint8_t r = (uint8_t)((LIGHTMAP_RGB565 >> 11) & 0x1fU);
@@ -1274,6 +1360,8 @@ static void make_texture(uint8_t texture[TEXTURE_BYTES])
     fill_stress_texture(&texture[SMALL_TEXTURE_PAGES * TEXTURE_PAGE_BYTES]);
     /* Pages 18.. hold the 64x64 ef-texenv gradient texture. */
     fill_texenv_texture(&texture[(SMALL_TEXTURE_PAGES + STRESS_TEXTURE_PAGES) * TEXTURE_PAGE_BYTES]);
+    /* Pages 70.. hold the texture-throughput textures (tp-* scenes). */
+    fill_tp_textures(texture);
 }
 
 /*
@@ -1600,6 +1688,363 @@ static int emit_lightmap_pass_tmu2(RixCmdWriter *writer,
     return 1;
 }
 
+/*
+ * Texture-throughput scenes (tp-*): full-target textured quads and triangle
+ * soups that drive the texture reader through the traversal patterns of
+ * bilinear sampling: unit and half-texel steps in s and t, magnification,
+ * rotated and mirrored maps, minification through the mip chain with a
+ * varying LOD, nearest sampling, texture swaps (page-table writes) between
+ * draws and randomized state.  They have no analytic reference; the frames
+ * are compared bit for bit against the frames of the pre-change RTL and the
+ * reader cost is read from the testbench's TEXPERF line.
+ */
+typedef struct TpAffine {
+    float s0, t0, dsdx, dsdy, dtdx, dtdy;
+} TpAffine;
+
+static TpAffine tp_rotation(float degrees, float texels_per_pixel, uint32_t width,
+                            uint32_t height, float s0, float t0)
+{
+    float radians = degrees * (float)(PI / 180.0);
+    float c = cosf(radians) * texels_per_pixel;
+    float s = sinf(radians) * texels_per_pixel;
+    TpAffine map;
+
+    map.s0 = s0;
+    map.t0 = t0;
+    map.dsdx = c / (float)width;
+    map.dsdy = -s / (float)width;
+    map.dtdx = s / (float)height;
+    map.dtdy = c / (float)height;
+    return map;
+}
+
+static RixVertex tp_vertex(float x, float y, const TpAffine *map)
+{
+    return vertex(x, y, 0.5f, 0xffffffffU,
+                  map->s0 + map->dsdx * x + map->dsdy * y,
+                  map->t0 + map->dtdx * x + map->dtdy * y);
+}
+
+static int tp_triangle(RixCmdWriter *writer, const RixVertex *a, const RixVertex *b,
+                       const RixVertex *c)
+{
+    RixTriangle triangle[1];
+    size_t count = 0U;
+
+    return add_triangle(triangle, &count, a, b, c) &&
+           rix_cmd_triangle(writer, triangle[0].words, RIX_TRIANGLE_WORDS);
+}
+
+static int tp_quad(RixCmdWriter *writer, float x0, float y0, float x1, float y1,
+                   const TpAffine *map)
+{
+    RixVertex v00 = tp_vertex(x0, y0, map);
+    RixVertex v10 = tp_vertex(x1, y0, map);
+    RixVertex v01 = tp_vertex(x0, y1, map);
+    RixVertex v11 = tp_vertex(x1, y1, map);
+
+    return tp_triangle(writer, &v00, &v10, &v01) && tp_triangle(writer, &v10, &v11, &v01);
+}
+
+static int tp_bind(RixCmdWriter *writer, const TpTexture *texture)
+{
+    uint32_t pages[TP_MIP_PAGES];
+    uint32_t index;
+
+    for (index = 0U; index < texture->page_count; ++index) {
+        pages[index] = TEXTURE_ADDRESS + (texture->page + index) * TEXTURE_PAGE_BYTES;
+    }
+    return rix_cmd_texture_pages(writer, 0U, pages, texture->page_count);
+}
+
+static int tp_state(RixCmdWriter *writer, const TpTexture *texture, unsigned int linear,
+                    unsigned int clamp)
+{
+    RixTextureState state;
+
+    memset(&state, 0, sizeof(state));
+    state.width_log2 = texture->width_log2;
+    state.height_log2 = texture->height_log2;
+    state.clamp_s = (uint8_t)clamp;
+    state.clamp_t = (uint8_t)clamp;
+    state.mag_linear = (uint8_t)linear;
+    state.min_linear = texture->mipmapped;
+    state.pixel_format = RIX_TEXTURE_RGB565;
+    return rix_cmd_texture_state(writer, 0U, &state);
+}
+
+static int tp_prologue(RixCmdWriter *writer, const EfFrameConfig *config)
+{
+    RixFragmentState fragment;
+    RixTexEnvState environment;
+
+    memset(&fragment, 0, sizeof(fragment));
+    fragment.depth_func = RIX_FUNC_ALWAYS;
+    fragment.depth_mask = 0U;
+    fragment.color_mask_r = 1U;
+    fragment.color_mask_g = 1U;
+    fragment.color_mask_b = 1U;
+    fragment.color_mask_a = 1U;
+    fragment.src_factor = RIX_BLEND_ONE;
+    fragment.dst_factor = RIX_BLEND_ZERO;
+    memset(&environment, 0, sizeof(environment));
+    environment.combine_rgb = RIX_TEX_REPLACE;
+    environment.combine_alpha = RIX_TEX_REPLACE;
+    environment.src_rgb[0] = RIX_TEXSRC_TEXTURE;
+    environment.src_alpha[0] = RIX_TEXSRC_TEXTURE;
+    environment.operand_rgb[0] = RIX_TEXOP_SRC_COLOR;
+    environment.operand_alpha[0] = RIX_TEXAOP_SRC_ALPHA;
+    return rix_cmd_feature_enable(writer, RIX_FEATURE_TMU0) &&
+           rix_cmd_fragment_state(writer, &fragment) &&
+           rix_cmd_tex_env(writer, 0U, &environment) &&
+           emit_external_frame(writer, NULL, 0U, config);
+}
+
+/* One texture, one full-target quad. */
+static int emit_tp_single(RixCmdWriter *writer, const EfFrameConfig *config,
+                          const TpTexture *texture, unsigned int linear, unsigned int clamp,
+                          const TpAffine *map)
+{
+    return tp_prologue(writer, config) && tp_bind(writer, texture) &&
+           tp_state(writer, texture, linear, clamp) &&
+           tp_quad(writer, 16.0f, 16.0f, (float)(SCREEN_WIDTH - 16U),
+                   (float)(SCREEN_HEIGHT - 16U), map);
+}
+
+/* Perspective floor: the top edge is four times farther than the bottom edge,
+ * so the LOD sweeps from level 2 down to level 0 across the frame. */
+static int emit_tp_mip_persp(RixCmdWriter *writer, const EfFrameConfig *config)
+{
+    RixVertex v00 = vertex(16.0f, 16.0f, 0.5f, 0xffffffffU, 0.0f, 0.0f);
+    RixVertex v10 = vertex((float)(SCREEN_WIDTH - 16U), 16.0f, 0.5f, 0xffffffffU, 2.5f, 0.0f);
+    RixVertex v01 = vertex(16.0f, (float)(SCREEN_HEIGHT - 16U), 0.5f, 0xffffffffU, 0.0f, 1.875f);
+    RixVertex v11 = vertex((float)(SCREEN_WIDTH - 16U), (float)(SCREEN_HEIGHT - 16U), 0.5f,
+                           0xffffffffU, 2.5f, 1.875f);
+
+    v00.w = 0.25f;
+    v10.w = 0.25f;
+    return tp_prologue(writer, config) && tp_bind(writer, &tp_tex_mip) &&
+           tp_state(writer, &tp_tex_mip, 1U, 0U) &&
+           tp_triangle(writer, &v00, &v10, &v01) && tp_triangle(writer, &v10, &v11, &v01);
+}
+
+/* Eight bands that alternate between two textures: every band is a
+ * page-table write, so the cache is invalidated and refilled. */
+static int emit_tp_alt(RixCmdWriter *writer, const EfFrameConfig *config)
+{
+    TpAffine map = tp_rotation(0.0f, 1.0f, 256U, 256U, 0.2f, 0.1f);
+    unsigned int band;
+
+    if (!tp_prologue(writer, config)) {
+        return 0;
+    }
+    for (band = 0U; band < 8U; ++band) {
+        const TpTexture *texture = (band & 1U) ? &tp_tex_b : &tp_tex_a;
+
+        if (!tp_bind(writer, texture) || !tp_state(writer, texture, 1U, 0U) ||
+            !tp_quad(writer, 16.0f, (float)(16U + band * 56U), (float)(SCREEN_WIDTH - 16U),
+                     (float)(16U + band * 56U + 56U), &map)) {
+            return 0;
+        }
+    }
+    return 1;
+}
+
+/* Four quadrants with different rotations, scales, mirroring and textures. */
+static int emit_tp_rot_mix(RixCmdWriter *writer, const EfFrameConfig *config)
+{
+    static const struct {
+        const TpTexture *texture;
+        float degrees;
+        float scale;
+        int mirror;
+    } quadrant[4] = {
+        { &tp_tex_a, 45.0f, 0.7f, 0 },
+        { &tp_tex_b, 135.0f, 1.3f, 0 },
+        { &tp_tex_mip, 200.0f, 1.0f, 0 },
+        { &tp_tex_a, 300.0f, 0.5f, 1 }
+    };
+    unsigned int index;
+
+    if (!tp_prologue(writer, config)) {
+        return 0;
+    }
+    for (index = 0U; index < 4U; ++index) {
+        TpAffine map = tp_rotation(quadrant[index].degrees, quadrant[index].scale, 256U, 256U,
+                                   0.3f, 0.6f);
+        float x0 = (index & 1U) ? 320.0f : 16.0f;
+        float y0 = (index & 2U) ? 240.0f : 16.0f;
+
+        if (quadrant[index].mirror) {
+            map.dsdx = -map.dsdx;
+            map.dsdy = -map.dsdy;
+        }
+        if (!tp_bind(writer, quadrant[index].texture) ||
+            !tp_state(writer, quadrant[index].texture, 1U, 0U) ||
+            !tp_quad(writer, x0, y0, x0 + 304.0f, y0 + 224.0f, &map)) {
+            return 0;
+        }
+    }
+    return 1;
+}
+
+static uint32_t tp_rand_state;
+
+static uint32_t tp_rand(void)
+{
+    tp_rand_state = tp_rand_state * 1664525U + 1013904223U;
+    return tp_rand_state >> 8;
+}
+
+static float tp_rand_range(float low, float high)
+{
+    return low + (high - low) * (float)(tp_rand() & 0xffffU) / 65535.0f;
+}
+
+static float tp_clamp(float value, float low, float high)
+{
+    return value < low ? low : (value > high ? high : value);
+}
+
+/* Randomized triangles: random texture (plain, mipmapped or one of the small
+ * shapes), nearest/linear, clamp/repeat, random rotation, scale and mirroring
+ * or random per-vertex texture coordinates. */
+#define TP_RAND_TRIANGLES 28U
+static int emit_tp_rand(RixCmdWriter *writer, const EfFrameConfig *config)
+{
+    const TpTexture *textures[9] = { &tp_tex_a, &tp_tex_b, &tp_tex_mip, &tp_small[0],
+                                     &tp_small[1], &tp_small[2], &tp_small[3], &tp_small[4],
+                                     &tp_small[5] };
+    const TpTexture *bound = NULL;
+    unsigned int index;
+
+    tp_rand_state = 0x7e57c0deU;
+    if (!tp_prologue(writer, config)) {
+        return 0;
+    }
+    {
+        /* The testbench requires the frame centre to be covered. */
+        TpAffine map = tp_rotation(20.0f, 1.1f, 256U, 256U, 0.1f, 0.2f);
+        RixVertex c0 = tp_vertex(120.0f, 60.0f, &map);
+        RixVertex c1 = tp_vertex(520.0f, 100.0f, &map);
+        RixVertex c2 = tp_vertex(300.0f, 420.0f, &map);
+
+        if (!tp_bind(writer, &tp_tex_a) || !tp_state(writer, &tp_tex_a, 1U, 0U) ||
+            !tp_triangle(writer, &c0, &c1, &c2)) {
+            return 0;
+        }
+        bound = &tp_tex_a;
+    }
+    for (index = 0U; index < TP_RAND_TRIANGLES; ++index) {
+        const TpTexture *texture = textures[tp_rand() % 9U];
+        unsigned int linear = tp_rand() & 1U;
+        unsigned int clamp = tp_rand() & 1U;
+        uint32_t width = 1U << texture->width_log2;
+        uint32_t height = 1U << texture->height_log2;
+        float cx = tp_rand_range(60.0f, 580.0f);
+        float cy = tp_rand_range(50.0f, 430.0f);
+        float radius = tp_rand_range(70.0f, 230.0f);
+        float angle = tp_rand_range(0.0f, (float)(2.0 * PI));
+        float step1 = tp_rand_range(100.0f, 140.0f) * (float)(PI / 180.0);
+        float step2 = tp_rand_range(220.0f, 260.0f) * (float)(PI / 180.0);
+        float angles[3];
+        TpAffine map = tp_rotation(tp_rand_range(0.0f, 360.0f), tp_rand_range(0.15f, 3.5f),
+                                   width, height, tp_rand_range(0.0f, 1.0f),
+                                   tp_rand_range(0.0f, 1.0f));
+        int per_vertex = (int)(tp_rand() & 1U);
+        RixVertex v[3];
+        float area;
+        unsigned int k;
+
+        angles[0] = angle;
+        angles[1] = angle + step1;
+        angles[2] = angle + step2;
+        if (tp_rand() & 1U) {
+            map.dsdx = -map.dsdx;
+            map.dsdy = -map.dsdy;
+        }
+        for (k = 0U; k < 3U; ++k) {
+            float x = tp_clamp(cx + radius * cosf(angles[k]), 16.0f, (float)(SCREEN_WIDTH - 16U));
+            float y = tp_clamp(cy + radius * sinf(angles[k]), 16.0f, (float)(SCREEN_HEIGHT - 16U));
+
+            v[k] = tp_vertex(x, y, &map);
+            if (per_vertex) {
+                v[k].s = tp_rand_range(-1.0f, 3.0f);
+                v[k].t = tp_rand_range(-1.0f, 3.0f);
+            }
+        }
+        area = (v[1].x - v[0].x) * (v[2].y - v[0].y) - (v[2].x - v[0].x) * (v[1].y - v[0].y);
+        if (area < 0.0f) {
+            RixVertex swap = v[1];
+
+            v[1] = v[2];
+            v[2] = swap;
+        }
+        if (fabsf(area) < 800.0f) {
+            continue;
+        }
+        if (texture != bound) {
+            if (!tp_bind(writer, texture)) {
+                return 0;
+            }
+            bound = texture;
+        }
+        if (!tp_state(writer, texture, linear, clamp) ||
+            !tp_triangle(writer, &v[0], &v[1], &v[2])) {
+            return 0;
+        }
+    }
+    return 1;
+}
+
+#define TP_FIRST_SCENE 13U
+#define TP_SCENE_COUNT 10U
+static const char *const tp_scene_names[TP_SCENE_COUNT] = {
+    "tp-lin1", "tp-lin-half", "tp-mag16", "tp-nearest", "tp-mip-min",
+    "tp-mip-persp", "tp-alt", "tp-rot30", "tp-rot-mix", "tp-rand"
+};
+
+static int emit_tp_scene(RixCmdWriter *writer, unsigned int scene, const EfFrameConfig *config)
+{
+    switch (scene) {
+    case 13U: { /* 1 texel per pixel, bilinear, repeat */
+        TpAffine map = tp_rotation(0.0f, 1.0f, 256U, 256U, 0.2f, 0.1f);
+        return emit_tp_single(writer, config, &tp_tex_a, 1U, 0U, &map);
+    }
+    case 14U: { /* 0.5 texel per pixel */
+        TpAffine map = tp_rotation(0.0f, 0.5f, 256U, 256U, 0.2f, 0.1f);
+        return emit_tp_single(writer, config, &tp_tex_a, 1U, 0U, &map);
+    }
+    case 15U: { /* 16x magnification */
+        TpAffine map = tp_rotation(0.0f, 1.0f / 16.0f, 256U, 256U, 0.2f, 0.1f);
+        return emit_tp_single(writer, config, &tp_tex_a, 1U, 0U, &map);
+    }
+    case 16U: { /* nearest, 1 texel per pixel */
+        TpAffine map = tp_rotation(0.0f, 1.0f, 256U, 256U, 0.2f, 0.1f);
+        return emit_tp_single(writer, config, &tp_tex_a, 0U, 0U, &map);
+    }
+    case 17U: { /* minified through the mip chain: 2 and 1.5 texels per pixel */
+        TpAffine map = { 0.2f, 0.1f, 2.0f / 256.0f, 0.0f, 0.0f, 1.5f / 256.0f };
+        return emit_tp_single(writer, config, &tp_tex_mip, 1U, 0U, &map);
+    }
+    case 18U:
+        return emit_tp_mip_persp(writer, config);
+    case 19U:
+        return emit_tp_alt(writer, config);
+    case 20U: { /* rotated by 30 degrees */
+        TpAffine map = tp_rotation(30.0f, 1.0f, 256U, 256U, 0.2f, 0.1f);
+        return emit_tp_single(writer, config, &tp_tex_a, 1U, 0U, &map);
+    }
+    case 21U:
+        return emit_tp_rot_mix(writer, config);
+    case 22U:
+        return emit_tp_rand(writer, config);
+    default:
+        return 0;
+    }
+}
+
 static int write_texture_files(const char *directory, const uint8_t texture[TEXTURE_BYTES])
 {
     char binary_path[1024];
@@ -1686,6 +2131,8 @@ static int generate_scene(const char *directory, const char *name,
     } else if (scene == 12U) {
         valid_scene = build_lm(triangles, &triangle_count) &&
                       build_lm_xor(triangles, &triangle_count);
+    } else if (scene >= TP_FIRST_SCENE && scene < TP_FIRST_SCENE + TP_SCENE_COUNT) {
+        valid_scene = 1;
     } else {
         valid_scene = 0;
     }
@@ -1695,7 +2142,10 @@ static int generate_scene(const char *directory, const char *name,
     scene_triangle_count = triangle_count;
 
     rix_cmd_init(&writer, raw, sizeof(raw));
-    if (scene == 7U) {
+    if (scene >= TP_FIRST_SCENE) {
+        /* No reference frame: compared against the pre-change RTL frames. */
+        valid_scene = emit_tp_scene(&writer, scene, &config);
+    } else if (scene == 7U) {
         valid_scene = emit_stress(&writer, triangles, &config) &&
                       write_stress_reference(directory, name);
     } else if (scene == 8U) {
@@ -1773,6 +2223,11 @@ int main(int argc, char **argv)
         !generate_scene(argv[1], "ef-blendbe", 11U) ||
         !generate_scene(argv[1], "ef-logicbe", 12U)) {
         return 1;
+    }
+    for (unsigned int index = 0U; index < TP_SCENE_COUNT; ++index) {
+        if (!generate_scene(argv[1], tp_scene_names[index], TP_FIRST_SCENE + index)) {
+            return 1;
+        }
     }
     return 0;
 }
