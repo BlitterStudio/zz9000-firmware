@@ -289,6 +289,9 @@ static struct {
 	int comment_ok_short;		/* answer OK even when the room was short */
 	uint8_t comment_set[512];
 	uint32_t comment_set_len;
+	const char *picked_path;
+	uint32_t picked_bytes, picked_len;
+	uint8_t requester_input[512];
 	const uint8_t *clip_data;
 	uint32_t clip_len, clip_cap, clip_seq, clip_max_len;
 	int clip_drift, clip_stall;
@@ -365,6 +368,17 @@ static void client_handle(client_t *c, const aar_request *r)
 		d.out[AAR_R_STAT_MODE] = AAR_MODE_FILE;
 		d.out[AAR_R_STAT_PROTECT] = cl.protect;
 		break;
+	case AAR_OP_FILE_REQUEST: {
+		uint32_t in = r->arg[AAR_A_FILE_REQUEST_IN_BYTES];
+
+		CHECK(buf && in <= r->buf_len && in <= sizeof(cl.requester_input));
+		if (buf && in <= r->buf_len && in <= sizeof(cl.requester_input))
+			memcpy(cl.requester_input, buf, in);
+		if (buf && !cl.ignore && cl.picked_path && cl.picked_bytes <= r->buf_len)
+			memcpy(buf, cl.picked_path, cl.picked_bytes);
+		d.out[AAR_R_FILE_REQUEST_LEN] = cl.picked_len;
+		break;
+	}
 	case AAR_OP_FILE_READ: {
 		uint32_t left = cl.file_size - cl.file_pos;
 		uint32_t n = r->arg[AAR_A_FILE_LEN] < left ? r->arg[AAR_A_FILE_LEN] : left;
@@ -1278,6 +1292,153 @@ static void test_files(void)
 	CHECK(zzapp_svc_file_list_next(list, &de) == AAR_E_BADF);
 
 	CHECK(set_svc.count == 1U);	/* parked waits registered it */
+	CHECK(mbox(ZZAPP_OP_RELEASE, handle, 0U, 0U, NULL, NULL) == SDK_STATUS_OK);
+}
+
+static void requester_delayed_yield(void)
+{
+	if (cl.yields++ == 0U) {
+		fake_now += 31000000U;
+		zzapp_services_poll();
+		CHECK(service_test_wake_count == 0U);
+	} else {
+		client_service(cur_client);
+	}
+}
+
+static void requester_stop_yield(void)
+{
+	cl.yields++;
+	client_service(cur_client);
+	aar_put_be32(cur_client->cb + AAR_CB_STOP_REQUEST, 1U);
+	zzapp_services_poll();
+	CHECK(service_test_wake_count == 1U && cur_rec->thread.wake_reason == ZZAPP_WAKE_READY);
+}
+
+static void test_file_requester(void)
+{
+	static const char picked[] = "Work:chosen.txt";
+	static const char input[] = "Open work\0Work:old.txt";
+	static const struct {
+		int32_t result;
+		uint32_t len;
+		const char *bytes;
+		uint32_t bytes_len;
+		int expected;
+	} replies[] = {
+		{ 0, 4U, "bad!", 4U, 0 },
+		{ AAR_E_NOSYS, 0U, NULL, 0U, AAR_E_NOSYS },
+		{ AAR_E_ACCES, 0U, NULL, 0U, AAR_E_ACCES },
+		{ AAR_E_NOSPC, 0U, NULL, 0U, AAR_E_NOSPC },
+		{ 2, 3U, "abc", 4U, AAR_E_IO },
+		{ 1, 0U, "", 1U, AAR_E_IO },
+		{ 1, 4U, NULL, 0U, AAR_E_IO },
+		{ 1, UINT32_MAX, NULL, 0U, AAR_E_IO },
+		{ 1, 3U, "abcd", 4U, AAR_E_IO },
+		{ 1, 3U, "a\0c", 4U, AAR_E_IO },
+	};
+	client_t c;
+	zzapp_rec_t *rec;
+	const aar_request *r = &cl.last[AAR_OP_FILE_REQUEST];
+	const volatile uint8_t *slot;
+	char path[300], before[sizeof(path)], title[256], initial[256], long_input[257];
+	uint32_t handle, i;
+
+	reset_all();
+	rec = claim(&c, &handle);
+	memset(before, '?', sizeof(before));
+	memcpy(path, before, sizeof(path));
+	memset(long_input, 'x', sizeof(long_input) - 1U);
+	long_input[sizeof(long_input) - 1U] = '\0';
+	CHECK(zzapp_svc_file_request(2U, NULL, NULL, path, sizeof(path)) == AAR_E_INVAL);
+	CHECK(zzapp_svc_file_request(0U, long_input, NULL, path, sizeof(path)) == AAR_E_INVAL);
+	CHECK(zzapp_svc_file_request(0U, NULL, long_input, path, sizeof(path)) == AAR_E_INVAL);
+	CHECK(zzapp_svc_file_request(0U, NULL, NULL, NULL, sizeof(path)) == AAR_E_INVAL);
+	CHECK(zzapp_svc_file_request(0U, NULL, NULL, path, 0U) == AAR_E_INVAL);
+	CHECK(aar_queue_peek(&c.sq, NULL, &slot) == 0);
+
+	cl.result = 1;
+	cl.picked_path = picked;
+	cl.picked_bytes = sizeof(picked);
+	cl.picked_len = sizeof(picked) - 1U;
+	zzapp_services_test_set_yield(requester_delayed_yield);
+	CHECK(zzapp_svc_file_request(0U, "Open work", "Work:old.txt", path, sizeof(path)) == 1);
+	CHECK(cl.yields == 2U && fake_now > 31000000U);
+	CHECK(!zzapp_services_wait_registered(rec->hdr.pid));
+	CHECK(memcmp(path, picked, sizeof(picked)) == 0 && path[sizeof(picked)] == '?');
+	CHECK(r->arg[AAR_A_FILE_REQUEST_FLAGS] == 0U);
+	CHECK(r->arg[AAR_A_FILE_REQUEST_IN_BYTES] == sizeof(input));
+	CHECK(r->arg[AAR_A_FILE_REQUEST_CAP] == 256U && r->buf_len == 256U);
+	CHECK(memcmp(cl.requester_input, input, sizeof(input)) == 0);
+
+	zzapp_services_test_set_yield(client_yield);
+	memset(title, 't', sizeof(title) - 1U);
+	memset(initial, 'i', sizeof(initial) - 1U);
+	title[255] = initial[255] = '\0';
+	CHECK(zzapp_svc_file_request(AAR_FILE_REQUEST_SAVE, title, initial, path, sizeof(picked)) == 1);
+	CHECK(r->arg[AAR_A_FILE_REQUEST_FLAGS] == AAR_FILE_REQUEST_SAVE);
+	CHECK(r->arg[AAR_A_FILE_REQUEST_IN_BYTES] == 512U && r->buf_len == 512U);
+	CHECK(r->arg[AAR_A_FILE_REQUEST_CAP] == sizeof(picked));
+	CHECK(memcmp(cl.requester_input, title, sizeof(title)) == 0);
+	CHECK(memcmp(cl.requester_input + sizeof(title), initial, sizeof(initial)) == 0);
+
+	memcpy(path, before, sizeof(path));
+	for (i = 0U; i < sizeof(replies) / sizeof(replies[0]); i++) {
+		cl.result = replies[i].result;
+		cl.picked_path = replies[i].bytes;
+		cl.picked_bytes = replies[i].bytes_len;
+		cl.picked_len = replies[i].len;
+		CHECK(zzapp_svc_file_request(0U, NULL, "", path, 4U) == replies[i].expected);
+		CHECK(memcmp(path, before, sizeof(path)) == 0);
+	}
+	CHECK(r->arg[AAR_A_FILE_REQUEST_IN_BYTES] == 2U && r->buf_len == 4U);
+	CHECK(cl.requester_input[0] == 0U && cl.requester_input[1] == 0U);
+	CHECK(mbox(ZZAPP_OP_RELEASE, handle, 0U, 0U, NULL, NULL) == SDK_STATUS_OK);
+}
+
+static void test_file_requester_stop(void)
+{
+	client_t c, other;
+	zzapp_rec_t *rec, *other_rec;
+	aar_completion late = { 0 };
+	const volatile uint8_t *slot;
+	aar_stat st;
+	uint32_t handle, other_handle;
+	char path[] = "unchanged";
+
+	reset_all();
+	other_rec = claim(&other, &other_handle);
+	rec = claim(&c, &handle);
+	cl.ignore = 1;
+	zzapp_services_test_set_yield(requester_stop_yield);
+	CHECK(zzapp_svc_file_request(0U, NULL, NULL, path, sizeof(path)) == AAR_E_IO);
+	CHECK(cl.yields == 1U && zzapp_services_stop_requested());
+	CHECK(!zzapp_services_wait_registered(rec->hdr.pid));
+	CHECK(strcmp(path, "unchanged") == 0);
+	CHECK(zzapp_xport_buffer_held(rec, ZZAPP_XPORT_NAMES_AREA(ZZAPP_XPORT_AREA_SCRATCH)));
+	CHECK(cl.nreq[AAR_OP_FILE_REQUEST] == 1U);
+	CHECK(zzapp_svc_file_request(0U, NULL, NULL, path, sizeof(path)) == AAR_E_IO);
+	CHECK(aar_queue_peek(&c.sq, NULL, &slot) == 0);
+
+	/* Neither the stop nor the occupied scratch prevents another app's I/O. */
+	zzapp_services_select_pid(other_rec->hdr.pid);
+	cur_client = &other;
+	cur_rec = other_rec;
+	cl.ignore = 0;
+	zzapp_services_test_set_yield(client_yield);
+	CHECK(!zzapp_services_stop_requested());
+	CHECK(zzapp_svc_file_stat("Work:other.txt", &st) == AAR_OK);
+	CHECK(strcmp(cl.path, "Work:other.txt") == 0);
+	CHECK(mbox(ZZAPP_OP_RELEASE, other_handle, 0U, 0U, NULL, NULL) == SDK_STATUS_OK);
+
+	/* The abandoned request still owns its scratch until the exact completion. */
+	late.id = cl.last[AAR_OP_FILE_REQUEST].id;
+	late.op = AAR_OP_FILE_REQUEST;
+	late.result = 1;
+	client_post(&c, &late);
+	CHECK(zzapp_xport_pump(rec) >= 0);
+	CHECK(!zzapp_xport_buffer_held(rec, ZZAPP_XPORT_NAMES_AREA(ZZAPP_XPORT_AREA_SCRATCH)));
+	CHECK(strcmp(path, "unchanged") == 0);
 	CHECK(mbox(ZZAPP_OP_RELEASE, handle, 0U, 0U, NULL, NULL) == SDK_STATUS_OK);
 }
 
@@ -4937,6 +5098,8 @@ int main(void)
 	test_load_refused();
 	test_release_running();
 	test_files();
+	test_file_requester();
+	test_file_requester_stop();
 	test_file_timeout();
 	test_async_file_tickets();
 	test_async_file_abandon();

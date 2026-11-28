@@ -2230,6 +2230,54 @@ static int put_path(const char *path, zzapp_xport_buf_t *buf, uint32_t *len)
 	return AAR_OK;
 }
 
+int zzapp_svc_file_request(uint32_t flags, const char *title,
+			   const char *initial_path, char *path, uint32_t capacity)
+{
+	zzapp_rec_t *rec = service_rec();
+	zzapp_xport_buf_t buf;
+	aar_completion c;
+	uint32_t args[3];
+	uint32_t in_bytes, len;
+	size_t title_len, initial_len;
+	int rc;
+
+	_Static_assert(2U * (AAR_PATH_MAX + 1U) <= ZZAPP_XPORT_SCRATCH_BYTES,
+		       "file requester input fits scratch");
+	if ((flags & ~AAR_FILE_REQUEST_SAVE) != 0U || !path || capacity == 0U)
+		return AAR_E_INVAL;
+	if (!rec || stop_requested_rec(rec))
+		return AAR_E_IO;
+	title = title ? title : "";
+	initial_path = initial_path ? initial_path : "";
+	title_len = strlen(title);
+	initial_len = strlen(initial_path);
+	if (title_len > AAR_PATH_MAX || initial_len > AAR_PATH_MAX)
+		return AAR_E_INVAL;
+	in_bytes = (uint32_t)(title_len + initial_len + 2U);
+	if (capacity > AAR_PATH_MAX + 1U)
+		capacity = AAR_PATH_MAX + 1U;
+	rc = zzapp_xport_service_area(rec, ZZAPP_XPORT_AREA_SCRATCH, &buf);
+	if (rc != AAR_OK)
+		return rc;
+	memcpy(buf.ptr, title, title_len + 1U);
+	memcpy((char *)buf.ptr + title_len + 1U, initial_path, initial_len + 1U);
+	args[AAR_A_FILE_REQUEST_FLAGS] = flags;
+	args[AAR_A_FILE_REQUEST_IN_BYTES] = in_bytes;
+	args[AAR_A_FILE_REQUEST_CAP] = capacity;
+	rc = blocking_request(AAR_OP_FILE_REQUEST, ZZAPP_WAIT_FILE, 0U, args, 3U,
+			      &buf, in_bytes > capacity ? in_bytes : capacity, &c);
+	if (rc != AAR_OK)
+		return rc;
+	if (c.result == 0)
+		return 0;
+	len = c.out[AAR_R_FILE_REQUEST_LEN];
+	if (c.result != 1 || len == 0U || len >= capacity ||
+	    memchr(buf.ptr, '\0', len + 1U) != (char *)buf.ptr + len)
+		return AAR_E_IO;
+	memcpy(path, buf.ptr, len + 1U);
+	return 1;
+}
+
 /* AAR file open flags (spec 7.1). At least one of READ and WRITE; CREATE
  * and TRUNCATE need WRITE; EXCL needs CREATE; no other bit. */
 static int file_flags_valid(uint32_t flags)

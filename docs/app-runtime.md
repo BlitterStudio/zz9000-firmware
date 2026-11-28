@@ -282,15 +282,16 @@ when service work is due. This bounds audio-service delay at cooperative yield
 points to the current API segment plus one scheduler handoff; a body that does
 not yield remains subject to the API watchdog rather than a scheduler preemption.
 
-File and directory operations, console read and backpressure, display open and
-flip, non-host audio open and close, `aar_msg_wait`, and sleep park
-the caller at the SVC handoff. `aar_gl_swap` parks through its flip.
-Completion wakes the record READY; file and directory waits wake TIMEOUT after
-30 seconds and return `AAR_E_TIMEDOUT`. Stop wakes a parked waiter: the
-core-1 service pass wakes every parked wait but core 0's bounded audio
-handoff on a latched stop (the client's `STOP`, or its stop word), a waiter
-takes a completion that landed with the stop first, and waiting service calls
-return `AAR_E_IO`. A sleeping thread is not a registered wait, so the system
+File and directory operations, `aar_file_request`, console read and backpressure,
+display open and flip, non-host audio open and close, `aar_msg_wait`, and sleep
+park the caller at the SVC handoff. `aar_gl_swap` parks through its flip.
+Completion wakes the record READY. File and directory I/O waits with a
+deadline wake TIMEOUT after 30 seconds and return `AAR_E_TIMEDOUT`. The
+requester has no deadline and parks only the app that called it. On a
+latched stop (the client's `STOP` or its stop word), the core-1 service pass
+wakes every parked wait except core 0's bounded audio handoff. A waiter
+takes a completion that landed with the stop first. Otherwise, waiting
+service calls return `AAR_E_IO`. A sleeping thread is not a registered wait, so the system
 pass wakes it itself when its record has a stop latched, and a sleep begun
 with a stop already latched returns at once: the app returns from the call,
 reads `aar_should_stop()` true and has the stop grace to finish. A parked call
@@ -776,6 +777,12 @@ without `READ` return `AAR_E_BADF` before any request is posted, and the
 count out is 0, also for a length of 0. A reused id number takes the flags of
 its new open.
 
+`aar_file_request` asks the Amiga client for a single native Open or Save As
+path. It does not open or create a file. A client without a requester returns
+`AAR_E_NOSYS`. The firmware passes through a denial from the launcher's path
+policy (`AAR_E_ACCES`). An unanswered requester returns `AAR_E_IO` on stop;
+the late reply cannot write into app memory.
+
 **Shared buffers.** `aar_shared_alloc` takes flags 0 and returns a block from
 the host-visible heap, rounded to the 4096-byte granule, with at most 64 live
 blocks per app and the `shared_limit` described under `LOAD_BEGIN`. The
@@ -923,6 +930,19 @@ doorbell. A completion with another id or op, or a duplicate, releases
 nothing. The palette stage, the console output ring and the log slots have
 their own in-flight rules and are not held this way. `RELEASE` and an Amiga
 reset return everything. A request that could not be posted names nothing.
+
+`AAR_OP_FILE_REQUEST` (`0x24`) reuses the claim's scratch area. Its request
+arguments are the mode flags (`0` for Open, `AAR_FILE_REQUEST_SAVE` for Save
+As), the input byte count, and the output capacity capped at 256 bytes. The
+input is title, NUL, initial path, NUL. Each string may be empty and holds
+at most 255 bytes before its NUL. The title uses UTF-8 and the path uses
+native bytes. `buf_len` is the larger of the input byte count and output
+capacity. A selection returns result `1`, with `out[0]` giving the native
+path length before the NUL. The firmware verifies that the length is
+nonzero, fits the capacity with its NUL, and matches the first NUL in the
+buffer before copying the path into the app. An invalid selection reply
+returns `AAR_E_IO`. Cancel returns `0`; a path that does not fit returns
+`AAR_E_NOSPC`. Cancel and errors leave the app's output buffer unchanged.
 
 Asynchronous file I/O has a separate request slot and uses the same data
 block. The ARM runtime posts one chunk of up to 256 KiB without parking.

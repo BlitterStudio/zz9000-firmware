@@ -23,6 +23,7 @@
 #define VENEER_BYTES 12U
 #define VENEER_PAGE_BYTES 4096U
 #define STRING_BYTES 512U
+_Static_assert(AAR_PATH_MAX + 1U < STRING_BYTES, "requester string limit fits SVC copies");
 #define COPY_BYTES ((sizeof(aar_dirent) + 7U) & ~(size_t)7U)
 #define API_FIRST offsetof(aar_api, exit)
 #define GL_FIRST offsetof(aar_gl, Begin)
@@ -796,7 +797,7 @@ static inline void gl_telemetry_frontend_end(svc_state_t *st)
 #define OUT_ARG(a, n) P(a, ZZAPP_SVC_POINTER_OUT, ZZAPP_SVC_LENGTH_ARGUMENT, n, 1U, 0U)
 #define IN_COUNT(a, n, e) P(a, ZZAPP_SVC_POINTER_IN, ZZAPP_SVC_LENGTH_COUNT, n, e, 0U)
 #define OUT_COUNT(a, n, e) P(a, ZZAPP_SVC_POINTER_OUT, ZZAPP_SVC_LENGTH_COUNT, n, e, 0U)
-#define IN_STRING(a) P(a, ZZAPP_SVC_POINTER_IN, ZZAPP_SVC_LENGTH_STRING, 0U, 1U, 1U)
+#define IN_STRING(a) P(a, ZZAPP_SVC_POINTER_IN, ZZAPP_SVC_LENGTH_STRING, 0U, STRING_BYTES, 1U)
 #define IN_PIXELS(a, n, f, t) { a, ZZAPP_SVC_POINTER_IN, ZZAPP_SVC_LENGTH_GL_PIXELS, n, 1U, 0U, 0U, f, t }
 #define OUT_PIXELS(a, n, f, t) { a, ZZAPP_SVC_POINTER_OUT, ZZAPP_SVC_LENGTH_GL_PIXELS, n, 1U, 0U, 0U, f, t }
 #define OUT_GL_GET(a, e) P(a, ZZAPP_SVC_POINTER_OUT, ZZAPP_SVC_LENGTH_GL_GET, 0U, e, 1U)
@@ -814,7 +815,8 @@ static inline void gl_telemetry_frontend_end(svc_state_t *st)
 #define OUT_ARG64_OPT(a, n) OPT(a, ZZAPP_SVC_POINTER_OUT, ZZAPP_SVC_LENGTH_ARGUMENT64, n, 1U, 0U)
 #define IN_COUNT_OPT(a, n, e) OPT(a, ZZAPP_SVC_POINTER_IN, ZZAPP_SVC_LENGTH_COUNT, n, e, 0U)
 #define OUT_COUNT_OPT(a, n, e) OPT(a, ZZAPP_SVC_POINTER_OUT, ZZAPP_SVC_LENGTH_COUNT, n, e, 0U)
-#define IN_STRING_OPT(a) OPT(a, ZZAPP_SVC_POINTER_IN, ZZAPP_SVC_LENGTH_STRING, 0U, 1U, 1U)
+#define IN_STRING_LIMIT_OPT(a, n) OPT(a, ZZAPP_SVC_POINTER_IN, ZZAPP_SVC_LENGTH_STRING, 0U, n, 1U)
+#define IN_STRING_OPT(a) IN_STRING_LIMIT_OPT(a, STRING_BYTES)
 #define OUT_PTR(a) OUT_OPTIONAL(a, sizeof(void *), 1U)
 #define OUT_U32(a) OUT_OPTIONAL(a, 4U, 1U)
 #define OUT_U64(a) OUT_OPTIONAL(a, 8U, 1U)
@@ -924,6 +926,10 @@ static const zzapp_svc_descriptor_t api_descriptors[API_VENEERS] = {
     [API_SLOT(file_read_async)] = D(4, ZZAPP_SVC_RETURN_INT, OUT_ARG_OPT(1, 2), OUT_U32(3), N),
     [API_SLOT(file_write_async)] = D(4, ZZAPP_SVC_RETURN_INT, IN_ARG_OPT(1, 2), OUT_U32(3), N),
     [API_SLOT(file_collect)] = D(3, ZZAPP_SVC_RETURN_INT, OUT_U32(1), OUT_U32(2), N),
+    /* Native file requester: only the selected path is written by the handler. */
+    [API_SLOT(file_request)] = D(5, ZZAPP_SVC_RETURN_INT,
+        IN_STRING_LIMIT_OPT(1, AAR_PATH_MAX + 1U),
+        IN_STRING_LIMIT_OPT(2, AAR_PATH_MAX + 1U), OUT_ARG_OPT(3, 4)),
     /* aar_ext_zz9000.gl_bind_flags: not a table slot, the next veneer */
     [ZZAPP_SVC_EXT_GL_BIND_FLAGS] = D(2, ZZAPP_SVC_RETURN_POINTER, N, N, N)
 };
@@ -1663,16 +1669,19 @@ static int pointer_bytes(const svc_state_t *st, const zzapp_svc_pointer_t *point
     *bytes = (uint32_t)length;
     return AAR_OK;
 }
-static int copy_string(const zzapp_as_t *as, uint32_t address, char destination[STRING_BYTES])
+static int copy_string(const zzapp_as_t *as, uint32_t address, uint32_t bytes,
+                       char destination[STRING_BYTES])
 {
     uint32_t i;
     if (!address) return AAR_E_FAULT;
-    for (i = 0U; i < STRING_BYTES; ++i) {
+    for (i = 0U; i < bytes; ++i) {
         if (zzapp_svc_check_user(as, address + i, 1U, 0) != AAR_OK) return AAR_E_FAULT;
         destination[i] = *(const char *)(uintptr_t)(address + i);
         if (!destination[i]) return AAR_OK;
     }
-    return AAR_E_FAULT;
+    /* The generic SVC limit reports a pointer fault as before. A shorter
+     * API limit instead rejects an overlong string as an invalid argument. */
+    return bytes == STRING_BYTES ? AAR_E_FAULT : AAR_E_INVAL;
 }
 typedef uint32_t (*word_call_t)(uint32_t, uint32_t, uint32_t, uint32_t,
                                 uint32_t, uint32_t, uint32_t, uint32_t,
@@ -1722,7 +1731,8 @@ static int prepare_pointers(const svc_state_t *st, const zzapp_as_t *as,
         address = args[pointer->argument];
         write = pointer->direction != ZZAPP_SVC_POINTER_IN;
         if (pointer->length == ZZAPP_SVC_LENGTH_STRING) {
-            if (copy_string(as, address, strings[i]) != AAR_OK) return AAR_E_FAULT;
+            rc = copy_string(as, address, pointer->element_bytes, strings[i]);
+            if (rc != AAR_OK) return rc;
             args[pointer->argument] = (uint32_t)(uintptr_t)strings[i];
             continue;
         }
