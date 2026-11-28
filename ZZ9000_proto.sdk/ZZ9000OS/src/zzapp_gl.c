@@ -347,12 +347,22 @@ static aar_gl g_table;
  * display buffers and waits for each flip acknowledgement before drawing. */
 static uint8_t g_present_queue[2];
 static uint8_t g_present_count;
+/* IDs stay with their sealed colour targets until the host takes ownership. */
+static uint64_t g_present_ids[3];
+static uint64_t g_present_enqueued_us[3];
+static uint8_t g_tracked_present_count;
+#if defined(MINIGL_MODULE)
+static uint32_t g_bound_generation;
+#endif
 static uint8_t g_zero_copy;
 static uint8_t g_mailbox_direct;
 static uint32_t g_mailbox_generation;
 static uint32_t g_bound_layout;
 static uint8_t g_sync_present;
 static uint32_t g_present_frame;
+
+#define ZZAPP_GL_HANDOFF_TIMEOUT_US 30000000ULL
+static uint64_t g_mailbox_submit_id;
 
 #ifndef ZZAPP_GL_PROFILE_DEFAULT
 #define ZZAPP_GL_PROFILE_DEFAULT 1
@@ -364,7 +374,7 @@ static int zzapp_gl_mailbox_supported(void)
 {
 #if defined(MINIGL_MODULE)
     return ZZM_SERVICE_VERSION_COMPATIBLE(g_module_app_host->version,
-                                          ZZM_SERVICE_APP_GL_HOST_V4_1) &&
+                                          ZZM_SERVICE_APP_GL_HOST_V4_2) &&
            g_module_app_host->size >= sizeof(*g_module_app_host) &&
            g_module_app_host->mailbox_buffers && g_module_app_host->mailbox_owned &&
            g_module_app_host->mailbox_present && g_module_app_host->mailbox_lease;
@@ -394,14 +404,16 @@ static int zzapp_gl_mailbox_owned(uint32_t *back, uint32_t *spare)
 #endif
 }
 
-static int zzapp_gl_mailbox_present(uint32_t address, int gpu_written)
+static int zzapp_gl_mailbox_present(uint32_t address, int gpu_written, uint64_t frame_id)
 {
 #if defined(MINIGL_MODULE)
     return g_module_app_host->mailbox_present(
-        g_mailbox_generation, address, gpu_written ? ZZM_DISPLAY_PRESENT_NO_DIRTY : 0U);
+        g_mailbox_generation, address, gpu_written ? ZZM_DISPLAY_PRESENT_NO_DIRTY : 0U,
+        frame_id);
 #else
     (void)address;
     (void)gpu_written;
+    (void)frame_id;
     return AAR_E_NOSYS;
 #endif
 }
@@ -1103,6 +1115,9 @@ int zzapp_gl_bind(uint32_t surface_id, uint32_t flags,
     fill_table();
     g_bound = 1;
     g_surface_id = surface_id;
+#if defined(MINIGL_MODULE)
+    g_bound_generation = zzapp_current_generation();
+#endif
     g_present_count = 0U;
     g_sync_present = (flags & AAR_ZZ9000_GL_BIND_SYNC_PRESENT) != 0U;
     g_present_frame = 0U;
@@ -1117,10 +1132,61 @@ int zzapp_gl_bind(uint32_t surface_id, uint32_t flags,
     return AAR_OK;
 }
 
+static void zzapp_gl_clear_present_id(uint32_t source)
+{
+    g_present_ids[source] = 0U;
+    --g_tracked_present_count;
+}
+
+static void zzapp_gl_finish_target(uint32_t source, uint32_t reason)
+{
+#if defined(MINIGL_MODULE)
+    uint64_t frame_id = g_present_ids[source];
+
+    if (frame_id != 0U) {
+        zzapp_gl_clear_present_id(source);
+        if (reason != AAR_PRESENT_REASON_CANCELLED && zzapp_services_stop_requested())
+            reason = AAR_PRESENT_REASON_CANCELLED;
+        g_module_app_host->finish_tracked(g_bound_generation, frame_id, reason);
+    }
+#else
+    (void)source;
+    (void)reason;
+#endif
+}
+
+/* Feedback can expire while a target still belongs to the renderer. Leave
+ * the target in the queue so a later swap can advance it under the same
+ * fence and display-ownership rules as an ordinary frame. */
+static int zzapp_gl_expire_tracked(void)
+{
+    uint64_t now;
+    unsigned i;
+    int expired = 0;
+
+    if (g_tracked_present_count == 0U)
+        return 0;
+    now = minigl_platform_time_us();
+    for (i = 0U; i < g_present_count; ++i) {
+        uint32_t source = g_present_queue[i];
+
+        if (g_present_ids[source] != 0U &&
+            now - g_present_enqueued_us[source] >= ZZAPP_GL_HANDOFF_TIMEOUT_US) {
+            zzapp_gl_finish_target(source, AAR_PRESENT_REASON_TIMEOUT);
+            expired = 1;
+        }
+    }
+    return expired;
+}
+
 void zzapp_gl_unbind(void)
 {
+    unsigned i;
+
     if (!g_bound)
         return;
+    for (i = 0U; i < g_present_count; ++i)
+        zzapp_gl_finish_target(g_present_queue[i], AAR_PRESENT_REASON_CANCELLED);
     amiberry_inproc_close();
     if (g_mailbox_direct)
         (void)zzapp_gl_mailbox_lease(0);
@@ -1255,6 +1321,13 @@ static int zzapp_gl_queue_flip(uint32_t surface_id)
 #endif
 }
 
+static void zzapp_gl_release_target(mw_ctx *mw, uint32_t source)
+{
+    mw->present_queued[source] = 0U;
+    if (--g_present_count != 0U)
+        g_present_queue[0] = g_present_queue[1];
+}
+
 static void zzapp_gl_present_layout_mismatch(const mw_ctx *mw, uint32_t source,
                                              uint8_t current)
 {
@@ -1319,14 +1392,26 @@ static uintptr_t zzapp_gl_target_address(const mw_ctx *mw, uint32_t index)
         (uintptr_t)mw->color_buffers[index];
 }
 
-static int zzapp_gl_present_pending(mw_ctx *mw)
+/* 1: handed off; -1: failed handoff; 0: no handoff yet. */
+static int zzapp_gl_present_pending(mw_ctx *mw, int deferred)
 {
     uint32_t w, h, pitch, format, front, back, card;
     uint32_t source;
     uint32_t copy_us, flip_us;
     uint64_t started;
+    uint64_t frame_id;
+    int flip_status;
     int rgb565;
+
+    if (!deferred)
+        (void)zzapp_gl_expire_tracked();
     if (g_present_count == 0U)
+        return 0;
+    source = g_present_queue[0];
+    if (source >= 3U)
+        return 0;
+    frame_id = g_present_ids[source];
+    if (!minigl_raster_target_ready(zzapp_gl_target_address(mw, source)))
         return 0;
     if (g_mailbox_direct) {
         w = mw->width;
@@ -1334,18 +1419,14 @@ static int zzapp_gl_present_pending(mw_ctx *mw)
         pitch = w * 2U;
         format = AAR_FMT_RGB565;
     } else {
-        if (!zzapp_display_flip_idle() ||
-            zzapp_display_bound(&w, &h, &pitch, &format, &front, &back) != AAR_OK ||
-            !w || !h || !pitch || h > UINT32_MAX / pitch)
+        if (!zzapp_display_flip_idle())
             return 0;
+        if (zzapp_display_bound(&w, &h, &pitch, &format, &front, &back) != AAR_OK ||
+            !w || !h || !pitch || h > UINT32_MAX / pitch)
+            goto failed;
     }
-    source = g_present_queue[0];
-    if (source >= 3U || !mw->color_buffers[source])
-        return 0;
-    /* The oldest queued frame is presentable once RasterIX has finished the
-     * command streams that draw into it; newer frames may still render. */
-    if (!minigl_raster_target_ready(zzapp_gl_target_address(mw, source)))
-        return 0;
+    if (!mw->color_direct[source] && !mw->color_buffers[source])
+        goto failed;
     card = g_mailbox_direct ? (uint32_t)(uintptr_t)mw->direct_color_buffers[source] :
                               (back ? back : front);
     rgb565 = mw->color_rgb565[source] != 0U;
@@ -1359,7 +1440,7 @@ static int zzapp_gl_present_pending(mw_ctx *mw)
     } else if (mw->color_direct[source]) {
         if ((uint32_t)(uintptr_t)mw->direct_color_buffers[source] != card) {
             minigl_profile_pop();
-            return 0;
+            goto failed;
         }
         /* RasterIX writes DDR directly.  Discard any old CPU view before
          * aar-run's flip service performs its scanout cache hand-off. */
@@ -1377,7 +1458,7 @@ static int zzapp_gl_present_pending(mw_ctx *mw)
                                  (size_t)w * h * 2U);
         if (!copy_bound(mw->color_buffers[source], rgb565, w, h, pitch, format, card)) {
             minigl_profile_pop();
-            return 0;
+            goto failed;
         }
     } else {
         /*
@@ -1388,33 +1469,85 @@ static int zzapp_gl_present_pending(mw_ctx *mw)
          */
         if (!copy_bound(mw->color_buffers[source], rgb565, w, h, pitch, format, card)) {
             minigl_profile_pop();
-            return 0;
+            goto failed;
         }
     }
     minigl_profile_pop();
     copy_us = (uint32_t)(minigl_platform_time_us() - started);
     started = minigl_platform_time_us();
     minigl_profile_push(MGLP_SWAP_FLIP);
-    if ((g_mailbox_direct ?
-         zzapp_gl_mailbox_present(card, mw->color_direct[source]) :
-         zzapp_gl_queue_flip(g_surface_id)) != AAR_OK) {
-        minigl_profile_pop();
-        return g_mailbox_direct ? -1 : 0;
+    if (g_mailbox_direct)
+        flip_status = zzapp_gl_mailbox_present(card, mw->color_direct[source], frame_id);
+    else {
+#if defined(MINIGL_MODULE)
+        if (frame_id != 0U || deferred)
+            flip_status = g_module_app_host->flip_bound_tracked(g_bound_generation, frame_id);
+        else
+#endif
+            flip_status = zzapp_gl_queue_flip(g_surface_id);
     }
     minigl_profile_pop();
+    if (flip_status == AAR_E_BUSY)
+        return 0;
+    if (flip_status != AAR_OK)
+        goto failed;
+    if (frame_id != 0U)
+        zzapp_gl_clear_present_id(source);
     flip_us = (uint32_t)(minigl_platform_time_us() - started);
     mw_ctx_diag_add_present_wait(mw, source, copy_us, flip_us, 0U);
     mw_ctx_diag_presented(mw, source, (const uint8_t *)(uintptr_t)card,
                           pitch, format, w, h);
-    mw->present_queued[source] = 0U;
-    --g_present_count;
-    if (g_present_count != 0U)
-        g_present_queue[0] = g_present_queue[1];
+    zzapp_gl_release_target(mw, source);
     return 1;
+
+failed:
+    if (g_mailbox_direct) {
+        zzapp_gl_finish_target(source, AAR_PRESENT_REASON_BACKEND);
+        return -1;
+    }
+    if (frame_id == 0U && !deferred)
+        return 0;
+    zzapp_gl_finish_target(source, AAR_PRESENT_REASON_BACKEND);
+    /* Without a handoff the direct buffers did not change display ownership. */
+    if (g_zero_copy)
+        return 0;
+    zzapp_gl_release_target(mw, source);
+    return -1;
 }
 
-static void zzapp_gl_enqueue(mw_ctx *mw, uint32_t outgoing)
+#if defined(MINIGL_MODULE)
+int zzapp_gl_has_present_work(void)
 {
+    /* Queued P96 direct needs the submitting app thread for its ownership wait. */
+    return g_tracked_present_count != 0U && (!g_zero_copy || g_mailbox_direct);
+}
+
+static int zzapp_gl_poll_present_owner(void)
+{
+    mw_ctx *mw;
+
+    if (zzapp_gl_expire_tracked())
+        return 1;
+    mw = amiberry_transport_inproc_ctx();
+
+    /* Always process the head, even if it is an untracked predecessor. */
+    return mw && zzapp_gl_present_pending(mw, 1) != 0;
+}
+
+int zzapp_gl_poll_present(void)
+{
+    return zzapp_gl_has_present_work() &&
+           g_module_app_host->poll_present(g_bound_generation, zzapp_gl_poll_present_owner);
+}
+#endif
+
+static void zzapp_gl_enqueue(mw_ctx *mw, uint32_t outgoing, uint64_t frame_id)
+{
+    if (frame_id != 0U) {
+        g_present_ids[outgoing] = frame_id;
+        g_present_enqueued_us[outgoing] = minigl_platform_time_us();
+        ++g_tracked_present_count;
+    }
     g_present_queue[g_present_count++] = (uint8_t)outgoing;
     mw->present_queued[outgoing] = 1U;
     mw->present_submit_rgb565[outgoing] = mw->color_rgb565[outgoing];
@@ -1434,7 +1567,7 @@ static uint32_t zzapp_gl_select_mailbox_target(mw_ctx *mw, uint32_t outgoing)
 
     if (g_present_count == 2U)
         return UINT32_MAX;
-    zzapp_gl_enqueue(mw, outgoing);
+    zzapp_gl_enqueue(mw, outgoing, g_mailbox_submit_id);
     if (g_sync_present && !minigl_raster_drain())
         return UINT32_MAX;
     for (;;) {
@@ -1443,7 +1576,7 @@ static uint32_t zzapp_gl_select_mailbox_target(mw_ctx *mw, uint32_t outgoing)
         int presented;
 
         do {
-            presented = zzapp_gl_present_pending(mw);
+            presented = zzapp_gl_present_pending(mw, 0);
         } while (presented > 0);
         if (presented < 0 || zzapp_gl_mailbox_owned(&owned[0], &owned[1]) != AAR_OK)
             return UINT32_MAX;
@@ -1489,7 +1622,7 @@ static int zzapp_gl_make_target_available(mw_ctx *mw)
     while (g_present_count == 2U) {
         uintptr_t oldest = zzapp_gl_target_address(mw, g_present_queue[0]);
 
-        if (zzapp_gl_present_pending(mw))
+        if (zzapp_gl_present_pending(mw, 0))
             continue;
         if (!minigl_raster_target_ready(oldest)) {
             int ok;
@@ -1500,17 +1633,24 @@ static int zzapp_gl_make_target_available(mw_ctx *mw)
             minigl_profile_pop();
             mw_ctx_diag_add_wait(mw, 0U, 0U,
                                  (uint32_t)(minigl_platform_time_us() - started), 0U);
-            if (!ok)
+            if (!ok) {
+                /* Keep the target fenced after a failed drain. */
+                zzapp_gl_finish_target(g_present_queue[0], AAR_PRESENT_REASON_BACKEND);
                 return 0;
+            }
             continue;
         }
         {
             uint64_t started = minigl_platform_time_us();
 
+            int idle;
+
             minigl_profile_push(MGLP_SWAP_FLIP);
-            if (!zzapp_gl_wait_flip_idle())
-                return 0;
+            idle = zzapp_gl_wait_flip_idle();
+
             minigl_profile_pop();
+            if (!idle)
+                return 0;
             mw_ctx_diag_add_wait(mw, 0U,
                                  (uint32_t)(minigl_platform_time_us() - started), 0U, 0U);
         }
@@ -1518,22 +1658,25 @@ static int zzapp_gl_make_target_available(mw_ctx *mw)
     return 1;
 }
 
-void zzapp_gl_swap(void)
+static int zzapp_gl_swap_frame(uint64_t frame_id)
 {
     mw_ctx *mw;
     struct AmiberryContext *guest;
     uint32_t outgoing;
     uint64_t target_started;
+    int status = AAR_E_IO;
 
     zzapp_api_enter();
-    if (!g_bound)
+    if (!g_bound) {
+        status = AAR_E_NOSYS;
         goto done;
+    }
     mw = amiberry_transport_inproc_ctx();
     if (!mw || mw->present_lost)
         goto done;
     if (!g_mailbox_direct) {
         /* Copy has fixed rotation; make room before rebinding its target. */
-        (void)zzapp_gl_present_pending(mw);
+        (void)zzapp_gl_present_pending(mw, 0);
         target_started = minigl_platform_time_us();
         if (!zzapp_gl_make_target_available(mw))
             goto done;
@@ -1542,8 +1685,10 @@ void zzapp_gl_swap(void)
     }
     outgoing = mw->state.target.back;
     guest = amiberry_context(mini_CurrentContext);
-    if (!guest)
+    if (!guest ||
+        (frame_id != 0U && (outgoing >= 3U || zzapp_services_stop_requested())))
         goto done;
+    g_mailbox_submit_id = frame_id;
     if (amiberry_has_pending_command(guest, MW_PRESENT)) {
         if (!amiberry_flush(guest))
             goto done;
@@ -1554,12 +1699,17 @@ void zzapp_gl_swap(void)
     }
     if (g_mailbox_direct) {
         /* MW_PRESENT queued and selected a target through the hook. */
+        if (!mw->present_lost && mw->state.target.back != outgoing)
+            status = AAR_OK;
         minigl_profile_report();
         goto done;
     }
     if (outgoing >= 3U || g_present_count == 2U)
         goto done;
-    zzapp_gl_enqueue(mw, outgoing);
+    if (frame_id != 0U && mw->state.target.back == outgoing)
+        goto done;
+    zzapp_gl_enqueue(mw, outgoing, frame_id);
+    status = AAR_OK;
     if (g_zero_copy) {
         int ok;
         uint64_t started;
@@ -1574,13 +1724,20 @@ void zzapp_gl_swap(void)
         minigl_profile_pop();
         mw_ctx_diag_add_present_wait(mw, outgoing, 0U, 0U,
                                      (uint32_t)(minigl_platform_time_us() - started));
-        if (!ok || !zzapp_gl_present_pending(mw))
+        if (!ok) {
+            zzapp_gl_finish_target(outgoing, AAR_PRESENT_REASON_BACKEND);
             goto done;
+        }
+        if (zzapp_gl_present_pending(mw, 0) <= 0) {
+            zzapp_gl_finish_target(outgoing, AAR_PRESENT_REASON_BACKEND);
+            goto done;
+        }
         started = minigl_platform_time_us();
         minigl_profile_push(MGLP_SWAP_FLIP);
-        if (!zzapp_gl_wait_flip_idle())
-            goto done;
+        ok = zzapp_gl_wait_flip_idle();
         minigl_profile_pop();
+        if (!ok)
+            goto done;
         mw_ctx_diag_add_wait(mw, 0U,
                              (uint32_t)(minigl_platform_time_us() - started), 0U, 0U);
     }
@@ -1593,18 +1750,43 @@ void zzapp_gl_swap(void)
         minigl_profile_pop();
         mw_ctx_diag_add_present_wait(mw, outgoing, 0U, 0U,
                                      (uint32_t)(minigl_platform_time_us() - started));
-        if (!ok)
+        if (!ok) {
+            zzapp_gl_finish_target(outgoing, AAR_PRESENT_REASON_BACKEND);
             goto done;
+        }
         while (g_present_count != 0U) {
-            if (!zzapp_gl_present_pending(mw))
+            if (zzapp_gl_present_pending(mw, 0) <= 0)
                 goto done;
             minigl_profile_push(MGLP_SWAP_FLIP);
-            if (!zzapp_gl_wait_flip_idle())
-                goto done;
+            ok = zzapp_gl_wait_flip_idle();
             minigl_profile_pop();
+            if (!ok)
+                goto done;
         }
     }
     minigl_profile_report();
 done:
+    g_mailbox_submit_id = 0U;
     zzapp_api_leave();
+    return status;
 }
+
+void zzapp_gl_swap(void)
+{
+    (void)zzapp_gl_swap_frame(0U);
+}
+
+#if defined(MINIGL_MODULE)
+int zzapp_gl_swap_tracked(uint64_t frame_id)
+{
+    const zzm_app_gl_host_service_t *host = g_module_app_host;
+
+    if (frame_id == 0U)
+        return AAR_E_INVAL;
+    if (host->size < offsetof(zzm_app_gl_host_service_t, poll_present) +
+                         sizeof(host->poll_present) ||
+        !host->flip_bound_tracked || !host->finish_tracked || !host->poll_present)
+        return AAR_E_NOSYS;
+    return zzapp_gl_swap_frame(frame_id);
+}
+#endif

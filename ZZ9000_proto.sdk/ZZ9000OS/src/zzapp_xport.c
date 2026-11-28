@@ -829,9 +829,9 @@ static void note_log_dropped(zzapp_rec_t *rec)
 	cb_put32(rec, AAR_CB_LOG_DROPPED, rec->xport.stats.log_dropped);
 }
 
-int zzapp_xport_post_request(zzapp_rec_t *rec, zzapp_xport_req_kind_t kind,
-			     const aar_request *req, uint64_t deadline,
-			     uint32_t *id)
+static inline int post_request(zzapp_rec_t *rec, zzapp_xport_req_kind_t kind,
+			       const aar_request *req, uint64_t deadline,
+			       uint32_t *id, int (*prepare)(void *), void *context)
 {
 	zzapp_rec_xport_t *x;
 	zzapp_xport_req_t *r;
@@ -860,6 +860,11 @@ int zzapp_xport_post_request(zzapp_rec_t *rec, zzapp_xport_req_kind_t kind,
 	if (rc != AAR_OK) {
 		note_sq_full(rec);
 		return rc;
+	}
+	if (prepare) {
+		rc = prepare(context);
+		if (rc != AAR_OK)
+			return rc;
 	}
 	out = *req;
 	out.id = x->next_id;
@@ -904,6 +909,20 @@ int zzapp_xport_post_request(zzapp_rec_t *rec, zzapp_xport_req_kind_t kind,
 	if (id)
 		*id = out.id;
 	return AAR_OK;
+}
+
+int zzapp_xport_post_request(zzapp_rec_t *rec, zzapp_xport_req_kind_t kind,
+			     const aar_request *req, uint64_t deadline,
+			     uint32_t *id)
+{
+	return post_request(rec, kind, req, deadline, id, NULL, NULL);
+}
+
+int zzapp_xport_post_request_prepared(zzapp_rec_t *rec,
+	zzapp_xport_req_kind_t kind, const aar_request *req, uint64_t deadline,
+	uint32_t *id, int (*prepare)(void *), void *context)
+{
+	return post_request(rec, kind, req, deadline, id, prepare, context);
 }
 
 int zzapp_xport_sq_space(zzapp_rec_t *rec)

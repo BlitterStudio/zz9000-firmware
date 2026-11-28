@@ -1,5 +1,6 @@
 #include <stdio.h>
 #include <string.h>
+#include "aar/app.h"
 #include "xil_cache.h"
 #ifndef MINIGL_HOST_TEST
 #include "xil_cache_l.h"
@@ -48,9 +49,10 @@ __attribute__((weak)) int zzapp_display_mailbox_owned(uint32_t *back, uint32_t *
     return -1;
 }
 
-__attribute__((weak)) int zzapp_display_mailbox_present(uint32_t address, uint32_t flags)
+__attribute__((weak)) int zzapp_display_mailbox_present(uint32_t address, uint32_t flags,
+                                                        uint64_t frame_id)
 {
-    (void)address; (void)flags;
+    (void)address; (void)flags; (void)frame_id;
     return -1;
 }
 
@@ -874,6 +876,42 @@ static int module_app_flip_bound(uint32_t generation)
     return zzapp_svc_display_flip_async(1U);
 }
 
+static int module_app_flip_bound_tracked(uint32_t generation, uint64_t frame_id)
+{
+    if (generation != zzapp_current_generation())
+        return AAR_E_INVAL;
+    return zzapp_display_flip_tracked(1U, frame_id);
+}
+
+static void module_app_finish_tracked(uint32_t generation, uint64_t frame_id,
+                                      uint32_t reason)
+{
+    if (generation != zzapp_current_generation())
+        return;
+    zzapp_display_finish_tracked(frame_id, reason);
+}
+
+static int module_app_poll_present(uint32_t generation, int (*poll)(void))
+{
+    const zzapp_kernel_t *kernel;
+    uint32_t selected;
+    int worked = 0;
+
+    /* Services give a running app priority over the selected PID. Leave
+     * these polls to the system thread, which can select the GL owner. */
+    if (zzapp_kernel_current_thread() >= 0)
+        return 0;
+    kernel = zzapp_runtime_kernel();
+    if (kernel->gl_owner < 0 || kernel->gl_generation != generation)
+        return 0;
+    selected = zzapp_services_current_pid();
+    if (zzapp_services_select_pid((uint32_t)kernel->gl_owner) &&
+        zzapp_current_generation() == generation)
+        worked = poll();
+    (void)zzapp_services_select_pid(selected);
+    return worked;
+}
+
 static int module_app_flip_idle(uint32_t generation)
 {
     return generation == zzapp_current_generation() &&
@@ -902,12 +940,18 @@ static int module_app_mailbox_owned(uint32_t generation, uint32_t *back,
 }
 
 static int module_app_mailbox_present(uint32_t generation, uint32_t address,
-                                      uint32_t flags)
+                                      uint32_t flags, uint64_t frame_id)
 {
     _Static_assert(ZZM_DISPLAY_PRESENT_NO_DIRTY == ZZAPP_DISPLAY_PRESENT_NO_DIRTY,
                    "display present flag mismatch");
     return generation == zzapp_current_generation() ?
-        zzapp_display_mailbox_present(address, flags) : -1;
+        zzapp_display_mailbox_present(address, flags, frame_id) : AAR_E_INVAL;
+}
+
+static int module_app_mailbox_present_v4_1(uint32_t generation, uint32_t address,
+                                          uint32_t flags)
+{
+    return module_app_mailbox_present(generation, address, flags, 0U);
 }
 
 static int module_app_mailbox_lease(uint32_t generation, int acquire)
@@ -1074,12 +1118,14 @@ static const zzm_palette_service_t palette_service = {
     module_palette_snapshot, module_palette_lookup
 };
 static const zzm_app_gl_host_service_t app_gl_host_service = {
-    ZZM_SERVICE_APP_GL_HOST_V4_1, sizeof(app_gl_host_service), zzapp_api_enter,
+    ZZM_SERVICE_APP_GL_HOST_V4_2, sizeof(app_gl_host_service), zzapp_api_enter,
     zzapp_api_leave, zzapp_display_bound, module_app_flip_bound,
     module_app_flip_idle, zzapp_current_generation, zzapp_display_layout,
     zzapp_display_latest, zzapp_services_stop_requested, zzapp_host_yield_wait,
     module_app_wait_flip, module_app_mailbox_buffers, module_app_mailbox_owned,
-    module_app_mailbox_present, module_app_mailbox_lease
+    module_app_mailbox_present_v4_1, module_app_mailbox_lease,
+    module_app_mailbox_present, module_app_flip_bound_tracked,
+    module_app_finish_tracked, module_app_poll_present
 };
 static const zzm_profile_service_t profile_service = {
     ZZM_SERVICE_PROFILE_V3, sizeof(profile_service), module_profile_register,

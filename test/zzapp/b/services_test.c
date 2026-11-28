@@ -1400,16 +1400,16 @@ static void test_direct_mailbox_lease(void)
 	       mock_client_count(&CL(0), AAR_OP_DISPLAY_CLOSE) == closes,
 	       "regular flip and close cannot take leased pages");
 	zzapp_test_present_flush_count = 0U;
-	EXPECT(zzapp_display_mailbox_present(FRONT, ZZAPP_DISPLAY_PRESENT_NO_DIRTY) ==
+	EXPECT(zzapp_display_mailbox_present(FRONT, ZZAPP_DISPLAY_PRESENT_NO_DIRTY, 0U) ==
 	       AAR_E_INVAL, "shown buffer is not owned");
-	EXPECT(zzapp_display_mailbox_present(SPARE, ZZAPP_DISPLAY_PRESENT_NO_DIRTY) ==
+	EXPECT(zzapp_display_mailbox_present(SPARE, ZZAPP_DISPLAY_PRESENT_NO_DIRTY, 0U) ==
 	       AAR_OK && zzapp_test_present_flush_count == 0U,
 	       "present the spare without a clean");
 	EXPECT(zzapp_display_mailbox_owned(&back, &spare) == AAR_OK &&
 	       back == BACK && spare == 0U, "spare submitted, back still owned");
-	EXPECT(zzapp_display_mailbox_present(SPARE, 0U) == AAR_E_INVAL &&
+	EXPECT(zzapp_display_mailbox_present(SPARE, 0U, 0U) == AAR_E_INVAL &&
 	       zzapp_test_present_flush_count == 0U, "pending buffer is not owned");
-	EXPECT(zzapp_display_mailbox_present(BACK, 0U) == AAR_OK &&
+	EXPECT(zzapp_display_mailbox_present(BACK, 0U, 0U) == AAR_OK &&
 	       zzapp_test_present_flush_count == 1U &&
 	       zzapp_test_present_flushes[0].card == BACK &&
 	       zzapp_test_present_flushes[0].bytes == bytes,

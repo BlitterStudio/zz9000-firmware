@@ -68,6 +68,8 @@ typedef struct zzm_minigl_ops_v1 {
     int (*app_bind_flags)(void *context, uint32_t surface_id, uint32_t flags,
                           const void **out_gl);
     uint32_t reset_protocol;
+    /* Optional. AAR_OK means the module sealed the frame and took its ID. */
+    int (*app_swap_tracked)(void *context, uint64_t frame_id);
 } zzm_minigl_ops_v1_t;
 /* The generic v3 register_ops() callback carries this envelope rather than a
  * bare function table, so the host can keep the module-owned context and

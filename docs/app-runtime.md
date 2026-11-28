@@ -673,6 +673,16 @@ pacing hint. Unbind GL before calling `aar_display_resize`: an active GL
 binding owns render targets sized for the old surface and returns
 `AAR_E_BUSY` on resize.
 
+For [per-frame feedback](https://github.com/BlitterStudio/aar/blob/main/spec/aar.md#per-frame-present-feedback),
+firmware keeps the frame ID with the pending operation. A native LATEST
+frame settles when replaced or when its address is latched. A windowed blit
+settles when the client acknowledges it. If the client has only submitted
+a direct-scanout flip, firmware waits up to 100 ms for the address to reach
+scanout. A timeout releases the buffer without recording a successful
+present. If the client never replies or a LATEST frame never latches within
+30 s, firmware records a timeout result without releasing the buffer.
+An acknowledgement timestamp is not a physical scanout measurement.
+
 **GL.** The optional [MiniGL module](minigl-module.md#contexts-and-aar-apps)
 exposes its supported GL 1.1 additions through the AAR table. Unavailable
 operations, including stencil, display lists and the attribute stack, are
@@ -988,9 +998,9 @@ The control block separates platform and client writes:
   until the claim is released, so a client can read the last samples of an
   app that has ended; a second load of the same claim closes it first.
 
-Display flip state, surface words and palette generations are private to the
-firmware. Client capabilities without a control block word
-(`ZZAPP_CLIENT_LEASE_EXTENDED`, `_AUDIO_AHI`,
+Display flip state, tracked present results, surface words and palette
+generations are private to the firmware. Client capabilities without a
+control block word (`ZZAPP_CLIENT_LEASE_EXTENDED`, `_AUDIO_AHI`,
 `_CLUT8`, `_SCANOUT_ACK`, `_LATEST`) travel in word 0 of `LOAD_BEGIN` and are
 kept in the claim words of the record.
 

@@ -150,6 +150,10 @@ WEAK int zzapp_svc_display_wait_vblank(uint32_t timeout)
 { (void)timeout; return AAR_E_NOSYS; }
 WEAK uint64_t zzapp_svc_display_last_present_us(void)
 { return 0U; }
+WEAK int zzapp_svc_display_present(uint32_t id, uint32_t flags, uint64_t *frame_id)
+{ (void)id; (void)flags; if (frame_id) *frame_id = 0U; return AAR_E_NOSYS; }
+WEAK int zzapp_svc_display_present_poll(aar_present_result *out)
+{ (void)out; return AAR_E_NOSYS; }
 #endif
 WEAK void zzapp_svc_gl_release(uint32_t pid, uint32_t generation)
 { (void)pid; (void)generation; }
@@ -360,6 +364,20 @@ int zzapp_minigl_swap(void)
         return AAR_E_BUSY;
     (void)g_minigl.ops->app_swap(g_minigl.context);
     return AAR_OK;
+}
+
+int zzapp_minigl_swap_tracked(uint32_t surface_id, uint64_t frame_id)
+{
+    const zzm_minigl_ops_v1_t *ops = g_minigl.ops;
+
+    if (!surface_id || surface_id != zzapp_display_id() ||
+        !minigl_binding_matches(api_pid(), zzapp_current_generation()))
+        return AAR_E_INVAL;
+    if (ops->size < offsetof(zzm_minigl_ops_v1_t, app_swap_tracked) +
+                       sizeof(ops->app_swap_tracked) ||
+        !ops->app_swap_tracked)
+        return AAR_E_NOSYS;
+    return ops->app_swap_tracked(g_minigl.context, frame_id);
 }
 
 static int minigl_binding_matches(uint32_t owner, uint32_t generation)
@@ -1139,7 +1157,17 @@ static int api_display_refresh(aar_surface *o) { zzapp_api_enter(); int r=zzapp_
 static int api_display_set_palette(uint32_t id,uint32_t first,uint32_t count,const uint32_t *rgb){zzapp_api_enter();int r=zzapp_svc_display_set_palette(id,first,count,rgb);zzapp_api_leave();return r;}
 static uint32_t api_display_latest_dropped(void){zzapp_api_enter();uint32_t r=zzapp_svc_display_latest_dropped();zzapp_api_leave();return r;}
 WRAP0(api_vsync,zzapp_svc_display_vsync())
-WRAP1(api_display_close,uint32_t,zzapp_svc_display_close(a))
+static int api_display_close(uint32_t id)
+{
+    int rc;
+
+    zzapp_api_enter();
+    if (id && id == zzapp_display_id())
+        zzapp_minigl_unbind();
+    rc = zzapp_svc_display_close(id);
+    zzapp_api_leave();
+    return rc;
+}
 WRAP0(api_audio_close,zzapp_svc_audio_close())
 static int api_file_open(const char *p,uint32_t f){zzapp_api_enter();int r=zzapp_svc_file_open(p,f);zzapp_api_leave();return r;}
 static int api_file_read(int f,void*p,uint32_t n,uint32_t*o){zzapp_api_enter();int r=zzapp_svc_file_read(f,p,n,o);zzapp_api_leave();return r;}
@@ -1345,6 +1373,26 @@ static uint64_t api_display_last_present_us(void)
     return time;
 }
 
+static int api_display_present(uint32_t id, uint32_t flags, uint64_t *frame_id)
+{
+    int rc;
+
+    zzapp_api_enter();
+    rc = zzapp_svc_display_present(id, flags, frame_id);
+    zzapp_api_leave();
+    return rc;
+}
+
+static int api_display_present_poll(aar_present_result *out)
+{
+    int rc;
+
+    zzapp_api_enter();
+    rc = zzapp_svc_display_present_poll(out);
+    zzapp_api_leave();
+    return rc;
+}
+
 static const aar_gl *api_gl_bind(uint32_t id){const aar_gl*out=NULL;zzapp_api_enter();if(zzapp_minigl_bind(id,&out)!=AAR_OK)out=NULL;zzapp_api_leave();return out;}
 static const aar_gl *api_gl_bind_flags(uint32_t id,uint32_t flags){const aar_gl*out=NULL;zzapp_api_enter();if(zzapp_minigl_bind_flags(id,flags,&out)!=AAR_OK)out=NULL;zzapp_api_leave();return out;}
 #if ZZAPP_PERF_COUNTERS
@@ -1437,6 +1485,8 @@ static const aar_api g_api_full = {
     .display_resize = api_display_resize, .display_set_title = api_display_set_title,
     .display_pointer = api_display_pointer, .display_wait_vblank = api_display_wait_vblank,
     .display_last_present_us = api_display_last_present_us,
+    .display_present = api_display_present,
+    .display_present_poll = api_display_present_poll,
     /* audio */
     .audio_open = api_audio_open, .audio_close = api_audio_close,
     /* GL */
@@ -1470,7 +1520,7 @@ static void api_build_table(uint32_t groups)
     memcpy(&g_api_out, &g_api_full, sizeof(g_api_out));
     g_api_out.groups = groups;
     if ((groups & AAR_GROUP_DISPLAY) == 0u)
-        CLEAR_SLOTS(display_open, display_last_present_us);
+        CLEAR_SLOTS(display_open, display_present_poll);
     if ((groups & AAR_GROUP_AUDIO) == 0u)
         CLEAR_SLOTS(audio_open, audio_stats);
     if ((groups & AAR_GROUP_GL) == 0u)

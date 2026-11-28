@@ -44,7 +44,7 @@ The MiniGL resource tables are declared in
 | 4 | reclaim | 3.0 | typed owner creation, close, reclaim and quarantine |
 | 6 | host window | 3.0 | allocate/free a Z3 host-visible non-cacheable block |
 | 7 | palette | 3.0 | generation, CLUT snapshot and indexed lookup |
-| 8 | app GL host | 4.0, optional 4.1 | API guard, bound display, generation-qualified flip and flip wait; 4.1 adds [direct mailbox presentation](app-runtime.md#direct-presentation-on-the-mailbox-display) |
+| 8 | app GL host | 4.0, optional 4.1 and 4.2 | API guard, bound display, generation-qualified flip and flip wait; 4.1 adds [direct mailbox presentation](app-runtime.md#direct-presentation-on-the-mailbox-display), and 4.2 adds per-frame feedback |
 | 9 | profile | 3.0 | counter registration, time samples and snapshots |
 | 10 | transport | 3.0 | descriptor, doorbell and capability publication |
 | 11 | graphics hardware | 3.0 | capability record, CSR/FIFO access, PL330 and fence publication |
@@ -105,6 +105,32 @@ Swap uses the app-host display and flip callbacks. Unbind, app stop and fault
 reclaim release the binding and its module reference. The runtime exposes
 the GL table through SVC veneers rather than making module addresses callable
 from user mode.
+
+For tracked swaps, firmware checks the MiniGL operation table's size before
+calling `app_swap_tracked`. The module checks the app-host table's size and
+the 4.2 feedback and worker callbacks before accepting a tracked swap.
+The original swap and wire operations still work with a 4.0 app-host table.
+This module also requires 4.2 for direct mailbox presentation.
+
+The module accepts a frame when it seals and queues the colour target, then
+carries the frame ID with that target until `flip_bound_tracked` or
+`mailbox_present` accepts it. Firmware owns the result after that handoff.
+A rejected handoff leaves the module to report an unconfirmed frame through
+`finish_tracked`. GL unbind uses the same callback to cancel IDs still
+owned by the module. These callbacks validate the bind generation.
+
+Tracking keeps the pacing selected at bind. Direct mailbox swaps can return
+before the frame reaches scanout, just as untracked mailbox swaps can.
+The mailbox receives the ID with the buffer and settles the result when
+the frame latches or is replaced.
+
+The core-1 system worker can hand off a queued copy-mode or direct mailbox
+frame without waiting for another swap. It selects the GL owner's record
+for one nonblocking step in FIFO order. A tracked frame can advance an
+untracked predecessor through the same path. A queue of only untracked
+frames keeps its existing swap-driven pacing.
+After 30 seconds without a handoff, the module reports a timeout and leaves
+the colour target queued.
 
 `glGetString` returns an app-readable string that stays valid until GL unbind,
 even after queries for other names. `GL_EXTENSIONS` returns an empty string:

@@ -251,7 +251,8 @@ typedef struct {
  *   decode            image sessions inline, audio session pointer
  *                     (zzapp_api.c)
  */
-#define ZZAPP_REC_SERVICES_BYTES 1024U
+/* Fits the service state within the fixed 16 KiB record on ARM and host. */
+#define ZZAPP_REC_SERVICES_BYTES 1184U
 #define ZZAPP_REC_LOADER_BYTES   384U
 #define ZZAPP_REC_SVC_BYTES      1440U /* includes counters for the GL 1.1 tail */
 #define ZZAPP_REC_DECODE_BYTES   64U

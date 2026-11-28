@@ -366,6 +366,12 @@ void zzapp_xport_profile_sample(zzapp_rec_t *rec, int have_pc, uint32_t pc);
 int zzapp_xport_post_request(zzapp_rec_t *rec, zzapp_xport_req_kind_t kind,
 			     const aar_request *req, uint64_t deadline,
 			     uint32_t *id);
+/* As above, with an optional final preparation step after the SQ slot is
+ * secured. A negative result leaves the request unpublished. The callback
+ * must not park or post to this SQ. */
+int zzapp_xport_post_request_prepared(zzapp_rec_t *rec,
+	zzapp_xport_req_kind_t kind, const aar_request *req, uint64_t deadline,
+	uint32_t *id, int (*prepare)(void *), void *context);
 /* 1 when the SQ can take an entry now, 0 when full, AAR_E_IO when corrupt.
  * Does not count. */
 int zzapp_xport_sq_space(zzapp_rec_t *rec);

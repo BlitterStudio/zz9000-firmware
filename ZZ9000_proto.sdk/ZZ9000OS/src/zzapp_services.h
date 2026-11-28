@@ -21,6 +21,7 @@ struct aar_locale_info;
 struct aar_display_info;
 struct aar_display_mode;
 struct aar_pointer;
+struct aar_present_result;
 struct zzapp_rec;
 
 /* SDK status numbers. Match sdk_mailbox.h; guarded so either include order works. */
@@ -154,6 +155,12 @@ int zzapp_svc_display_open(uint32_t w, uint32_t h, uint32_t format,
 int zzapp_svc_display_flip(uint32_t surface_id);
 /* Queue a completed buffer without waiting for the client's acknowledgement. */
 int zzapp_svc_display_flip_async(uint32_t surface_id);
+/* The GL module transfers an already reserved frame to the ordinary async
+ * flip path. A failed post leaves it with the module. On the core-1 system
+ * thread this never parks; frame_id 0 passes through an untracked frame. */
+int zzapp_display_flip_tracked(uint32_t surface_id, uint64_t frame_id);
+void zzapp_display_finish_tracked(uint64_t frame_id, uint32_t reason);
+int zzapp_minigl_swap_tracked(uint32_t surface_id, uint64_t frame_id);
 int zzapp_svc_display_refresh(struct aar_surface *out);
 int zzapp_svc_display_set_palette(uint32_t surface_id, uint32_t first,
                                   uint32_t count, const uint32_t *rgb);
@@ -177,7 +184,7 @@ int zzapp_display_latest(void);
 #define ZZAPP_DISPLAY_PRESENT_NO_DIRTY 1U
 int zzapp_display_mailbox_buffers(uint32_t buffers[3], uint32_t *bytes);
 int zzapp_display_mailbox_owned(uint32_t *back, uint32_t *spare);
-int zzapp_display_mailbox_present(uint32_t address, uint32_t flags);
+int zzapp_display_mailbox_present(uint32_t address, uint32_t flags, uint64_t frame_id);
 int zzapp_display_invalidate(uint32_t address, uint32_t bytes);
 /* Reserve the three mailbox buffers for direct GL; release once DMA is idle. */
 int zzapp_display_mailbox_lease(int acquire);
@@ -209,6 +216,9 @@ int zzapp_svc_display_pointer(uint32_t surface_id, uint32_t mode,
 			      const struct aar_pointer *image);
 int zzapp_svc_display_wait_vblank(uint32_t timeout_us);
 uint64_t zzapp_svc_display_last_present_us(void);
+int zzapp_svc_display_present(uint32_t surface_id, uint32_t flags,
+			      uint64_t *frame_id);
+int zzapp_svc_display_present_poll(struct aar_present_result *out);
 int zzapp_svc_event_poll(struct aar_event *out, uint32_t max, uint32_t *out_n);
 int zzapp_svc_audio_open(uint32_t rate, uint32_t channels, struct aar_audio *out);
 int zzapp_svc_audio_close(void);

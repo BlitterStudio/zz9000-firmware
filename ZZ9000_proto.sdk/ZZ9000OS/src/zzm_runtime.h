@@ -44,10 +44,11 @@ enum zzm_service_id {
 #define ZZM_SERVICE_HOST_WINDOW_V3 ZZM_SERVICE_VERSION(3U, 0U)
 #define ZZM_SERVICE_PALETTE_V3 ZZM_SERVICE_VERSION(3U, 0U)
 /* V4: display_flags became display_latest (1 while the display is card-owned).
- * V4.1 appends the mailbox presentation calls.  A module asks for V4 and
- * looks at the minor and the size before it uses them. */
+ * V4.1 appends mailbox presentation. V4.2 adds per-frame feedback.
+ * A module asks for V4 and checks the minor and size before using extensions. */
 #define ZZM_SERVICE_APP_GL_HOST_V4 ZZM_SERVICE_VERSION(4U, 0U)
 #define ZZM_SERVICE_APP_GL_HOST_V4_1 ZZM_SERVICE_VERSION(4U, 1U)
+#define ZZM_SERVICE_APP_GL_HOST_V4_2 ZZM_SERVICE_VERSION(4U, 2U)
 #define ZZM_SERVICE_PROFILE_V3 ZZM_SERVICE_VERSION(3U, 0U)
 #define ZZM_SERVICE_TRANSPORT_V3 ZZM_SERVICE_VERSION(3U, 0U)
 #define ZZM_SERVICE_GRAPHICS_HW_V3 ZZM_SERVICE_VERSION(3U, 0U)
@@ -212,9 +213,21 @@ typedef struct zzm_app_gl_host_service {
     int (*mailbox_buffers)(uint32_t generation, uint32_t buffers[3],
                            uint32_t *bytes);
     int (*mailbox_owned)(uint32_t generation, uint32_t *back, uint32_t *spare);
-    int (*mailbox_present)(uint32_t generation, uint32_t address,
-                           uint32_t flags);
+    int (*mailbox_present_v4_1)(uint32_t generation, uint32_t address,
+                                uint32_t flags);
     int (*mailbox_lease)(uint32_t generation, int acquire);
+    /* V4.2: AAR_OK transfers a nonzero frame ID to the display service.
+     * An error leaves the module responsible for finishing the ID.
+     * Zero submits without feedback. */
+    int (*mailbox_present)(uint32_t generation, uint32_t address,
+                           uint32_t flags, uint64_t frame_id);
+    int (*flip_bound_tracked)(uint32_t generation, uint64_t frame_id);
+    /* Finish a still module-owned ID as unconfirmed for the given reason. */
+    void (*finish_tracked)(uint32_t generation, uint64_t frame_id,
+                           uint32_t reason);
+    /* Run one nonblocking module presentation step with its app selected.
+     * Only the core-1 system thread may enter the callback. */
+    int (*poll_present)(uint32_t generation, int (*poll)(void));
 } zzm_app_gl_host_service_t;
 #define ZZM_DISPLAY_PRESENT_NO_DIRTY 1U
 

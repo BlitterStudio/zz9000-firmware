@@ -9,6 +9,7 @@
  * bound from the control block descriptors, answering from the yield hook the
  * services call in every wait loop.
  */
+#define _GNU_SOURCE
 #if !defined(__STDC_VERSION__) || __STDC_VERSION__ < 201112L
 #define _Static_assert(cond, msg) typedef char zzapp_sa_##__LINE__[(cond) ? 1 : -1]
 #endif
@@ -19,6 +20,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/mman.h>
 
 #include "card_pool.h"
 #include "host_card_pool.h"
@@ -54,6 +56,7 @@ static int failures;
  * back and the wire layer holds or frees the shell. */
 extern unsigned svc_test_latch_calls;
 #define latch_calls svc_test_latch_calls
+extern int (*svc_test_swap_tracked)(uint32_t surface_id, uint64_t frame_id);
 static unsigned revoke_visible_calls;
 void zzapp_host_revoke_visible(void)
 {
@@ -777,6 +780,8 @@ static void reset_all(void)
 	fake_now = 1000000U;
 	latch_calls = 0U;
 	revoke_visible_calls = 0U;
+	svc_test_swap_tracked = NULL;
+	zzapp_test_present_flush_count = 0U;
 	request_seq = 0U;
 	cur_client = NULL;
 	cur_rec = NULL;
@@ -2987,9 +2992,10 @@ static void test_clipboard(void)
 #define FEATURE_CAPS (AAR_DISPCAP_WINDOW | AAR_DISPCAP_RESIZE | \
 		      AAR_DISPCAP_POINTER_ABS | AAR_DISPCAP_TEXT_INPUT | \
 		      AAR_DISPCAP_CLOSE_REQUEST | AAR_DISPCAP_SCALED)
+#define BASE_DISPLAY_CAPS (AAR_DISPCAP_ASYNC | AAR_DISPCAP_PRESENT_FEEDBACK)
 
-/* The caps are what was asked for and what the client says it did, nothing
- * else; a window or a scaled surface is the client's, never scanned out. */
+/* Client feature caps reflect the request and reply. Window and scaled
+ * surfaces are the client's, never scanned out by the card. */
 static void test_display_caps_v06(void)
 {
 	client_t c;
@@ -3020,7 +3026,7 @@ static void test_display_caps_v06(void)
 				     all | AAR_DISPLAY_VSYNC | AAR_DISPLAY_LATEST, &s) == AAR_OK);
 	CHECK(cl.last[AAR_OP_DISPLAY_OPEN].arg[AAR_A_DISPLAY_OPEN_FLAGS] ==
 	      (all | AAR_DISPLAY_VSYNC | AAR_DISPLAY_LATEST));
-	CHECK(s.caps == (AAR_DISPCAP_ASYNC | FEATURE_CAPS));
+	CHECK(s.caps == (BASE_DISPLAY_CAPS | FEATURE_CAPS));
 	CHECK(st->display_caps == FEATURE_CAPS);
 	/* Never direct scanout, never card-owned, even with a client that
 	 * offers both. */
@@ -3032,30 +3038,30 @@ static void test_display_caps_v06(void)
 	/* Asked for, not granted. */
 	cl.open_caps = 0U;
 	CHECK(zzapp_svc_display_open(640U, 480U, AAR_FMT_RGB565, all, &s) == AAR_OK);
-	CHECK(s.caps == AAR_DISPCAP_ASYNC && st->display_caps == 0U);
+	CHECK(s.caps == BASE_DISPLAY_CAPS && st->display_caps == 0U);
 	CHECK(st->display_scanout_ack == 1U);
 	CHECK(zzapp_svc_display_close(1U) == AAR_OK);
 	/* Granted, not asked for. */
 	cl.open_caps = FEATURE_CAPS;
 	CHECK(zzapp_svc_display_open(640U, 480U, AAR_FMT_RGB565, 0U, &s) == AAR_OK);
-	CHECK(s.caps == AAR_DISPCAP_ASYNC);
+	CHECK(s.caps == BASE_DISPLAY_CAPS);
 	CHECK(zzapp_svc_display_close(1U) == AAR_OK);
 	/* A resizable window and its close gadget need the window. */
 	cl.open_caps = AAR_DISPCAP_WINDOW | AAR_DISPCAP_RESIZE | AAR_DISPCAP_CLOSE_REQUEST;
 	CHECK(zzapp_svc_display_open(640U, 480U, AAR_FMT_RGB565, AAR_DISPLAY_RESIZABLE |
 				     AAR_DISPLAY_CLOSE_REQUEST, &s) == AAR_OK);
-	CHECK(s.caps == AAR_DISPCAP_ASYNC);
+	CHECK(s.caps == BASE_DISPLAY_CAPS);
 	CHECK(zzapp_svc_display_close(1U) == AAR_OK);
 	cl.open_caps = AAR_DISPCAP_RESIZE | AAR_DISPCAP_CLOSE_REQUEST;
 	CHECK(zzapp_svc_display_open(640U, 480U, AAR_FMT_RGB565, AAR_DISPLAY_WINDOW |
 				     AAR_DISPLAY_RESIZABLE | AAR_DISPLAY_CLOSE_REQUEST, &s) == AAR_OK);
-	CHECK(s.caps == AAR_DISPCAP_ASYNC);
+	CHECK(s.caps == BASE_DISPLAY_CAPS);
 	CHECK(zzapp_svc_display_close(1U) == AAR_OK);
 	/* Scaled alone is the client's too. */
 	cl.open_caps = AAR_DISPCAP_SCALED;
 	CHECK(zzapp_svc_display_open(640U, 480U, AAR_FMT_RGB565, AAR_DISPLAY_SCALE |
 				     AAR_DISPLAY_LATEST, &s) == AAR_OK);
-	CHECK(s.caps == (AAR_DISPCAP_ASYNC | AAR_DISPCAP_SCALED));
+	CHECK(s.caps == (BASE_DISPLAY_CAPS | AAR_DISPCAP_SCALED));
 	CHECK(st->display_scanout_ack == 0U && zzapp_display_latest() == 0);
 	CHECK(zzapp_svc_display_close(1U) == AAR_OK);
 	/* A plain screen keeps both. */
@@ -3225,6 +3231,346 @@ static void test_display_present_time(void)
 	zzapp_services_on_app_end();
 	(void)zzapp_rec_retire(rec->hdr.pid);
 	(void)mbox(ZZAPP_OP_RELEASE, handle, 0U, 0U, NULL, NULL);
+}
+
+static void check_present(uint64_t id, uint32_t outcome, uint32_t reason)
+{
+	aar_present_result result = {0};
+
+	CHECK(id != 0U);
+	CHECK(zzapp_svc_display_present_poll(&result) == 1);
+	CHECK(result.frame_id == id && result.outcome == outcome);
+	CHECK(result.reason == reason && result.completed_us == fake_now);
+}
+
+static void test_tracked_strict_present(void)
+{
+	client_t c;
+	zzapp_rec_t *rec;
+	uint32_t handle;
+	aar_surface s;
+	aar_present_result result;
+	uint64_t ack, expired, scanned, failed, closed, stopped, rejected = 99U;
+	uint64_t last;
+	uint32_t shown;
+
+	reset_all();
+	rec = claim(&c, &handle);
+	give_space(rec);
+	rec->claim.client_caps = ZZAPP_CLIENT_SCANOUT_ACK;
+	CHECK(zzapp_svc_display_open(640U, 480U, AAR_FMT_RGB565, 0U, &s) == AAR_OK);
+	CHECK((s.caps & AAR_DISPCAP_PRESENT_FEEDBACK) != 0U);
+	CHECK(zzapp_svc_display_present(s.id + 1U, 0U, &rejected) == AAR_E_INVAL);
+	CHECK(rejected == 0U);
+	CHECK(zzapp_svc_display_present(s.id, AAR_PRESENT_GL | AAR_PRESENT_ASYNC,
+				       &rejected) == AAR_E_INVAL);
+	CHECK(zzapp_svc_display_present(s.id, 0U, NULL) == AAR_E_INVAL);
+	CHECK(zzapp_svc_display_present_poll(NULL) == AAR_E_INVAL);
+	CHECK(zzapp_svc_display_present(s.id, AAR_PRESENT_GL, &rejected) == AAR_E_NOSYS);
+	CHECK(rejected == 0U && cl.nreq[AAR_OP_DISPLAY_FLIP] == 0U);
+
+	CHECK(zzapp_svc_display_present(s.id, 0U, &ack) == AAR_OK);
+	check_present(ack, AAR_PRESENT_ACKNOWLEDGED, AAR_PRESENT_REASON_NONE);
+	CHECK(zzapp_svc_display_present_poll(&result) == 0);
+	last = zzapp_svc_display_last_present_us();
+	CHECK(last == fake_now);
+
+	cl.flip_flags = ZZAPP_FLIPF_SUBMITTED;
+	cl.no_vblank = 1;
+	CHECK(zzapp_svc_display_present(s.id, AAR_PRESENT_ASYNC, &expired) == AAR_OK);
+	client_service(&c);
+	zzapp_services_poll();
+	CHECK(zzapp_svc_display_present_poll(&result) == 0);
+	CHECK(zzapp_display_flip_idle() == 0);
+	shown = runtime_of(rec)->display_flip_address;
+	fake_now += FLIP_ACK_TIMEOUT_US - 1U;
+	zzapp_services_poll();
+	CHECK(zzapp_svc_display_present_poll(&result) == 0);
+	fake_now += 1U;
+	zzapp_services_poll();
+	check_present(expired, AAR_PRESENT_UNCONFIRMED, AAR_PRESENT_REASON_TIMEOUT);
+	CHECK(zzapp_display_flip_idle() == 1);
+	fake_now += 1U;
+	zzapp_services_display_vblank(shown);
+	CHECK(zzapp_svc_display_present_poll(&result) == 0);
+	CHECK(zzapp_svc_display_last_present_us() == last);
+
+	CHECK(zzapp_svc_display_present(s.id, AAR_PRESENT_ASYNC, &scanned) == AAR_OK);
+	client_service(&c);
+	zzapp_services_poll();
+	shown = runtime_of(rec)->display_flip_address;
+	zzapp_services_display_vblank(shown + 2U);
+	CHECK(zzapp_svc_display_present_poll(&result) == 0);
+	fake_now += 16U;
+	zzapp_services_display_vblank(shown);
+	check_present(scanned, AAR_PRESENT_ACKNOWLEDGED, AAR_PRESENT_REASON_NONE);
+	last = zzapp_svc_display_last_present_us();
+	CHECK(last == fake_now);
+	zzapp_services_display_vblank(shown);
+	CHECK(zzapp_svc_display_present_poll(&result) == 0);
+
+	cl.result = AAR_E_IO;
+	CHECK(zzapp_svc_display_present(s.id, 0U, &failed) == AAR_OK);
+	check_present(failed, AAR_PRESENT_UNCONFIRMED, AAR_PRESENT_REASON_BACKEND);
+	CHECK(zzapp_svc_display_last_present_us() == last);
+	cl.result = AAR_OK;
+	CHECK(zzapp_svc_display_present(s.id, AAR_PRESENT_ASYNC, &closed) == AAR_OK);
+	CHECK(zzapp_svc_display_close(s.id) == AAR_OK);
+	/* A different live app may not collect this app's close result. */
+	{
+		client_t other;
+		uint32_t other_handle;
+
+		CHECK(claim(&other, &other_handle) != NULL);
+		CHECK(zzapp_svc_display_present_poll(&result) == 0);
+		CHECK(mbox(ZZAPP_OP_RELEASE, other_handle, 0U, 0U, NULL, NULL) == SDK_STATUS_OK);
+		CHECK(zzapp_services_select_pid(rec->hdr.pid) == 1);
+		cur_client = &c;
+		cur_rec = rec;
+	}
+	check_present(closed, AAR_PRESENT_UNCONFIRMED, AAR_PRESENT_REASON_CANCELLED);
+	CHECK(zzapp_svc_display_present_poll(&result) == 0);
+	CHECK(zzapp_svc_display_open(640U, 480U, AAR_FMT_RGB565, 0U, &s) == AAR_OK);
+	CHECK(zzapp_display_flip_tracked(s.id, closed) == AAR_E_INVAL);
+	CHECK(zzapp_svc_display_present(s.id, AAR_PRESENT_ASYNC, &stopped) == AAR_OK);
+	CHECK(stopped != closed && stopped != expired && stopped != ack);
+	rec->host.stop_requested = 1U;
+	check_present(stopped, AAR_PRESENT_UNCONFIRMED, AAR_PRESENT_REASON_CANCELLED);
+	CHECK(zzapp_svc_display_present_poll(&result) == 0);
+	zzapp_services_on_app_end();
+	(void)zzapp_rec_retire(rec->hdr.pid);
+	CHECK(mbox(ZZAPP_OP_RELEASE, handle, 0U, 0U, NULL, NULL) == SDK_STATUS_OK);
+}
+
+static void client_yield_and_poll(void)
+{
+	client_yield();
+	zzapp_services_poll();
+}
+
+static void reply_after_feedback_timeout(void)
+{
+	aar_completion late = {0};
+
+	fake_now += 7U;
+	late.op = AAR_OP_DISPLAY_FLIP;
+	late.id = zzapp_xport_req_id(cur_rec, ZZAPP_XPORT_REQ_FLIP);
+	client_post(cur_client, &late);
+}
+
+static void test_tracked_client_reply_timeout(void)
+{
+	client_t c;
+	zzapp_rec_t *rec;
+	uint32_t handle;
+	aar_surface s;
+	aar_present_result result;
+	uint64_t id, start;
+
+	reset_all();
+	rec = claim(&c, &handle);
+	give_space(rec);
+	CHECK(zzapp_svc_display_open(640U, 480U, AAR_FMT_RGB565, 0U, &s) == AAR_OK);
+	cl.ignore = 1;
+	cl.clock_step = PRESENT_FEEDBACK_TIMEOUT_US / 2U;
+	cl.stop_at_yield = cl.yields + 5U;
+	zzapp_services_test_set_yield(client_yield_and_poll);
+	start = fake_now;
+	CHECK(zzapp_svc_display_present(s.id, 0U, &id) == AAR_OK);
+	CHECK(fake_now - start == PRESENT_FEEDBACK_TIMEOUT_US);
+	CHECK(rec->thread.wake_reason == ZZAPP_WAKE_READY);
+	CHECK(!zzapp_services_wait_registered(rec->hdr.pid));
+	check_present(id, AAR_PRESENT_UNCONFIRMED, AAR_PRESENT_REASON_TIMEOUT);
+	CHECK(zzapp_display_flip_idle() == 0);
+	CHECK(zzapp_svc_display_refresh(&s) == AAR_E_BUSY);
+	CHECK(zzapp_svc_display_last_present_us() == 0U);
+
+	/* MiniGL must wait for the late confirmation even though the tracked
+	 * result is already available and the swap is still submitting. */
+	runtime_of(rec)->present_submitting = 1;
+	zzapp_services_test_set_yield(reply_after_feedback_timeout);
+	CHECK(zzapp_display_wait_flip_idle() == AAR_OK);
+	runtime_of(rec)->present_submitting = 0;
+	CHECK(zzapp_display_flip_idle() == 1);
+	CHECK(zzapp_svc_display_last_present_us() == fake_now);
+	CHECK(zzapp_svc_display_present_poll(&result) == 0);
+	zzapp_services_test_set_yield(client_yield_and_poll);
+
+	/* A client that promises a pan without scanout feedback is unconfirmed. */
+	cl.ignore = 0;
+	cl.stop_at_yield = 0U;
+	cl.clock_step = 1000U;
+	cl.flip_flags = ZZAPP_FLIPF_SUBMITTED;
+	cl.no_vblank = 1;
+	CHECK(zzapp_svc_display_present(s.id, 0U, &id) == AAR_OK);
+	check_present(id, AAR_PRESENT_UNCONFIRMED, AAR_PRESENT_REASON_BACKEND);
+	CHECK(zzapp_display_flip_idle() == 1);
+	CHECK(zzapp_svc_display_close(s.id) == AAR_OK);
+	CHECK(zzapp_svc_display_present_poll(&result) == 0);
+	zzapp_services_on_app_end();
+	(void)zzapp_rec_retire(rec->hdr.pid);
+	CHECK(mbox(ZZAPP_OP_RELEASE, handle, 0U, 0U, NULL, NULL) == SDK_STATUS_OK);
+}
+
+static void test_tracked_latest_present(void)
+{
+	client_t c;
+	zzapp_rec_t *rec;
+	uint32_t handle;
+	aar_surface s;
+	aar_present_result result;
+	uint64_t frames[AAR_PRESENT_QUEUE_CAPACITY], next, rejected = 99U;
+	uint32_t scan = 0U;
+	uint32_t i;
+
+	reset_all();
+	rec = claim(&c, &handle);
+	give_space(rec);
+	rec->claim.client_caps = ZZAPP_CLIENT_LATEST;
+	cl.open_spare = 0x00600000U;
+	CHECK(zzapp_svc_display_open(640U, 480U, AAR_FMT_RGB565,
+				     AAR_DISPLAY_LATEST, &s) == AAR_OK);
+	for (i = 0U; i < AAR_PRESENT_QUEUE_CAPACITY; i++)
+		CHECK(zzapp_svc_display_present(s.id, AAR_PRESENT_ASYNC, &frames[i]) == AAR_OK);
+	CHECK(zzapp_svc_display_last_present_us() == 0U);
+	CHECK(zzapp_svc_display_latest_dropped() == AAR_PRESENT_QUEUE_CAPACITY - 1U);
+	CHECK(zzapp_svc_display_refresh(&s) == AAR_OK);
+	{
+		void *back = s.back;
+		unsigned flushes = zzapp_test_present_flush_count;
+
+		CHECK(zzapp_svc_display_present(s.id, 0U, &rejected) == AAR_E_BUSY);
+		CHECK(rejected == 0U && zzapp_test_present_flush_count == flushes);
+		CHECK(zzapp_svc_display_refresh(&s) == AAR_OK && s.back == back);
+	}
+	CHECK(zzapp_services_display_mailbox_begin(cl.open_front, &scan) == 1);
+	zzapp_services_display_mailbox_end(0);
+	/* A legacy flip may replace the last tracked frame even while full. */
+	CHECK(zzapp_svc_display_flip_async(s.id) == AAR_OK);
+	for (i = 0U; i < AAR_PRESENT_QUEUE_CAPACITY; i++)
+		check_present(frames[i], AAR_PRESENT_REPLACED, AAR_PRESENT_REASON_NONE);
+	CHECK(zzapp_svc_display_present_poll(&result) == 0);
+	fake_now += 16U;
+	CHECK(zzapp_services_display_mailbox_begin(cl.open_front, &scan) == 1);
+	zzapp_services_display_mailbox_end(1);
+	CHECK(zzapp_svc_display_present_poll(&result) == 0);
+	CHECK(zzapp_svc_display_present(s.id, 0U, &frames[0]) == AAR_OK);
+	CHECK(zzapp_services_display_mailbox_begin(cl.open_front, &scan) == 1);
+	fake_now += 16U;
+	zzapp_services_display_mailbox_end(1);
+	CHECK(zzapp_svc_display_present(s.id, 0U, &next) == AAR_OK);
+	check_present(frames[0], AAR_PRESENT_ACKNOWLEDGED, AAR_PRESENT_REASON_NONE);
+	CHECK(zzapp_svc_display_present_poll(&result) == 0);
+	{
+		uint32_t pending = runtime_of(rec)->display_mailbox_pending;
+
+		fake_now += PRESENT_FEEDBACK_TIMEOUT_US - 1U;
+		zzapp_services_poll();
+		CHECK(zzapp_svc_display_present_poll(&result) == 0);
+		fake_now += 1U;
+		zzapp_services_poll();
+		check_present(next, AAR_PRESENT_UNCONFIRMED, AAR_PRESENT_REASON_TIMEOUT);
+		fake_now += 16U;
+		CHECK(zzapp_services_display_mailbox_begin(cl.open_front, &scan) == 1);
+		CHECK(scan == pending && pending != 0U);
+		zzapp_services_display_mailbox_end(1);
+		CHECK(zzapp_svc_display_present_poll(&result) == 0);
+		CHECK(zzapp_svc_display_last_present_us() == fake_now);
+	}
+	CHECK(zzapp_svc_display_present(s.id, 0U, &next) == AAR_OK);
+	CHECK(cl.nreq[AAR_OP_DISPLAY_FLIP] == 0U);
+	fake_now += 8U;
+	CHECK(zzapp_svc_display_close(s.id) == AAR_OK);
+	check_present(next, AAR_PRESENT_UNCONFIRMED, AAR_PRESENT_REASON_CANCELLED);
+	CHECK(zzapp_svc_display_present_poll(&result) == 0);
+	zzapp_services_on_app_end();
+	(void)zzapp_rec_retire(rec->hdr.pid);
+	CHECK(mbox(ZZAPP_OP_RELEASE, handle, 0U, 0U, NULL, NULL) == SDK_STATUS_OK);
+}
+
+static uint64_t sealed_gl_frame;
+
+static int seal_tracked_gl(uint32_t surface_id, uint64_t frame_id)
+{
+	CHECK(surface_id == 1U && frame_id != 0U);
+	sealed_gl_frame = frame_id;
+	return AAR_OK;
+}
+
+static void test_tracked_copy_precommit(void)
+{
+	const uintptr_t front = 0x02000000U;
+	enum { PAGE = 4096, FRAME_BYTES = 512 };
+	uint8_t *pages = mmap((void *)front, 2U * PAGE, PROT_READ | PROT_WRITE,
+			      MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+	client_t c;
+	zzapp_rec_t *rec;
+	struct zzapp_service_runtime *state;
+	uint32_t handle, sq_tail, next_req;
+	uint64_t id = 99U;
+	aar_surface s;
+	aar_present_result result;
+
+	CHECK((uintptr_t)pages == front);
+	if ((uintptr_t)pages != front) {
+		if (pages != MAP_FAILED)
+			munmap(pages, 2U * PAGE);
+		return;
+	}
+	reset_all();
+	rec = claim(&c, &handle);
+	give_space(rec);
+	state = runtime_of(rec);
+	cl.open_front = (uint32_t)front;
+	cl.open_back = (uint32_t)front + PAGE;
+	cl.open_pitch = 32U;
+	CHECK(zzapp_svc_display_open(16U, 16U, AAR_FMT_RGB565, 0U, &s) == AAR_OK);
+	/* Use the mapped test page as the firmware-owned drawing buffer. */
+	state->display_back_owned = 1;
+	memset(pages, 0x11, FRAME_BYTES);
+	memset(pages + PAGE, 0x22, FRAME_BYTES);
+	next_req = rec->xport.next_id;
+	rec->xport.next_id = 0U;
+	CHECK(zzapp_svc_display_present(s.id, 0U, &id) == AAR_E_NOSPC);
+	CHECK(id == 0U && pages[0] == 0x11U && zzapp_test_present_flush_count == 0U);
+	CHECK(zzapp_svc_display_present_poll(&result) == 0);
+	rec->xport.next_id = next_req;
+
+	svc_test_swap_tracked = seal_tracked_gl;
+	CHECK(zzapp_svc_display_present(s.id, AAR_PRESENT_GL, &id) == AAR_OK);
+	CHECK(id == sealed_gl_frame && zzapp_svc_display_present_poll(&result) == 0);
+
+	/* The GL system worker can make progress while the owner is parked on
+	 * a file. Full SQ is retryable without a copy, flush or wait mutation. */
+	state->wait_kind = ZZAPP_WAIT_FILE;
+	state->wait_value = 0xffffU;
+	sq_tail = aar_get_be32(c.sq.tail);
+	aar_put_be32(c.sq.tail, aar_get_be32(c.sq.head) + c.sq.depth);
+	CHECK(zzapp_display_flip_tracked(s.id, 0U) == AAR_E_BUSY);
+	CHECK(zzapp_display_flip_tracked(s.id, id) == AAR_E_BUSY);
+	CHECK(state->wait_kind == ZZAPP_WAIT_FILE && state->wait_value == 0xffffU);
+	CHECK(pages[0] == 0x11U && zzapp_test_present_flush_count == 0U);
+	CHECK(zzapp_svc_display_present_poll(&result) == 0);
+	aar_put_be32(c.sq.tail, sq_tail);
+	CHECK(zzapp_display_flip_tracked(s.id, id) == AAR_OK);
+	CHECK(state->wait_kind == ZZAPP_WAIT_FILE && state->wait_value == 0xffffU);
+	CHECK(memcmp(pages, pages + PAGE, FRAME_BYTES) == 0);
+	CHECK(zzapp_test_present_flush_count == 1U);
+	client_service(&c);
+	zzapp_services_poll();
+	check_present(id, AAR_PRESENT_ACKNOWLEDGED, AAR_PRESENT_REASON_NONE);
+	CHECK(cl.nreq[AAR_OP_DISPLAY_FLIP] == 1U);
+	CHECK(cl.last[AAR_OP_DISPLAY_FLIP].arg[AAR_A_DISPLAY_FLIP_FLAGS] == AAR_FLIPF_ASYNC);
+
+	CHECK(zzapp_svc_display_present(s.id, AAR_PRESENT_GL, &id) == AAR_OK);
+	fake_now += 7U;
+	zzapp_display_finish_tracked(id, AAR_PRESENT_REASON_CANCELLED);
+	check_present(id, AAR_PRESENT_UNCONFIRMED, AAR_PRESENT_REASON_CANCELLED);
+	CHECK(zzapp_svc_display_present_poll(&result) == 0);
+	zzapp_services_on_app_end();
+	(void)zzapp_rec_retire(rec->hdr.pid);
+	CHECK(mbox(ZZAPP_OP_RELEASE, handle, 0U, 0U, NULL, NULL) == SDK_STATUS_OK);
+	CHECK(munmap(pages, 2U * PAGE) == 0);
 }
 
 static void test_display_info_modes(void)
@@ -4614,6 +4960,10 @@ int main(void)
 	test_display_caps_v06();
 	test_display_window_flip();
 	test_display_present_time();
+	test_tracked_strict_present();
+	test_tracked_client_reply_timeout();
+	test_tracked_latest_present();
+	test_tracked_copy_precommit();
 	test_display_info_modes();
 	test_display_title_pointer();
 	test_display_wait_vblank();

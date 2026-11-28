@@ -17,6 +17,7 @@
 #include "zzm_manifest.h"
 #include "zzm_loader.h"
 #include "zzm_minigl_host.h"
+#include "zzapp_runtime.h"
 #include "zzm_runtime.h"
 #include "ff.h"
 #include "aar/app.h"
@@ -73,6 +74,14 @@ static uint32_t module_max_flush;
 static uint32_t module_max_icache;
 static unsigned module_load_passes;
 static uint64_t now_us;
+static int freeze_clock;
+enum { TEST_GL_PID, TEST_OTHER_PID };
+static zzapp_kernel_t app_kernel = {
+    .gl_owner = TEST_GL_PID,
+    .gl_generation = 1U,
+};
+static uint32_t selected_pid = TEST_GL_PID;
+static int running_pid = -1;
 static uint32_t display_width = 640U;
 static uint32_t display_height = 480U;
 static uint32_t display_pitch = 640U * 4U;
@@ -84,12 +93,15 @@ static int display_latest;
 static const uint32_t mailbox_pages[3] = { 0x08002100U, 0x08004100U, 0x08006100U };
 static uint32_t mailbox_spare, mailbox_pending;
 static uint32_t mailbox_presented[16];
+static uint64_t mailbox_presented_ids[16];
 static unsigned mailbox_presents, mailbox_cleans, mailbox_invalidates;
 static int mailbox_model, mailbox_leased, mailbox_vblank_on_yield;
 static uint32_t mailbox_stale_address;
 static uint16_t mailbox_current_pixel;
 static int flip_idle = 1;
 static int hold_flip;
+static int rotate_display_on_wait;
+static int display_stop_requested;
 static unsigned wait_yields;
 static int g_yield_runs_worker;
 static unsigned flip_waits;
@@ -148,7 +160,9 @@ static uint64_t g_fetch_release_us;
 static void test_rix_run_fetches(void);
 void XTime_GetTime(uint64_t *time)
 {
-    *time = now_us++;
+    *time = now_us;
+    if (!freeze_clock)
+        ++now_us;
     if (g_fetch_hold && !g_fetch_wedged && now_us >= g_fetch_release_us) {
         g_fetch_hold = 0;
         test_rix_run_fetches();
@@ -493,10 +507,25 @@ static zzm_graphics_hw_caps_t graphics_caps = {
 };
 void zzapp_api_enter(void) { g_in_gl_call = 1; }
 void zzapp_api_leave(void) { g_in_gl_call = 0; }
-uint32_t zzapp_current_generation(void) { return 1U; }
+zzapp_kernel_t *zzapp_runtime_kernel(void) { return &app_kernel; }
+int zzapp_kernel_current_thread(void) { return running_pid; }
+uint32_t zzapp_services_current_pid(void)
+{
+    return running_pid >= 0 ? (uint32_t)running_pid : selected_pid;
+}
+int zzapp_services_select_pid(uint32_t pid)
+{
+    selected_pid = pid;
+    return pid == TEST_GL_PID || pid == TEST_OTHER_PID;
+}
+uint32_t zzapp_current_generation(void)
+{
+    return zzapp_services_current_pid() + 1U;
+}
 int zzapp_display_bound(uint32_t *width, uint32_t *height, uint32_t *pitch,
                         uint32_t *format, uint32_t *front, uint32_t *back)
 {
+    assert(zzapp_services_current_pid() == TEST_GL_PID);
     *width = display_width;
     *height = display_height;
     *pitch = display_pitch;
@@ -514,6 +543,17 @@ int zzapp_display_layout(uint32_t *layout)
  * presented buffer, taken at each flip (a frame is visible once flipped). */
 static const uint8_t *g_flip_src;
 static uint8_t g_shown[2];
+static struct {
+    uint64_t id;
+    uint8_t pixel[2];
+} tracked_flips[4];
+static struct {
+    uint64_t id;
+    uint32_t reason;
+} tracked_finishes[4];
+static unsigned tracked_flip_count;
+static unsigned tracked_finish_count;
+static int reject_tracked_flip;
 static unsigned g_flips;
 int zzapp_svc_display_flip(uint32_t surface_id)
 {
@@ -531,6 +571,34 @@ int zzapp_svc_display_flip_async(uint32_t surface_id)
     return zzapp_svc_display_flip(surface_id);
 }
 
+int zzapp_display_flip_tracked(uint32_t surface_id, uint64_t frame_id)
+{
+    unsigned index = tracked_flip_count++;
+
+    assert(surface_id == 1U && zzapp_services_current_pid() == TEST_GL_PID);
+    assert(index < sizeof(tracked_flips) / sizeof(tracked_flips[0]));
+    tracked_flips[index].id = frame_id;
+    if (g_flip_src)
+        memcpy(tracked_flips[index].pixel, g_flip_src, sizeof(g_shown));
+    if (reject_tracked_flip) {
+        int error = reject_tracked_flip;
+
+        reject_tracked_flip = 0;
+        return error;
+    }
+    return zzapp_svc_display_flip(surface_id);
+}
+
+void zzapp_display_finish_tracked(uint64_t frame_id, uint32_t reason)
+{
+    unsigned index = tracked_finish_count++;
+
+    assert(zzapp_services_current_pid() == TEST_GL_PID);
+    assert(index < sizeof(tracked_finishes) / sizeof(tracked_finishes[0]));
+    tracked_finishes[index].id = frame_id;
+    tracked_finishes[index].reason = reason;
+}
+
 int zzapp_display_flip_idle(void)
 {
     return flip_idle;
@@ -540,10 +608,17 @@ int zzapp_display_flip_idle(void)
 int zzapp_display_wait_flip_idle(void)
 {
     ++flip_waits;
+    if (rotate_display_on_wait && !flip_idle) {
+        uint32_t old_front = display_front;
+
+        display_front = display_back;
+        display_back = old_front;
+    }
     flip_idle = 1;
     return 0;
 }
 int zzapp_display_latest(void) { return display_latest; }
+int zzapp_services_stop_requested(void) { return display_stop_requested; }
 
 int zzapp_display_mailbox_buffers(uint32_t buffers[3], uint32_t *bytes)
 {
@@ -571,7 +646,7 @@ int zzapp_display_mailbox_lease(int acquire)
     return AAR_OK;
 }
 
-int zzapp_display_mailbox_present(uint32_t address, uint32_t flags)
+int zzapp_display_mailbox_present(uint32_t address, uint32_t flags, uint64_t frame_id)
 {
     uint32_t next = mailbox_pending;
 
@@ -587,6 +662,7 @@ int zzapp_display_mailbox_present(uint32_t address, uint32_t flags)
     mailbox_spare = 0U;
     mailbox_pending = address;
     assert(mailbox_presents < sizeof(mailbox_presented) / sizeof(mailbox_presented[0]));
+    mailbox_presented_ids[mailbox_presents] = frame_id;
     mailbox_presented[mailbox_presents++] = address;
     if (!(flags & ZZAPP_DISPLAY_PRESENT_NO_DIRTY))
         ++mailbox_cleans;
@@ -614,7 +690,6 @@ static void test_mailbox_vblank(void)
     display_front = mailbox_pending;
     mailbox_pending = 0U;
 }
-int zzapp_services_stop_requested(void) { return 0; }
 void zzapp_host_yield_wait(void)
 {
     ++wait_yields;
@@ -1104,6 +1179,245 @@ static void test_gl_swap_presents(const zzm_minigl_ops_v1_t *ops, void *context,
     zzapp_gl_test_set_p96(NULL, 0U);
 }
 
+static void draw_swap_colour(const aar_gl *draw, unsigned colour)
+{
+    draw->ClearColor(swap_colours[colour].rgb[0], swap_colours[colour].rgb[1],
+                     swap_colours[colour].rgb[2], 1.0f);
+    draw->Clear(0x4000U);
+}
+
+static void test_gl_swap_tracked(const zzm_minigl_ops_v1_t *ops, void *context)
+{
+    const uint64_t first = UINT64_C(0x100000001);
+    const uint64_t second = UINT64_C(0x100000002);
+    const zzm_services_t *services = zzm_runtime_services_v3();
+    const zzm_app_gl_host_service_t *host;
+    uint8_t frame[64] = {0};
+    const void *gl = NULL;
+    mw_ctx *mw;
+    uint32_t target;
+
+    assert(ops->size >= offsetof(zzm_minigl_ops_v1_t, app_swap_tracked) +
+                        sizeof(ops->app_swap_tracked));
+    assert(ops->app_swap_tracked != NULL);
+    host = services->get_service(ZZM_SERVICE_APP_GL_HOST, ZZM_SERVICE_APP_GL_HOST_V4_2);
+    assert(host != NULL);
+    assert(host->flip_bound_tracked(2U, first) == AAR_E_INVAL);
+    host->finish_tracked(2U, first, AAR_PRESENT_REASON_CANCELLED);
+    assert(tracked_flip_count == 0U && tracked_finish_count == 0U);
+
+    zzapp_gl_test_set_p96(frame, sizeof(frame));
+    g_flip_src = frame;
+    hold_flip = 1;
+    assert(ops->app_bind(context, 1U, &gl) == AAR_OK);
+    mw = amiberry_transport_inproc_ctx();
+    target = mw->state.target.back;
+    draw_swap_colour(gl, 0U);
+    assert(ops->app_swap_tracked(context, 0U) == AAR_E_INVAL);
+    display_stop_requested = 1;
+    assert(ops->app_swap_tracked(context, first) == AAR_E_IO);
+    display_stop_requested = 0;
+    assert(mw->state.target.back == target);
+    assert(ops->app_swap_tracked(context, first) == AAR_OK);
+    assert(tracked_flip_count == 0U && tracked_finish_count == 0U);
+    draw_swap_colour(gl, 1U);
+    assert(ops->app_swap_tracked(context, second) == AAR_OK);
+    assert(tracked_flip_count == 1U && tracked_flips[0].id == first);
+    assert(memcmp(tracked_flips[0].pixel, swap_colours[0].pixel, sizeof(g_shown)) == 0);
+    assert(!flip_idle && tracked_finish_count == 0U);
+    ops->app_unbind(context);
+    assert(tracked_finish_count == 1U && tracked_finishes[0].id == second);
+    assert(tracked_finishes[0].reason == AAR_PRESENT_REASON_CANCELLED);
+    assert(tracked_flip_count == 1U && !flip_idle);
+
+    /* Keep two sealed targets in the queue, then reject only the first
+     * handoff. The newer frame and its pixels must still reach the host. */
+    hold_flip = 0;
+    assert(ops->app_bind(context, 1U, &gl) == AAR_OK);
+    draw_swap_colour(gl, 2U);
+    assert(ops->app_swap_tracked(context, first + 2U) == AAR_OK);
+    draw_swap_colour(gl, 3U);
+    assert(ops->app_swap_tracked(context, second + 2U) == AAR_OK);
+    assert(tracked_flip_count == 1U);
+    flip_idle = 1;
+    reject_tracked_flip = AAR_E_IO;
+    assert(ops->app_swap(context) == AAR_OK);
+    assert(tracked_flip_count == 2U && tracked_flips[1].id == first + 2U);
+    assert(tracked_finish_count == 2U && tracked_finishes[1].id == first + 2U);
+    assert(tracked_finishes[1].reason == AAR_PRESENT_REASON_BACKEND);
+    assert(ops->app_swap(context) == AAR_OK);
+    assert(tracked_flip_count == 3U && tracked_flips[2].id == second + 2U);
+    assert(memcmp(tracked_flips[2].pixel, swap_colours[3].pixel, sizeof(g_shown)) == 0);
+    ops->app_unbind(context);
+    assert(tracked_finish_count == 2U);
+
+    /* A synchronous swap can fail at the handoff during the submit call.
+     * It still returns AAR_OK because the module already sealed its target. */
+    reject_tracked_flip = AAR_E_IO;
+    assert(ops->app_bind_flags(context, 1U, AAR_ZZ9000_GL_BIND_SYNC_PRESENT,
+                               &gl) == AAR_OK);
+    assert(ops->app_swap_tracked(context, first + 4U) == AAR_OK);
+    assert(tracked_flip_count == 4U && tracked_flips[3].id == first + 4U);
+    assert(tracked_finish_count == 3U && tracked_finishes[2].id == first + 4U);
+    assert(tracked_finishes[2].reason == AAR_PRESENT_REASON_BACKEND);
+    ops->app_unbind(context);
+    assert(tracked_finish_count == 3U);
+    g_flip_src = NULL;
+    zzapp_gl_test_set_p96(NULL, 0U);
+}
+
+static void test_gl_direct_swap_tracked(const zzm_minigl_ops_v1_t *ops, void *context)
+{
+    const void *gl = NULL;
+    uint32_t front = display_front;
+    uint32_t back = display_back;
+    uint32_t layout = display_layout;
+
+    display_layout = AAR_LAYOUT_RGB565_LE;
+    display_back = front + 0x800U;
+    tracked_flip_count = 0U;
+    tracked_finish_count = 0U;
+    hold_flip = 1;
+    rotate_display_on_wait = 1;
+    flip_waits = 0U;
+    assert(ops->app_bind_flags(context, 1U, AAR_ZZ9000_GL_BIND_DIRECT_PRESENT,
+                               &gl) == AAR_OK);
+    assert(amiberry_transport_inproc_ctx()->state.target.buffer_count == 2U);
+    assert(ops->app_swap_tracked(context, 101U) == AAR_OK);
+    assert(tracked_flip_count == 1U && tracked_flips[0].id == 101U);
+    assert(flip_waits == 1U && display_front == front + 0x800U);
+    assert(ops->app_swap(context) == AAR_OK);
+    assert(tracked_flip_count == 1U && flip_waits == 2U && display_front == front);
+    assert(ops->app_swap_tracked(context, 102U) == AAR_OK);
+    assert(tracked_flip_count == 2U && tracked_flips[1].id == 102U);
+    assert(flip_waits == 3U && display_front == front + 0x800U);
+    ops->app_unbind(context);
+    assert(tracked_finish_count == 0U);
+    hold_flip = 0;
+    rotate_display_on_wait = 0;
+    display_front = front;
+    display_back = back;
+    display_layout = layout;
+}
+
+static void test_gl_worker_present(const zzm_minigl_ops_v1_t *ops, void *context)
+{
+    const void *gl = NULL;
+    uint8_t frame[64] = {0};
+
+    tracked_flip_count = 0U;
+    tracked_finish_count = 0U;
+    zzapp_gl_test_set_p96(frame, sizeof(frame));
+    g_flip_src = frame;
+    assert(ops->app_bind(context, 1U, &gl) == AAR_OK);
+    draw_swap_colour(gl, 4U);
+    assert(ops->app_swap_tracked(context, 201U) == AAR_OK);
+    assert(tracked_flip_count == 0U);
+    assert(zzm_minigl_has_work());
+
+    /* No further swaps: app ticks cannot hand off a frame on the app
+     * stack. The system thread selects the GL owner just for the poll. */
+    selected_pid = TEST_OTHER_PID;
+    running_pid = TEST_GL_PID;
+    (void)zzm_minigl_service_tick(0);
+    assert(tracked_flip_count == 0U);
+    running_pid = -1;
+    app_kernel.gl_generation = 2U;
+    (void)zzm_minigl_service_tick(0);
+    assert(tracked_flip_count == 0U && selected_pid == TEST_OTHER_PID);
+    app_kernel.gl_generation = 1U;
+    reject_tracked_flip = AAR_E_BUSY;
+    (void)zzm_minigl_service_tick(0);
+    assert(tracked_flip_count == 1U && tracked_flips[0].id == 201U);
+    assert(tracked_finish_count == 0U && zzm_minigl_has_work());
+    assert(selected_pid == TEST_OTHER_PID);
+    assert(zzm_minigl_service_tick(0));
+    assert(tracked_flip_count == 2U && tracked_flips[1].id == 201U);
+    assert(memcmp(g_shown, swap_colours[4].pixel, sizeof(g_shown)) == 0);
+    assert(selected_pid == TEST_OTHER_PID);
+
+    selected_pid = TEST_GL_PID;
+    draw_swap_colour(gl, 5U);
+    assert(ops->app_swap(context) == AAR_OK);
+    (void)zzm_minigl_service_tick(0);
+    assert(memcmp(g_shown, swap_colours[4].pixel, sizeof(g_shown)) == 0);
+
+    /* The same worker must present an untracked predecessor once a
+     * tracked target is queued behind it. Zero means no feedback. */
+    flip_idle = 0;
+    draw_swap_colour(gl, 6U);
+    assert(ops->app_swap_tracked(context, 202U) == AAR_OK);
+    flip_idle = 1;
+    hold_flip = 1;
+    assert(zzm_minigl_service_tick(0));
+    assert(tracked_flip_count == 3U && tracked_flips[2].id == 0U);
+    assert(memcmp(g_shown, swap_colours[5].pixel, sizeof(g_shown)) == 0);
+    (void)zzm_minigl_service_tick(0);
+    assert(tracked_flip_count == 3U && !flip_idle);
+    flip_idle = 1;
+    hold_flip = 0;
+    assert(zzm_minigl_service_tick(0));
+    assert(tracked_flip_count == 4U && tracked_flips[3].id == 202U);
+    assert(memcmp(g_shown, swap_colours[6].pixel, sizeof(g_shown)) == 0);
+    ops->app_unbind(context);
+    assert(tracked_finish_count == 0U);
+    g_flip_src = NULL;
+    zzapp_gl_test_set_p96(NULL, 0U);
+}
+
+static void test_gl_present_deadline(const zzm_minigl_ops_v1_t *ops, void *context)
+{
+    unsigned stopping;
+
+    for (stopping = 0U; stopping < 2U; ++stopping) {
+        const void *gl = NULL;
+        uint8_t frame[64] = {0};
+        uint64_t enqueued;
+        mw_ctx *mw;
+        uint32_t target;
+
+        tracked_flip_count = 0U;
+        tracked_finish_count = 0U;
+        flip_idle = 0;
+        zzapp_gl_test_set_p96(frame, sizeof(frame));
+        g_flip_src = frame;
+        assert(ops->app_bind(context, 1U, &gl) == AAR_OK);
+        draw_swap_colour(gl, 0U);
+        mw = amiberry_transport_inproc_ctx();
+        target = mw->state.target.back;
+        /* Keep all clock reads during submission at the exact enqueue time. */
+        freeze_clock = 1;
+        enqueued = now_us;
+        assert(ops->app_swap_tracked(context, 301U + stopping) == AAR_OK);
+        assert(mw->present_queued[target] && zzm_minigl_has_work());
+        now_us = enqueued + 29999999U;
+        (void)zzm_minigl_service_tick(0);
+        assert(tracked_flip_count == 0U && tracked_finish_count == 0U);
+
+        display_stop_requested = (int)stopping;
+        now_us = enqueued + 30000000U;
+        assert(zzm_minigl_service_tick(0));
+        assert(tracked_flip_count == 0U && tracked_finish_count == 1U);
+        assert(tracked_finishes[0].id == 301U + stopping);
+        assert(tracked_finishes[0].reason == (stopping ? AAR_PRESENT_REASON_CANCELLED :
+                                                        AAR_PRESENT_REASON_TIMEOUT));
+        assert(mw->present_queued[target] && !flip_idle);
+        freeze_clock = 0;
+        display_stop_requested = 0;
+
+        flip_idle = 1;
+        (void)zzm_minigl_service_tick(0);
+        assert(frame[0] == 0U && frame[1] == 0U);
+        assert(ops->app_swap(context) == AAR_OK);
+        assert(memcmp(g_shown, swap_colours[0].pixel, sizeof(g_shown)) == 0);
+        assert(tracked_flip_count == 0U && tracked_finish_count == 1U);
+        ops->app_unbind(context);
+        assert(tracked_finish_count == 1U);
+    }
+    g_flip_src = NULL;
+    zzapp_gl_test_set_p96(NULL, 0U);
+}
+
 static void expect_clip_pixel(const aar_gl *draw, int x, int y, int red)
 {
     uint8_t pixel[4] = { 1U, 2U, 3U, 4U };
@@ -1296,9 +1610,11 @@ static void test_rix_user_clipping(const aar_gl *draw)
 static void test_direct_mailbox(const zzm_minigl_ops_v1_t *ops, void *context)
 {
     const zzm_app_gl_host_service_t *host = zzm_runtime_services()->get_service(
-        ZZM_SERVICE_APP_GL_HOST, ZZM_SERVICE_APP_GL_HOST_V4_1);
+        ZZM_SERVICE_APP_GL_HOST, ZZM_SERVICE_APP_GL_HOST_V4_2);
     zzm_app_gl_host_service_t old_host = *host;
     const uint32_t front = mailbox_pages[0], back = mailbox_pages[1], spare = mailbox_pages[2];
+    const uint64_t first_id = UINT64_C(0x100000001);
+    const uint64_t second_id = UINT64_C(0x100000002);
     const uint32_t direct = AAR_ZZ9000_GL_BIND_DIRECT_PRESENT;
     const void *gl = NULL;
     const aar_gl *draw;
@@ -1318,6 +1634,8 @@ static void test_direct_mailbox(const zzm_minigl_ops_v1_t *ops, void *context)
     display_latest = mailbox_model = 1;
     assert(minigl_platform_set_graphics(&test_rix_service, &graphics_caps,
                                         ZZM_MODULE_OWNER(ZZM_MODULE_MINIGL)));
+    assert(host->mailbox_present(2U, back, ZZM_DISPLAY_PRESENT_NO_DIRTY,
+                                 first_id) == AAR_E_INVAL);
 
     /* With a full mailbox table but no readback bit, BE stays on copy. */
     assert(ops->app_bind_flags(context, 1U, direct, &gl) == AAR_OK);
@@ -1331,6 +1649,7 @@ static void test_direct_mailbox(const zzm_minigl_ops_v1_t *ops, void *context)
     assert(zzapp_gl_set_module_host(&old_host) == AAR_OK);
     assert(ops->app_bind_flags(context, 1U, direct, &gl) == AAR_OK);
     assert(!amiberry_transport_inproc_ctx()->present_select && !mailbox_leased);
+    assert(ops->app_swap_tracked(context, first_id) == AAR_E_NOSYS);
     ops->app_unbind(context);
     assert(zzapp_gl_set_module_host(host) == AAR_OK);
 
@@ -1349,8 +1668,9 @@ static void test_direct_mailbox(const zzm_minigl_ops_v1_t *ops, void *context)
     assert((uintptr_t)minigl_raster_color_buffer() == back);
     draw->ClearColor(1.0f, 0.0f, 0.0f, 1.0f);
     draw->Clear(0x4000U);
-    assert(ops->app_swap(context) == AAR_OK);
+    assert(ops->app_swap_tracked(context, first_id) == AAR_OK);
     assert(mailbox_pending == back && mailbox_presents == 1U);
+    assert(mailbox_presented_ids[0] == first_id);
     assert(memcmp((void *)(uintptr_t)back, swap_colours[0].pixel, 2U) == 0);
     assert((uintptr_t)minigl_raster_color_buffer() == spare);
 
@@ -1361,7 +1681,7 @@ static void test_direct_mailbox(const zzm_minigl_ops_v1_t *ops, void *context)
     yields = wait_yields;
     draw->ClearColor(0.0f, 1.0f, 0.0f, 1.0f);
     draw->Clear(0x4000U);
-    assert(ops->app_swap(context) == AAR_OK);
+    assert(ops->app_swap_tracked(context, second_id) == AAR_OK);
     assert(wait_yields == yields + 1U && g_fetch_count != 0U);
     assert(mailbox_presents == 1U && display_front == back && !mailbox_pending);
     assert((uintptr_t)minigl_raster_color_buffer() == front);
@@ -1374,6 +1694,7 @@ static void test_direct_mailbox(const zzm_minigl_ops_v1_t *ops, void *context)
     assert(ops->app_swap(context) == AAR_OK);
     assert(mailbox_presents == 3U && mailbox_pending == front);
     assert(mailbox_presented[1] == spare && mailbox_presented[2] == front);
+    assert(mailbox_presented_ids[1] == second_id && mailbox_presented_ids[2] == 0U);
     assert(memcmp((void *)(uintptr_t)spare, swap_colours[1].pixel, 2U) == 0);
     assert(memcmp((void *)(uintptr_t)front, swap_colours[2].pixel, 2U) == 0);
     assert(!mailbox_cleans && !mailbox_invalidates);
@@ -2596,6 +2917,10 @@ int main(void)
     test_gl_swap_presents(ops, context, 1, 0);
     test_gl_swap_presents(ops, context, 0, 1);
     test_gl_swap_presents(ops, context, 1, 1);
+    test_gl_swap_tracked(ops, context);
+    test_gl_direct_swap_tracked(ops, context);
+    test_gl_worker_present(ops, context);
+    test_gl_present_deadline(ops, context);
     test_direct_mailbox(ops, context);
     display_width = 640U;
     display_height = 480U;

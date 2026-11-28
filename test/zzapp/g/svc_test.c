@@ -1527,6 +1527,87 @@ static void test_minor6_present_timestamp_uses_both_registers(void)
     }
     teardown_dispatch();
 }
+
+static unsigned present_calls;
+static unsigned present_poll_calls;
+static int present_poll_ready;
+static const aar_present_result mock_present_result = {
+    UINT64_C(0x1122334455667788), UINT64_C(0xaabbccddeeff1122),
+    AAR_PRESENT_ACKNOWLEDGED, AAR_PRESENT_REASON_NONE
+};
+
+static int mock_present(uint32_t id, uint32_t flags, uint64_t *frame_id)
+{
+    ++present_calls;
+    if (!frame_id)
+        return AAR_E_INVAL;
+    *frame_id = 0U;
+    if (id != 1U || flags != AAR_PRESENT_ASYNC)
+        return AAR_E_INVAL;
+    *frame_id = mock_present_result.frame_id;
+    return AAR_OK;
+}
+
+static int mock_present_poll(aar_present_result *out)
+{
+    ++present_poll_calls;
+    if (!out)
+        return AAR_E_INVAL;
+    if (!present_poll_ready)
+        return 0;
+    present_poll_ready = 0;
+    *out = mock_present_result;
+    return 1;
+}
+
+static void test_present_validates_full_outputs(void)
+{
+    const uint32_t submit = api_slot(offsetof(aar_api, display_present));
+    const uint32_t poll = api_slot(offsetof(aar_api, display_present_poll));
+    zzapp_svc_frame_t frame;
+    aar_present_result result;
+    uint64_t id;
+
+    setup_dispatch();
+    if (!user_page) {
+        teardown_dispatch();
+        return;
+    }
+    api.display_present = mock_present;
+    api.display_present_poll = mock_present_poll;
+    present_calls = present_poll_calls = 0U;
+    present_poll_ready = 1;
+    memset(user_page + 0x400U, 0xcc, sizeof(result) + 1U);
+    dispatch(submit, &frame, (uint32_t[9]){ 1U, AAR_PRESENT_ASYNC, user_va + 0xffcU });
+    CHECK(frame.r[0] == (uint32_t)AAR_E_FAULT && present_calls == 0U);
+    dispatch(poll, &frame, (uint32_t[9]){ user_va + 0xff0U });
+    CHECK(frame.r[0] == (uint32_t)AAR_E_FAULT && present_poll_calls == 0U);
+    dispatch(submit, &frame, (uint32_t[9]){ 1U, AAR_PRESENT_ASYNC, user_va + 0x401U });
+    CHECK(frame.r[0] == (uint32_t)AAR_E_FAULT && present_calls == 0U);
+    dispatch(poll, &frame, (uint32_t[9]){ user_va + 0x401U });
+    CHECK(frame.r[0] == (uint32_t)AAR_E_FAULT && present_poll_calls == 0U);
+    dispatch(submit, &frame, (uint32_t[9]){ 1U, AAR_PRESENT_ASYNC, 0U });
+    CHECK(frame.r[0] == (uint32_t)AAR_E_INVAL);
+    dispatch(poll, &frame, (uint32_t[9]){ 0U });
+    CHECK(frame.r[0] == (uint32_t)AAR_E_INVAL);
+    dispatch(submit, &frame, (uint32_t[9]){ 2U, AAR_PRESENT_ASYNC, user_va + 0x400U });
+    CHECK(frame.r[0] == (uint32_t)AAR_E_INVAL);
+    memcpy(&id, user_page + 0x400U, sizeof(id));
+    CHECK(id == 0U && user_page[0x408U] == 0xccU);
+    dispatch(submit, &frame, (uint32_t[9]){ 1U, AAR_PRESENT_ASYNC, user_va + 0x400U });
+    CHECK(frame.r[0] == (uint32_t)AAR_OK);
+    memcpy(&id, user_page + 0x400U, sizeof(id));
+    CHECK(id == mock_present_result.frame_id && user_page[0x408U] == 0xccU);
+    dispatch(poll, &frame, (uint32_t[9]){ user_va + 0x400U });
+    CHECK(frame.r[0] == 1U);
+    memcpy(&result, user_page + 0x400U, sizeof(result));
+    CHECK(memcmp(&result, &mock_present_result, sizeof(result)) == 0);
+    CHECK(user_page[0x400U + sizeof(result)] == 0xccU);
+    memset(user_page + 0x400U, 0xcc, sizeof(result));
+    dispatch(poll, &frame, (uint32_t[9]){ user_va + 0x400U });
+    CHECK(frame.r[0] == 0U && user_page[0x400U] == 0xccU);
+    teardown_dispatch();
+}
 static void test_rejected_pixel_store_does_not_change_validation(void)
 {
     zzapp_svc_frame_t frame;
@@ -2560,6 +2641,7 @@ int main(void)
     test_minor6_gl_pointer_extents();
     test_clip_plane_copies_four_doubles();
     test_minor6_present_timestamp_uses_both_registers();
+    test_present_validates_full_outputs();
     test_svc_number_comes_from_r12();
     test_fast_no_lock_calls();
 #if ZZAPP_SVC_PROBES

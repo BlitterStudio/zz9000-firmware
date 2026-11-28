@@ -4,6 +4,7 @@
 #include <string.h>
 #include <sys/mman.h>
 
+#include "aar/app.h"
 #include "card_pool.h"
 #include "sdk_compression.h"
 #include "sdk_palette.h"
@@ -11,6 +12,7 @@
 #include "memorymap.h"
 #include "zzm_format.h"
 #include "zzm_runtime.h"
+#include "zzapp_kernel.h"
 
 static int failures;
 static uint64_t now_us;
@@ -19,6 +21,11 @@ static uint32_t cache_invalidate_calls;
 static uint32_t cache_instruction_calls;
 static uint32_t app_in_api;
 static uint32_t flip_calls;
+static uint64_t tracked_flip, tracked_finish;
+static uint32_t tracked_reason;
+static zzapp_kernel_t app_kernel;
+static int app_thread;
+static uint32_t service_pid;
 static uint32_t log_lines;
 
 #define CHECK(expr) do { \
@@ -84,6 +91,14 @@ int zzm_test_printf(const char *format, ...)
 void zzapp_api_enter(void) { ++app_in_api; }
 void zzapp_api_leave(void) { if (app_in_api) --app_in_api; }
 uint32_t zzapp_current_generation(void) { return 7U; }
+zzapp_kernel_t *zzapp_runtime_kernel(void) { return &app_kernel; }
+int zzapp_kernel_current_thread(void) { return app_thread; }
+uint32_t zzapp_services_current_pid(void) { return service_pid; }
+int zzapp_services_select_pid(uint32_t pid)
+{
+    service_pid = pid;
+    return pid != ZZAPP_PID_NONE;
+}
 int zzapp_display_bound(uint32_t *width, uint32_t *height, uint32_t *pitch,
                         uint32_t *format, uint32_t *card_front,
                         uint32_t *card_back)
@@ -113,6 +128,19 @@ int zzapp_svc_display_flip_async(uint32_t surface_id)
 {
     return zzapp_svc_display_flip(surface_id);
 }
+int zzapp_display_flip_tracked(uint32_t surface_id, uint64_t frame_id)
+{
+    CHECK(surface_id == 1u);
+    tracked_flip = frame_id;
+    return AAR_OK;
+}
+
+void zzapp_display_finish_tracked(uint64_t frame_id, uint32_t reason)
+{
+    tracked_finish = frame_id;
+    tracked_reason = reason;
+}
+
 int zzapp_display_flip_idle(void) { return 1; }
 int zzapp_display_wait_flip_idle(void) { return 0; }
 int sdk_aperture_runtime_is_zorro3(void) { return 1; }
@@ -139,6 +167,13 @@ static void reset_resources(void)
     cache_instruction_calls = 0U;
     app_in_api = 0U;
     flip_calls = 0U;
+    tracked_flip = 0;
+    tracked_finish = 0;
+    tracked_reason = 0;
+    app_kernel.gl_owner = 1;
+    app_kernel.gl_generation = 7U;
+    app_thread = -1;
+    service_pid = ZZAPP_PID_NONE;
     log_lines = 0U;
 }
 
@@ -279,6 +314,12 @@ static void test_small_allocations_share_chunks(void)
     CHECK(card_pool.block_count == 0U);
 }
 
+static int app_present_for_owner(void)
+{
+    CHECK(service_pid == 1U);
+    return 1;
+}
+
 static void test_host_window_palette_and_app_guard(void)
 {
     const zzm_services_t *services = zzm_runtime_services_v3();
@@ -296,7 +337,7 @@ static void test_host_window_palette_and_app_guard(void)
     window = services->get_service(ZZM_SERVICE_HOST_WINDOW, ZZM_SERVICE_HOST_WINDOW_V3);
     palette = services->get_service(ZZM_SERVICE_PALETTE, ZZM_SERVICE_PALETTE_V3);
     app_host = services->get_service(ZZM_SERVICE_APP_GL_HOST,
-                                     ZZM_SERVICE_APP_GL_HOST_V4);
+                                     ZZM_SERVICE_APP_GL_HOST_V4_2);
     CHECK(reclaim->create_owner(4U, ZZM_RUNTIME_OWNER_CLASS_MINIGL_TRANSPORT,
                                 0U, CARD_POOL_PAGE_BYTES, &owner));
     CHECK(window->alloc(owner, 0x91000U, 4096U, &allocation));
@@ -317,6 +358,21 @@ static void test_host_window_palette_and_app_guard(void)
     CHECK(app_in_api == 0U);
     CHECK(app_host->flip_bound(6U) != 0);
     CHECK(app_host->flip_bound(7U) == 0 && flip_calls == 1U);
+    CHECK(app_host->flip_bound_tracked(6U, 0x300000017ULL) == AAR_E_INVAL);
+    CHECK(tracked_flip == 0U);
+    CHECK(app_host->flip_bound_tracked(7U, 0x300000018ULL) == AAR_OK);
+    CHECK(tracked_flip == 0x300000018ULL);
+    app_host->finish_tracked(6U, 0x300000017ULL, AAR_PRESENT_REASON_CANCELLED);
+    CHECK(tracked_finish == 0U);
+    app_host->finish_tracked(7U, 0x300000018ULL, AAR_PRESENT_REASON_BACKEND);
+    CHECK(tracked_finish == 0x300000018ULL && tracked_reason == AAR_PRESENT_REASON_BACKEND);
+    CHECK(app_host->poll_present(6U, app_present_for_owner) == 0);
+    app_thread = 2;
+    CHECK(app_host->poll_present(7U, app_present_for_owner) == 0);
+    app_thread = -1;
+    service_pid = 2U;
+    CHECK(app_host->poll_present(7U, app_present_for_owner) == 1);
+    CHECK(service_pid == 2U);
 }
 
 static void test_log_rate_limit(void)
