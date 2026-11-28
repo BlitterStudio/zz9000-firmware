@@ -635,6 +635,63 @@ static void teardown_dispatch(void)
     zzapp_as_destroy(&proc.as);
 }
 
+static unsigned file_request_calls;
+
+static int mock_file_request(uint32_t flags, const char *title,
+                             const char *initial, char *path, uint32_t capacity)
+{
+    file_request_calls++;
+    CHECK(flags == AAR_FILE_REQUEST_SAVE && title == NULL && initial == NULL);
+    CHECK(capacity == 2U);
+    if (path == (char *)user_page + 0x100U && capacity == 2U)
+        memcpy(path, "X", 2U);
+    return 1;
+}
+
+static void test_file_request_pointers(void)
+{
+    zzapp_svc_frame_t frame;
+    uint32_t slot = api_slot(offsetof(aar_api, file_request));
+    uint32_t args[5] = { AAR_FILE_REQUEST_SAVE, 0U, 0U, 0U, 2U };
+
+    setup_dispatch();
+    if (!user_page) {
+        teardown_dispatch();
+        return;
+    }
+    api.file_request = mock_file_request;
+    file_request_calls = 0U;
+    args[3] = user_va + 0x100U;
+    args[1] = user_va + 0x1000U;
+    dispatch_words(slot, &frame, args, 5U);
+    CHECK((int32_t)frame.r[0] == AAR_E_FAULT && file_request_calls == 0U);
+    args[2] = args[1];
+    args[1] = 0U;
+    dispatch_words(slot, &frame, args, 5U);
+    CHECK((int32_t)frame.r[0] == AAR_E_FAULT && file_request_calls == 0U);
+    memset(user_page + 0x200U, 'a', 512U);
+    user_page[0x400U] = '\0';
+    args[2] = user_va + 0x200U;
+    dispatch_words(slot, &frame, args, 5U);
+    CHECK((int32_t)frame.r[0] == AAR_E_INVAL && file_request_calls == 0U);
+    args[1] = args[2];
+    args[2] = 0U;
+    dispatch_words(slot, &frame, args, 5U);
+    CHECK((int32_t)frame.r[0] == AAR_E_INVAL && file_request_calls == 0U);
+    args[1] = 0U;
+    args[3] = WINDOW + 0x1000U;
+    dispatch_words(slot, &frame, args, 5U);
+    CHECK((int32_t)frame.r[0] == AAR_E_FAULT && file_request_calls == 0U);
+    args[3] = user_va + 0xfffU;
+    dispatch_words(slot, &frame, args, 5U);
+    CHECK((int32_t)frame.r[0] == AAR_E_FAULT && file_request_calls == 0U);
+    args[3] = user_va + 0x100U;
+    dispatch_words(slot, &frame, args, 5U);
+    CHECK(frame.r[0] == 1U && file_request_calls == 1U);
+    CHECK(memcmp(user_page + 0x100U, "X", 2U) == 0);
+    teardown_dispatch();
+}
+
 static void test_table_copy_uses_only_veneers(void)
 {
     aar_api direct;
@@ -2622,6 +2679,7 @@ int main(void)
     test_table_copy_uses_only_veneers();
     test_gl_table_copy_preserves_missing_calls();
     test_pointer_checks();
+    test_file_request_pointers();
     test_large_and_section_pointer_checks();
     test_gl_span_validation();
     test_gl_bad_array_pointer_fails_at_draw();

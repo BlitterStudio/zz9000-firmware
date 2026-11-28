@@ -104,6 +104,9 @@ WEAK int zzapp_svc_file_write_async(int fd, const void *p, uint32_t n, uint32_t 
 { (void)fd; (void)p; (void)n; (void)t; return AAR_E_NOSYS; }
 WEAK int zzapp_svc_file_collect(uint32_t t, int32_t *status, uint32_t *n)
 { (void)t; (void)status; (void)n; return AAR_E_NOSYS; }
+WEAK int zzapp_svc_file_request(uint32_t flags, const char *title,
+                               const char *initial_path, char *path, uint32_t capacity)
+{ (void)flags; (void)title; (void)initial_path; (void)path; (void)capacity; return AAR_E_NOSYS; }
 WEAK int zzapp_svc_file_delete(const char *path)
 { (void)path; return AAR_E_NOSYS; }
 WEAK int zzapp_svc_file_rename(const char *from, const char *to, uint32_t flags)
@@ -1203,6 +1206,17 @@ static int api_file_collect(uint32_t ticket, int32_t *status, uint32_t *out_n)
     return rc;
 }
 
+static int api_file_request(uint32_t flags, const char *title,
+                            const char *initial_path, char *path, uint32_t capacity)
+{
+    int rc;
+
+    zzapp_api_enter();
+    rc = zzapp_svc_file_request(flags, title, initial_path, path, capacity);
+    zzapp_api_leave();
+    return rc;
+}
+
 static int api_file_seek(int f,int64_t o,int w,int64_t*out){zzapp_api_enter();int r=zzapp_svc_file_seek(f,o,w,out);zzapp_api_leave();return r;}
 static int api_file_stat(const char*p,aar_stat*out){zzapp_api_enter();int r=zzapp_svc_file_stat(p,out);zzapp_api_leave();return r;}
 static int api_list_next(int l,aar_dirent*out){zzapp_api_enter();int r=zzapp_svc_file_list_next(l,out);zzapp_api_leave();return r;}
@@ -1501,6 +1515,7 @@ static const aar_api g_api_full = {
     .file_read_async = api_file_read_async,
     .file_write_async = api_file_write_async,
     .file_collect = api_file_collect,
+    .file_request = api_file_request,
 };
 
 /* The table the apps see: `groups` follows the runtime's group mask, and

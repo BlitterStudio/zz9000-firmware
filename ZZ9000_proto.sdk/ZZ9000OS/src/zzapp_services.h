@@ -114,6 +114,9 @@ int zzapp_svc_file_write(int fd, const void *buf, uint32_t len, uint32_t *out_n)
 int zzapp_svc_file_read_async(int fd, void *buf, uint32_t len, uint32_t *ticket);
 int zzapp_svc_file_write_async(int fd, const void *buf, uint32_t len, uint32_t *ticket);
 int zzapp_svc_file_collect(uint32_t ticket, int32_t *status, uint32_t *out_n);
+/* Native Open/Save As uses the blocking request entry without a deadline. */
+int zzapp_svc_file_request(uint32_t flags, const char *title,
+			   const char *initial_path, char *path, uint32_t capacity);
 int zzapp_svc_file_seek(int fd, int64_t off, int whence, int64_t *out_pos);
 int zzapp_svc_file_stat(const char *path, struct aar_stat *out);
 int zzapp_svc_file_list_open(const char *path);
