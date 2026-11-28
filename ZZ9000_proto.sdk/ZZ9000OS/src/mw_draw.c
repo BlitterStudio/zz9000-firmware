@@ -6,6 +6,13 @@
 
 #include "mw_draw.h"
 #include <string.h>
+#if defined(__ARM_NEON)
+#include <arm_neon.h>
+#endif
+
+/* Float words move as 32-bit integers: no core-to-VFP move per word on ARM,
+ * and every bit, NaNs included, arrives as sent. */
+typedef uint32_t __attribute__((may_alias)) mw_word_alias_t;
 
 int mw_decode_draw_object(const uint8_t *payload, size_t bytes,
                           float *out_verts, uint32_t *out_mode, uint32_t *out_count)
@@ -22,14 +29,24 @@ int mw_decode_draw_object(const uint8_t *payload, size_t bytes,
     if (bytes < 8 + total_words * 4)
         return 0;
 
-    for (i = 0; i < total_words; ++i)
-        out_verts[i] = mw_bef(payload + 8 + i * 4);
+    {
+        mw_word_alias_t *out = (mw_word_alias_t *)out_verts;
+
+        for (i = 0; i < total_words; ++i)
+            out[i] = mw_be32(payload + 8 + i * 4);
+    }
 
     *out_mode = mode;
     *out_count = count;
     return 1;
 }
 
+/* Vertices are expanded to MW_OBJECT_WORDS words by copying one template of
+ * the per-draw constants and defaults over each destination and then
+ * overwriting the attributes the wire carries per vertex.  Everything moves
+ * as 32-bit integers, so no float passes through a register (a core-to-VFP
+ * move per word on the ARM target) and every bit, NaNs included, arrives as
+ * sent. */
 static void mw_unpack_packed_vertices(const uint8_t *q, uint32_t count, uint32_t format,
                                       const float *constant_color, const float *constant_tex0,
                                       const float *constant_tex1, const float *constant_normal,
@@ -40,59 +57,107 @@ static void mw_unpack_packed_vertices(const uint8_t *q, uint32_t count, uint32_t
     uint32_t tex0 = (format >> MW_PACK_TEX0) & 3U;
     uint32_t tex1 = (format >> MW_PACK_TEX1) & 3U;
     uint32_t vertex_normal = (format >> MW_PACK_NORMAL) & 1U;
-    uint32_t i, c, u;
+    uint32_t tmpl[MW_OBJECT_WORDS] = { 0U };
+    const float one = 1.0f;
+    const float zero = 0.0f;
+    uint32_t i;
+
+    memcpy(&tmpl[2], &zero, sizeof(uint32_t));
+    memcpy(&tmpl[3], &one, sizeof(uint32_t));
+    if (color == 0U)
+        memcpy(&tmpl[4], constant_color, 4U * sizeof(uint32_t));
+    if (tex0 == 0U)
+        memcpy(&tmpl[8], constant_tex0, 4U * sizeof(uint32_t));
+    else if (tex0 == 1U) {
+        memcpy(&tmpl[10], &zero, sizeof(uint32_t));
+        memcpy(&tmpl[11], &one, sizeof(uint32_t));
+    }
+    if (tex1 == 0U)
+        memcpy(&tmpl[12], constant_tex1, 4U * sizeof(uint32_t));
+    else if (tex1 == 1U) {
+        memcpy(&tmpl[14], &zero, sizeof(uint32_t));
+        memcpy(&tmpl[15], &one, sizeof(uint32_t));
+    }
+    if (!vertex_normal)
+        memcpy(&tmpl[16], constant_normal, 3U * sizeof(uint32_t));
+#if defined(__ARM_NEON)
+    /* The first sixteen template words stay in vector registers; the loop
+     * stores them, then overwrites what the wire carries.  The normal's
+     * three words are copied separately so that no store passes the end of
+     * the last vertex. */
+    const uint32x4_t template0 = vld1q_u32(&tmpl[0]);
+    const uint32x4_t template1 = vld1q_u32(&tmpl[4]);
+    const uint32x4_t template2 = vld1q_u32(&tmpl[8]);
+    const uint32x4_t template3 = vld1q_u32(&tmpl[12]);
+#endif
 
     for (i = 0; i < count; ++i) {
-        float *dst = out_verts + i * MW_OBJECT_WORDS;
+        mw_word_alias_t *dst = (mw_word_alias_t *)(out_verts + i * MW_OBJECT_WORDS);
+        uint32_t w;
+
+#if defined(__ARM_NEON)
+        vst1q_u32((uint32_t *)dst, template0);
+        vst1q_u32((uint32_t *)dst + 4, template1);
+        vst1q_u32((uint32_t *)dst + 8, template2);
+        vst1q_u32((uint32_t *)dst + 12, template3);
+        dst[16] = tmpl[16];
+        dst[17] = tmpl[17];
+        dst[18] = tmpl[18];
+#else
+        memcpy(dst, tmpl, sizeof(tmpl));
+#endif
 
         /* Position */
-        dst[0] = mw_bef(q); q += 4;
-        dst[1] = mw_bef(q); q += 4;
-        dst[2] = (position >= 3U) ? mw_bef(q) : 0.0f;
-        if (position >= 3U) q += 4;
-        dst[3] = (position == 4U) ? mw_bef(q) : 1.0f;
-        if (position == 4U) q += 4;
+        dst[0] = mw_be32(q);
+        dst[1] = mw_be32(q + 4);
+        q += 8;
+        if (position >= 3U) {
+            dst[2] = mw_be32(q);
+            q += 4;
+        }
+        if (position == 4U) {
+            dst[3] = mw_be32(q);
+            q += 4;
+        }
 
         /* Color */
         if (color == 1U) {
             uint32_t rgba = mw_be32(q); q += 4;
-            dst[4] = (float)((rgba >> 24) & 0xffU) * (1.0f / 255.0f);
-            dst[5] = (float)((rgba >> 16) & 0xffU) * (1.0f / 255.0f);
-            dst[6] = (float)((rgba >> 8)  & 0xffU) * (1.0f / 255.0f);
-            dst[7] = (float)( rgba        & 0xffU) * (1.0f / 255.0f);
+            float r = (float)((rgba >> 24) & 0xffU) * (1.0f / 255.0f);
+            float g = (float)((rgba >> 16) & 0xffU) * (1.0f / 255.0f);
+            float b = (float)((rgba >> 8)  & 0xffU) * (1.0f / 255.0f);
+            float a = (float)( rgba        & 0xffU) * (1.0f / 255.0f);
+
+            memcpy(&dst[4], &r, sizeof(r));
+            memcpy(&dst[5], &g, sizeof(g));
+            memcpy(&dst[6], &b, sizeof(b));
+            memcpy(&dst[7], &a, sizeof(a));
         } else if (color == 2U) {
-            for (c = 0; c < 4; ++c) { dst[4 + c] = mw_bef(q); q += 4; }
-        } else {
-            for (c = 0; c < 4; ++c) dst[4 + c] = constant_color[c];
+            for (w = 0; w < 4U; ++w, q += 4) dst[4 + w] = mw_be32(q);
         }
 
         /* Tex0 and Tex1 */
-        for (u = 0; u < 2; ++u) {
-            uint32_t t_mode = u ? tex1 : tex0;
-            const float *t_const = u ? constant_tex1 : constant_tex0;
-            float *tdst = dst + 8 + 4 * u;
-
-            if (t_mode == 1U) {
-                tdst[0] = mw_bef(q); q += 4;
-                tdst[1] = mw_bef(q); q += 4;
-                tdst[2] = 0.0f;
-                tdst[3] = 1.0f;
-            } else if (t_mode == 2U) {
-                for (c = 0; c < 4; ++c) { tdst[c] = mw_bef(q); q += 4; }
-            } else {
-                for (c = 0; c < 4; ++c) tdst[c] = t_const[c];
-            }
+        if (tex0 == 1U) {
+            dst[8] = mw_be32(q);
+            dst[9] = mw_be32(q + 4);
+            q += 8;
+        } else if (tex0 == 2U) {
+            for (w = 0; w < 4U; ++w, q += 4) dst[8 + w] = mw_be32(q);
+        }
+        if (tex1 == 1U) {
+            dst[12] = mw_be32(q);
+            dst[13] = mw_be32(q + 4);
+            q += 8;
+        } else if (tex1 == 2U) {
+            for (w = 0; w < 4U; ++w, q += 4) dst[12 + w] = mw_be32(q);
         }
 
         /* Normal */
         if (vertex_normal) {
-            dst[16] = mw_bef(q); q += 4;
-            dst[17] = mw_bef(q); q += 4;
-            dst[18] = mw_bef(q); q += 4;
-        } else {
-            dst[16] = constant_normal[0];
-            dst[17] = constant_normal[1];
-            dst[18] = constant_normal[2];
+            dst[16] = mw_be32(q);
+            dst[17] = mw_be32(q + 4);
+            dst[18] = mw_be32(q + 8);
+            q += 12;
         }
     }
 }

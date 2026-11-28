@@ -31,6 +31,10 @@
 /* S_AXI_HP3 AFI, the RasterIX EF memory port. */
 #define MINIGL_RIX_AFI_BASE 0xf800b000U
 #define MINIGL_RIX_TEXTURE_PAGE_BYTES 2048U
+/* RasterIX EF accepts mailbox colour targets below texture-page alignment.
+ * Keep the floor at the smallest alignment qualified by the xsim frames. */
+#define MINIGL_RIX_MAILBOX_COLOR_ALIGNMENT 256U
+#define MINIGL_RIX_COLOR_CACHE_LINE_BYTES 32U
 #define MINIGL_RIX_WHITE_TEXTURE_BYTES MINIGL_RIX_TEXTURE_PAGE_BYTES
 /* TextureSampler's sparse mip layout uses a 256x256x16-bit level-zero
  * address space plus a second half for the lower levels. */
@@ -204,6 +208,7 @@ typedef struct MiniGLRixBackend {
     MiniGLRixRecordedOp ops[MINIGL_RIX_MAX_OPS];
     ZZ9KMiniGLPacketSetState state;
     uint32_t color_address, depth_address;
+    uint32_t mailbox_color_address;
     uint16_t width, height;
     uint8_t current_buffer;
     uint8_t next_buffer;
@@ -336,10 +341,17 @@ int minigl_rix_backend_surface_is_rgb565(const MiniGLRixBackend *backend);
 void minigl_rix_backend_discard_target(MiniGLRixBackend *backend, int rgb565);
 /* Completion is the ownership hand-off: no CPU access may occur before it. */
 int minigl_rix_backend_drain(MiniGLRixBackend *backend);
+int minigl_rix_backend_set_color_byte_swap(MiniGLRixBackend *backend, int enabled);
 /* Finish the current frame's command stream without waiting for its fence.
  * `poll` returns true only after every submitted stream has reached its fence. */
 int minigl_rix_backend_submit(MiniGLRixBackend *backend);
 int minigl_rix_backend_poll(MiniGLRixBackend *backend);
+/* True once no submitted work for the colour target at `address` remains
+ * unretired; later targets may still be rendering.  One feed and retirement
+ * observation, no wait. */
+int minigl_rix_backend_target_ready(MiniGLRixBackend *backend, uintptr_t address);
+/* Waits until that target is ready without draining later targets. */
+int minigl_rix_backend_wait_target(MiniGLRixBackend *backend, uintptr_t address);
 /* One non-blocking hardware-idle observation without retiring ownership. */
 int minigl_rix_backend_engine_idle(MiniGLRixBackend *backend);
 /* Retains every owner referenced by a committed list that did not retire. */

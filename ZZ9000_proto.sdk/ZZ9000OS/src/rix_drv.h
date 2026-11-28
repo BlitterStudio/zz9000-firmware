@@ -69,6 +69,7 @@
 
 #define RIX_DRV_CONTROL_ENABLE     (1U << 0)
 #define RIX_DRV_CONTROL_SOFT_RESET (1U << 1)
+#define RIX_DRV_CONTROL_COLOR_SWAP (1U << 2)
 
 #define RIX_DRV_STATUS_IDLE        (1U << 1)
 #define RIX_DRV_STATUS_BUSY        (1U << 2)
@@ -196,6 +197,7 @@ struct rix_drv {
     uint32_t device_reads;
     int available;
     int enabled;
+    uint8_t color_byte_swap;
 };
 
 #define RIX_DRV_FEED_MAX_WORDS 1024U
@@ -231,6 +233,8 @@ struct rix_drv_feed {
 
 int rix_drv_init(struct rix_drv *driver, const struct rix_drv_config *config);
 int rix_drv_enable(struct rix_drv *driver);
+/* Change the DDR colour layout only after the backend has drained. */
+int rix_drv_set_color_byte_swap(struct rix_drv *driver, int enabled);
 /* Submits parser words inline or by bounded DDR fetch. `command_address` is
  * the physical DDR source; clean_dcache publishes a cached source at seal. */
 int rix_drv_submit(struct rix_drv *driver, const uint32_t *commands,

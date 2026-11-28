@@ -375,6 +375,53 @@ static void test_raw_texture_empty_payload(void)
 }
 
 
+static void test_resident_indexed_capacity(void)
+{
+    static const struct { uint32_t format, prefix, stride, max_indices; } layouts[] = {
+        {MW_DRAW_RESIDENT_XYZ_ST, 60U, 20U, 5976U},
+        {MW_DRAW_RESIDENT_XYZ_ST_ST, 44U, 28U, 1890U},
+        {MW_DRAW_RESIDENT_XYZ_RGBA_ST, 44U, 24U, 3936U}
+    };
+    const uint32_t vertices = 1024U;
+    uint8_t *packet = calloc(1, 24U + MW_DRAW_RESIDENT_HEADER + MW_DRAW_RESIDENT_SLOT_BYTES + 16U);
+    uint8_t *p;
+    uint32_t i, action, oversize, count, bytes, failed;
+
+    assert(packet);
+    p = packet + 24;
+    mw_put_be32(packet, MW_MAGIC);
+    mw_put_be32(packet + 4, MW_VERSION);
+    mw_put_be32(packet + 12, 1U);
+    mw_put_be32(packet + 16, MW_DRAW_RESIDENT_INDEXED);
+    mw_put_be32(p, 1U);
+    mw_put_be32(p + 4, MW_DRAW_RESIDENT_SLOTS - 1U);
+    mw_put_be32(p + 8, 1U);
+    mw_put_be32(p + 16, 0x10000U - vertices);
+    p += MW_DRAW_RESIDENT_HEADER;
+    mw_put_be32(p, 4U);
+    mw_put_be32(p + 4, vertices);
+    for (i = 0; i < sizeof(layouts) / sizeof(layouts[0]); ++i) {
+        mw_put_be32(p + 12, layouts[i].format);
+        for (action = MW_DRAW_RESIDENT_STORE; action <= MW_DRAW_RESIDENT_REUSE; ++action) {
+            mw_put_be32(packet + 36, action);
+            for (oversize = 0; oversize <= 1; ++oversize) {
+                count = layouts[i].max_indices + 3U * oversize;
+                mw_put_be32(p + 8, count);
+                bytes = MW_DRAW_RESIDENT_HEADER + layouts[i].prefix +
+                        (action == MW_DRAW_RESIDENT_STORE ? vertices * layouts[i].stride : 0U) +
+                        ((count * 2U + 3U) & ~3U);
+                mw_put_be32(packet + 20, bytes);
+                mw_put_be32(packet + 8, 24U + bytes);
+                assert(mw_validate_packet_report(packet, 24U + bytes, &failed) ==
+                       (oversize ? MW_STATUS_INVALID : MW_STATUS_OK));
+                assert(failed == (oversize ? MW_DRAW_RESIDENT_INDEXED : 0));
+            }
+        }
+    }
+    free(packet);
+    printf("PASS: resident STORE and REUSE capacity edge, all three layouts\n");
+}
+
 int main(void)
 {
     test_packet_framing();
@@ -382,6 +429,7 @@ int main(void)
     test_state_key_validation();
     test_draw_validation_and_nan();
     test_draw_packed_indexed_validation();
+    test_resident_indexed_capacity();
     test_raw_array_index_validation();
     test_raw_array_components_validation();
     test_raw_texture_empty_payload();

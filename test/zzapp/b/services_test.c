@@ -1379,6 +1379,69 @@ static void test_display_latest_flip_posts_nothing(void)
 	       zzapp_display_latest() == 0, "display mailbox fallback");
 }
 
+static void test_direct_mailbox_lease(void)
+{
+	const uint32_t bytes = 320U * 200U * 2U;
+	uint32_t pages[3], surface_bytes, scanout, back, spare;
+	aar_surface surface;
+	uint32_t closes;
+
+	world_loaded(ZZAPP_CLIENT_LATEST);
+	client_display(&CL(0), FRONT, BACK, SPARE, AAR_DISPCAP_LATEST);
+	EXPECT(open_display(0U, 320U, 200U, AAR_FMT_RGB565, AAR_DISPLAY_LATEST,
+			    &surface) == AAR_OK, "open direct mailbox");
+	closes = mock_client_count(&CL(0), AAR_OP_DISPLAY_CLOSE);
+	EXPECT(zzapp_display_mailbox_buffers(pages, &surface_bytes) == AAR_OK &&
+	       pages[0] == FRONT && pages[1] == BACK && pages[2] == SPARE &&
+	       surface_bytes == bytes, "mailbox buffer snapshot");
+	EXPECT(zzapp_display_mailbox_lease(1) == AAR_OK, "acquire direct lease");
+	EXPECT(zzapp_svc_display_flip_async(surface.id) == AAR_E_BUSY &&
+	       zzapp_svc_display_close(surface.id) == AAR_E_BUSY &&
+	       mock_client_count(&CL(0), AAR_OP_DISPLAY_CLOSE) == closes,
+	       "regular flip and close cannot take leased pages");
+	zzapp_test_present_flush_count = 0U;
+	EXPECT(zzapp_display_mailbox_present(FRONT, ZZAPP_DISPLAY_PRESENT_NO_DIRTY) ==
+	       AAR_E_INVAL, "shown buffer is not owned");
+	EXPECT(zzapp_display_mailbox_present(SPARE, ZZAPP_DISPLAY_PRESENT_NO_DIRTY) ==
+	       AAR_OK && zzapp_test_present_flush_count == 0U,
+	       "present the spare without a clean");
+	EXPECT(zzapp_display_mailbox_owned(&back, &spare) == AAR_OK &&
+	       back == BACK && spare == 0U, "spare submitted, back still owned");
+	EXPECT(zzapp_display_mailbox_present(SPARE, 0U) == AAR_E_INVAL &&
+	       zzapp_test_present_flush_count == 0U, "pending buffer is not owned");
+	EXPECT(zzapp_display_mailbox_present(BACK, 0U) == AAR_OK &&
+	       zzapp_test_present_flush_count == 1U &&
+	       zzapp_test_present_flushes[0].card == BACK &&
+	       zzapp_test_present_flushes[0].bytes == bytes,
+	       "CPU fallback cleans exactly the submitted frame");
+	EXPECT(zzapp_display_mailbox_owned(&back, &spare) == AAR_OK &&
+	       back == SPARE && spare == 0U, "replacement handed back to app");
+	EXPECT(zzapp_services_display_mailbox_begin(FRONT, &scanout) && scanout == BACK,
+	       "vblank selects the newest completed frame");
+	zzapp_services_display_mailbox_end(1);
+	EXPECT(zzapp_display_mailbox_owned(&back, &spare) == AAR_OK &&
+	       back == SPARE && spare == FRONT, "vblank releases previous shown page");
+	zzapp_test_display_invalidate_count = 0U;
+	EXPECT(zzapp_display_invalidate(BACK, bytes) == AAR_OK &&
+	       zzapp_display_invalidate(BACK - 1U, bytes + 1U) == AAR_E_INVAL &&
+	       zzapp_test_display_invalidate_count == 1U &&
+	       zzapp_test_display_invalidate_last_address == BACK &&
+	       zzapp_test_display_invalidate_last_bytes == bytes,
+	       "only a granted range can be invalidated");
+
+	zzapp_test_display_dma_busy = 1;
+	EXPECT(zzapp_display_mailbox_lease(0) == AAR_E_BUSY &&
+	       !zzapp_display_mailbox_retire_ready(), "still writing, retain lease");
+	zzapp_services_on_app_end();
+	EXPECT(zzapp_display_latest() && service_proc()->as.alias_count == 3U,
+	       "teardown preserves live DMA targets");
+	zzapp_test_display_dma_busy = 0;
+	EXPECT(zzapp_display_mailbox_lease(0) == AAR_OK &&
+	       zzapp_display_mailbox_retire_ready(), "release after engine idle");
+	EXPECT(zzapp_svc_display_close(surface.id) == AAR_OK && !zzapp_display_latest(),
+	       "close after draining direct GL");
+}
+
 static void test_display_mailbox_uses_scanout_owner(void)
 {
 	uint32_t scanout;
@@ -2399,6 +2462,7 @@ int main(void)
 	test_palette_at_the_end_of_the_app();
 	test_palette_validation_and_partial_updates();
 	test_display_latest_flip_posts_nothing();
+	test_direct_mailbox_lease();
 	test_display_mailbox_uses_scanout_owner();
 	test_returned_buffers_are_user_granted();
 	test_display_state_ignores_control_block_tampering();

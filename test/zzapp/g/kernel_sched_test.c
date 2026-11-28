@@ -1770,6 +1770,80 @@ static void test_perf_report_requests_for_large_pids(void)
 }
 #endif
 
+/* The lock fast paths do what the general calls do in the common case and
+ * leave everything alone otherwise. */
+#define REC_WORDS(k, pid) (((const zzapp_rec_t *)(const void *)zzapp_kernel_thread(&(k), (pid)))->kernel.api_waiting)
+
+static void test_fast_api_lock_take_and_release(void)
+{
+	zzapp_kernel_t kernel;
+
+	kinit(&kernel);
+	make_runnable(&kernel, 0);
+	irq_save_calls = 0U;
+	irq_restore_calls = 0U;
+	CHECK(zzapp_kernel_api_try_lock(&kernel, 0) == 1);
+	CHECK(kernel.api_lock_owner == 0 && kernel.api_lock_depth == 1U);
+	CHECK(irq_save_calls == 1U && irq_restore_calls == 1U);
+	/* Nested: the depth only, no mask. */
+	CHECK(zzapp_kernel_api_try_lock(&kernel, 0) == 1);
+	CHECK(kernel.api_lock_owner == 0 && kernel.api_lock_depth == 2U);
+	CHECK(irq_save_calls == 1U);
+	CHECK(zzapp_kernel_api_try_unlock(&kernel, 0) == 1);
+	CHECK(kernel.api_lock_owner == 0 && kernel.api_lock_depth == 1U);
+	/* The last release with no other thread: free, no handoff. */
+	CHECK(zzapp_kernel_api_try_unlock(&kernel, 0) == 1);
+	CHECK(kernel.api_lock_owner == -1 && kernel.api_lock_depth == 0U);
+	CHECK(kernel.api_handoff == ZZAPP_PID_NONE);
+	CHECK(irq_save_calls == 1U);
+	/* Not the holder: nothing. */
+	CHECK(zzapp_kernel_api_try_unlock(&kernel, 0) == 0);
+	CHECK(kernel.api_lock_owner == -1 && kernel.api_lock_depth == 0U);
+	/* The general call still agrees on the state left behind. */
+	CHECK(zzapp_kernel_api_lock(&kernel, 0) == 0);
+	CHECK(zzapp_kernel_api_try_lock(&kernel, 0) == 1);
+	CHECK(zzapp_kernel_api_unlock(&kernel, 0) == 0);
+	CHECK(zzapp_kernel_api_try_unlock(&kernel, 0) == 1);
+	CHECK(kernel.api_lock_owner == -1);
+}
+
+static void test_fast_api_lock_refuses_other_cases(void)
+{
+	zzapp_kernel_t kernel;
+
+	kinit(&kernel);
+	make_runnable(&kernel, 0);
+	make_runnable(&kernel, 1);
+	/* Held by another thread: no change, no waiter registered. */
+	CHECK(zzapp_kernel_api_lock(&kernel, 1) == 0);
+	CHECK(zzapp_kernel_api_try_lock(&kernel, 0) == 0);
+	CHECK(kernel.api_lock_owner == 1 && kernel.api_lock_depth == 1U);
+	CHECK(REC_WORDS(kernel, 0) == 0U);
+	CHECK(zzapp_kernel_api_unlock(&kernel, 1) == 0);
+	CHECK(kernel.api_lock_owner == -1);
+	/* The system thread holds it. */
+	CHECK(zzapp_kernel_system_lock(&kernel) == 0);
+	CHECK(zzapp_kernel_api_try_lock(&kernel, 0) == 0);
+	CHECK(kernel.api_lock_owner == ZZAPP_KERNEL_SYSTEM_OWNER);
+	CHECK(zzapp_kernel_system_unlock(&kernel) == 0);
+	/* A handoff is reserved for another thread. */
+	kernel.api_handoff = 1U;
+	CHECK(zzapp_kernel_api_try_lock(&kernel, 0) == 0);
+	CHECK(kernel.api_lock_owner == -1);
+	kernel.api_handoff = ZZAPP_PID_NONE;
+	/* Another thread waits: the last release is the general call's, which
+	 * hands the lock over. */
+	CHECK(zzapp_kernel_api_try_lock(&kernel, 0) == 1);
+	CHECK(zzapp_kernel_api_lock(&kernel, 1) != 0);
+	CHECK(zzapp_kernel_api_try_unlock(&kernel, 0) == 0);
+	CHECK(kernel.api_lock_owner == 0 && kernel.api_lock_depth == 1U);
+	CHECK(zzapp_kernel_api_unlock(&kernel, 0) == 0);
+	CHECK(kernel.api_handoff == 1U);
+	CHECK(zzapp_kernel_api_lock(&kernel, 1) == 0);
+	CHECK(zzapp_kernel_api_try_unlock(&kernel, 1) == 0 ||
+	      kernel.api_lock_owner == -1);
+}
+
 int main(void)
 {
     test_first_context_and_dispatch();
@@ -1819,6 +1893,8 @@ int main(void)
     test_per_record_resources_do_not_cross();
     test_stack_top_and_high_water_come_from_the_record();
     test_svc_counter_block_follows_current_thread();
+	test_fast_api_lock_take_and_release();
+	test_fast_api_lock_refuses_other_cases();
 #if ZZAPP_PERF_COUNTERS
     test_performance_counters();
     test_tlb_samples_survive_system_dispatch();

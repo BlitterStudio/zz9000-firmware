@@ -35,6 +35,38 @@ __attribute__((weak)) int zzapp_display_latest(void)
     return 0;
 }
 
+#ifdef MINIGL_HOST_TEST
+__attribute__((weak)) int zzapp_display_mailbox_buffers(uint32_t buffers[3], uint32_t *bytes)
+{
+    (void)buffers; (void)bytes;
+    return -1;
+}
+
+__attribute__((weak)) int zzapp_display_mailbox_owned(uint32_t *back, uint32_t *spare)
+{
+    (void)back; (void)spare;
+    return -1;
+}
+
+__attribute__((weak)) int zzapp_display_mailbox_present(uint32_t address, uint32_t flags)
+{
+    (void)address; (void)flags;
+    return -1;
+}
+
+__attribute__((weak)) int zzapp_display_invalidate(uint32_t address, uint32_t length)
+{
+    (void)address; (void)length;
+    return -1;
+}
+
+__attribute__((weak)) int zzapp_display_mailbox_lease(int acquire)
+{
+    (void)acquire;
+    return -1;
+}
+#endif
+
 __attribute__((weak)) int zzapp_services_stop_requested(void)
 {
     return 0;
@@ -679,8 +711,13 @@ static int module_dcache_clean_owned(uint32_t owner, uint32_t address,
 static int module_dcache_invalidate_owned(uint32_t owner, uint32_t address,
                                           uint32_t length)
 {
-    if (!module_range_owned(owner, address, length))
-        return 0;
+    if (!module_range_owned(owner, address, length)) {
+        /* Direct targets are leased by the app, outside the module's
+         * allocations. The display service validates the range and
+         * invalidates through L2 because RasterIX writes via HP. */
+        return CARD_POOL_OWNER_CLASS(owner) == CARD_POOL_CLASS_MINIGL_CONTEXT &&
+               zzapp_display_invalidate(address, length) == 0;
+    }
 #if !defined(MINIGL_HOST_TEST)
     if (module_p96_span(address, length))
         Xil_L1DCacheInvalidateRange(address, length);
@@ -850,6 +887,35 @@ static int module_app_wait_flip(uint32_t generation)
     return zzapp_display_wait_flip_idle();
 }
 
+static int module_app_mailbox_buffers(uint32_t generation, uint32_t buffers[3],
+                                      uint32_t *bytes)
+{
+    return generation == zzapp_current_generation() ?
+        zzapp_display_mailbox_buffers(buffers, bytes) : -1;
+}
+
+static int module_app_mailbox_owned(uint32_t generation, uint32_t *back,
+                                    uint32_t *spare)
+{
+    return generation == zzapp_current_generation() ?
+        zzapp_display_mailbox_owned(back, spare) : -1;
+}
+
+static int module_app_mailbox_present(uint32_t generation, uint32_t address,
+                                      uint32_t flags)
+{
+    _Static_assert(ZZM_DISPLAY_PRESENT_NO_DIRTY == ZZAPP_DISPLAY_PRESENT_NO_DIRTY,
+                   "display present flag mismatch");
+    return generation == zzapp_current_generation() ?
+        zzapp_display_mailbox_present(address, flags) : -1;
+}
+
+static int module_app_mailbox_lease(uint32_t generation, int acquire)
+{
+    return generation == zzapp_current_generation() ?
+        zzapp_display_mailbox_lease(acquire) : -1;
+}
+
 static int module_profile_register(uint32_t module_id, const char *name,
                                    uint32_t *counter_out)
 {
@@ -1008,11 +1074,12 @@ static const zzm_palette_service_t palette_service = {
     module_palette_snapshot, module_palette_lookup
 };
 static const zzm_app_gl_host_service_t app_gl_host_service = {
-    ZZM_SERVICE_APP_GL_HOST_V4, sizeof(app_gl_host_service), zzapp_api_enter,
+    ZZM_SERVICE_APP_GL_HOST_V4_1, sizeof(app_gl_host_service), zzapp_api_enter,
     zzapp_api_leave, zzapp_display_bound, module_app_flip_bound,
     module_app_flip_idle, zzapp_current_generation, zzapp_display_layout,
     zzapp_display_latest, zzapp_services_stop_requested, zzapp_host_yield_wait,
-    module_app_wait_flip
+    module_app_wait_flip, module_app_mailbox_buffers, module_app_mailbox_owned,
+    module_app_mailbox_present, module_app_mailbox_lease
 };
 static const zzm_profile_service_t profile_service = {
     ZZM_SERVICE_PROFILE_V3, sizeof(profile_service), module_profile_register,

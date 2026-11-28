@@ -1290,7 +1290,7 @@ static gl_client_array_t *gl_client_array(gl_client_state_t *state,
     return NULL;
 }
 static void gl_record_client_call(svc_state_t *st, uint32_t number,
-                                  const uint32_t args[SVC_MAX_WORDS])
+                                  const uint32_t *args)
 {
     gl_client_state_t *state = &st->gl_client;
     gl_client_array_t *array;
@@ -2006,6 +2006,236 @@ done:
     return status;
 }
 
+/*
+ * Scalar GL calls (no user pointer in any argument) are the bulk of what a
+ * game makes: glVertex*, glTexCoord*, glColor*, glBindTexture, glEnable and
+ * the matrix calls. Their descriptor needs no marshalling, so they skip the
+ * checked path: no argument array, no pointer preparation, no copies. On the
+ * card the app's own r0-r3 and s0-s15 go to the module entry as the veneer
+ * saved them (zzapp_svc_call_regs), so floats and doubles need no per-call
+ * table. A call with more than four words reads the rest from the checked
+ * user stack. Whatever the fast path cannot take (no GL binding, an empty
+ * table slot, a pending GL error, a call that needs its pointers checked or
+ * special handling) returns 0 before anything is changed, and the checked
+ * path runs.
+ */
+#define GLF_REGS   1U /* four argument words or fewer */
+#define GLF_STACK  2U /* more than four: the rest is on the user stack */
+#define GLF_RECORD 4U /* the client array state records the call */
+#define GLF_RESULT 8U /* the call returns a word */
+static uint8_t gl_fast_flags[GL_COUNT];
+static uint8_t gl_fast_ready;
+
+static uint8_t gl_fast_classify(uint32_t number)
+{
+    const zzapp_svc_descriptor_t *descriptor = &gl_descriptors[number];
+    uint32_t flags;
+    uint32_t i;
+
+    if (number == GL_SLOT(GetString) || number == GL_SLOT(LockArrays) ||
+        number == GL_SLOT(UnlockArrays) || number == GL_SLOT(DrawArrays) ||
+        number == GL_SLOT(DrawElements))
+        return 0U;
+    for (i = 0U; i < 3U; ++i)
+        if (descriptor->pointers[i].element_bytes)
+            return 0U;
+    if (descriptor->arguments > SVC_MAX_WORDS ||
+        descriptor->result == ZZAPP_SVC_RETURN_U64)
+        return 0U;
+    flags = descriptor->arguments <= 4U ? GLF_REGS : GLF_STACK;
+    if (descriptor->result != ZZAPP_SVC_RETURN_VOID)
+        flags |= GLF_RESULT;
+    if (number == GL_SLOT(Begin) || number == GL_SLOT(End) ||
+        number == GL_SLOT(NormalPointer) || number == GL_SLOT(VertexPointer) ||
+        number == GL_SLOT(ColorPointer) || number == GL_SLOT(TexCoordPointer) ||
+        number == GL_SLOT(ClientActiveTextureARB) ||
+        number == GL_SLOT(PixelStorei) ||
+        number == GL_SLOT(EnableClientState) ||
+        number == GL_SLOT(DisableClientState))
+        flags |= GLF_RECORD;
+    return (uint8_t)flags;
+}
+
+static void gl_fast_init(void)
+{
+    uint32_t number;
+
+    for (number = 0U; number < GL_COUNT; ++number)
+        gl_fast_flags[number] = gl_fast_classify(number);
+    gl_fast_ready = 1U;
+}
+
+#ifdef ZZAPP_HOST_TEST
+/* The host has no ARM register file: rebuild the call from the frame. */
+static uint32_t svc_call_regs(const aar_gl *gl, uintptr_t entry, uint32_t number,
+                              const zzapp_svc_frame_t *frame)
+{
+    uint32_t args[SVC_MAX_WORDS] = { 0U };
+    uint32_t result = 0U;
+    uint32_t i;
+
+    for (i = 0U; i < 4U; ++i)
+        args[i] = frame->r[i];
+    if (call_gl_float(gl, number, frame, args, &result))
+        return result;
+    return call_words(entry, args);
+}
+#else
+uint32_t zzapp_svc_call_regs(uintptr_t entry, const zzapp_svc_frame_t *frame);
+#define svc_call_regs(gl, entry, number, frame) \
+    ((void)(gl), (void)(number), zzapp_svc_call_regs((entry), (frame)))
+#endif
+
+/*
+ * glVertex3fv(v) is the most frequent pointer call of an immediate-mode app.
+ * Its one pointer is a fixed 12-byte read-only extent, so this does what the
+ * checked path does for it without the descriptor walk and the full copy
+ * buffers: the whole extent must be mapped readable (a cross-page extent
+ * included), it is copied once, byte-wise safe for any alignment, into an
+ * aligned kernel frame, and the same module entry runs on that copy. The
+ * caller's pointer is never kept or passed on. Anything else (no binding, a
+ * stale generation, an empty slot, a NULL or unmapped extent, a non-app
+ * thread) returns 0 before any state changes, and the checked path then
+ * gives its usual result, including AAR_E_FAULT for a bad pointer.
+ */
+static int svc_gl_vertex3fv(zzapp_svc_frame_t *frame, uint32_t number)
+{
+    _Alignas(8) uint32_t vertex[3];
+    uint32_t args[SVC_MAX_WORDS] = { 0U };
+    uint32_t address = frame->r[0];
+    zzapp_rec_t *rec;
+    zzapp_proc_t *proc;
+    svc_state_t *st;
+    const aar_gl *gl;
+    uintptr_t entry;
+    uint32_t pid;
+    int thread = zzapp_kernel_current_thread();
+
+    if (thread < 0 || !address)
+        return 0;
+#ifdef ZZAPP_HOST_TEST
+    pid = zzapp_services_current_pid();
+#else
+    pid = (uint32_t)thread;
+#endif
+    rec = zzapp_rec_by_pid(pid);
+    proc = zzapp_proc_slot(pid);
+    if (!rec || !proc)
+        return 0;
+    st = (svc_state_t *)(void *)rec->svc.bytes;
+    gl = st->direct_gl;
+    if (!gl || st->gl_client.generation != proc->generation ||
+        (uint64_t)GL_FIRST + ((uint64_t)number + 1U) * sizeof(void *) > gl->size)
+        return 0;
+    entry = ((const uintptr_t *)(const void *)((const uint8_t *)gl + GL_FIRST))[number];
+    if (!entry || zzapp_svc_check_user(&proc->as, address, sizeof(vertex), 0) != AAR_OK)
+        return 0;
+    memcpy(vertex, (const void *)(uintptr_t)address, sizeof(vertex));
+    args[0] = (uint32_t)(uintptr_t)vertex;
+    st->last_number = ZZAPP_SVC_GL_FIRST + number;
+#if ZZAPP_PERF_COUNTERS
+    counters_dispatch(st, 1);
+    gl_telemetry_frame_begin(st, number);
+    counters_handler_start(st);
+    gl_telemetry_descriptor_end(st);
+    gl_telemetry_frontend_begin(st);
+#endif
+    (void)call_words(entry, args);
+#if ZZAPP_PERF_COUNTERS
+    counters_handler_end(st);
+    gl_telemetry_frontend_end(st);
+#endif
+    return 1;
+}
+
+static int svc_gl_fast(zzapp_svc_frame_t *frame, uint32_t number)
+{
+    uint32_t flags;
+    int thread;
+    uint32_t pid;
+    zzapp_rec_t *rec;
+    zzapp_proc_t *proc;
+    svc_state_t *st;
+    const aar_gl *gl;
+    uintptr_t entry;
+    uint32_t result;
+    uint32_t record_args[4];
+
+    if (number >= GL_COUNT)
+        return 0;
+    if (__builtin_expect(!gl_fast_ready, 0))
+        gl_fast_init();
+    if (number == GL_SLOT(Vertex3fv))
+        return svc_gl_vertex3fv(frame, number);
+    flags = gl_fast_flags[number];
+    if (!flags)
+        return 0;
+    thread = zzapp_kernel_current_thread();
+    if (thread < 0)
+        return 0;
+#ifdef ZZAPP_HOST_TEST
+    /* The host harness selects the record through the services layer. */
+    pid = zzapp_services_current_pid();
+#else
+    /* On core 1 the services layer answers with the running app's own pid. */
+    pid = (uint32_t)thread;
+#endif
+    rec = zzapp_rec_by_pid(pid);
+    proc = zzapp_proc_slot(pid);
+    if (!rec || !proc)
+        return 0;
+    st = (svc_state_t *)(void *)rec->svc.bytes;
+    gl = st->direct_gl;
+    if (!gl || st->gl_client.generation != proc->generation ||
+        (uint64_t)GL_FIRST + ((uint64_t)number + 1U) * sizeof(void *) > gl->size)
+        return 0;
+    entry = ((const uintptr_t *)(const void *)((const uint8_t *)gl + GL_FIRST))[number];
+    if (!entry || (number == GL_SLOT(GetError) && st->gl_client.error))
+        return 0;
+    if (flags & GLF_STACK) {
+        uint32_t args[SVC_MAX_WORDS] = { 0U };
+
+        if (frame_arguments(&proc->as, frame,
+                            gl_descriptors[number].arguments, args) != AAR_OK) {
+            /* The checked path reports the fault the same way. */
+            return 0;
+        }
+        st->last_number = ZZAPP_SVC_GL_FIRST + number;
+#if ZZAPP_PERF_COUNTERS
+        counters_dispatch(st, 1);
+        gl_telemetry_frame_begin(st, number);
+        counters_handler_start(st);
+        gl_telemetry_descriptor_end(st);
+        gl_telemetry_frontend_begin(st);
+#endif
+        result = call_words(entry, args);
+    } else {
+        st->last_number = ZZAPP_SVC_GL_FIRST + number;
+#if ZZAPP_PERF_COUNTERS
+        counters_dispatch(st, 1);
+        gl_telemetry_frame_begin(st, number);
+        counters_handler_start(st);
+        gl_telemetry_descriptor_end(st);
+        gl_telemetry_frontend_begin(st);
+#endif
+        result = svc_call_regs(gl, entry, number, frame);
+    }
+    if (flags & GLF_RECORD) {
+        record_args[0] = frame->r[0];
+        record_args[1] = frame->r[1];
+        record_args[2] = frame->r[2];
+        record_args[3] = frame->r[3];
+        gl_record_client_call(st, number, record_args);
+    }
+#if ZZAPP_PERF_COUNTERS
+    counters_handler_end(st);
+    gl_telemetry_frontend_end(st);
+#endif
+    if (flags & GLF_RESULT)
+        frame->r[0] = result;
+    return 1;
+}
+
 static void zzapp_svc_dispatch_slow(const aar_api *api, zzapp_proc_t *proc,
                                     svc_state_t *st, uint32_t pid,
                                     uint32_t number, zzapp_svc_frame_t *frame)
@@ -2162,6 +2392,9 @@ void zzapp_svc_dispatch(zzapp_svc_frame_t *frame)
     if (!frame)
         return;
     number = frame->r[12];
+    if (number >= ZZAPP_SVC_GL_FIRST &&
+        svc_gl_fast(frame, number - ZZAPP_SVC_GL_FIRST))
+        return;
     if (number < API_COUNT) {
         descriptor = &api_descriptors[number];
         if (descriptor->flags & ZZAPP_SVC_FAST_NO_LOCK) {
@@ -2229,6 +2462,9 @@ void zzapp_svc_dispatch(zzapp_svc_frame_t *frame)
         if (descriptor->flags & ZZAPP_SVC_FAST_NO_LOCK)
             fast = 1;
     }
+    if (!fast && number >= ZZAPP_SVC_GL_FIRST &&
+        svc_gl_fast(frame, number - ZZAPP_SVC_GL_FIRST))
+        return;
     if (!fast) {
         zzapp_proc_t *proc;
 

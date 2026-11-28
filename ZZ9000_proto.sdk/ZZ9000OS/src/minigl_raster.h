@@ -24,6 +24,7 @@ typedef struct MiniGLRasterBuffers {
     uint32_t texture_pool_bytes;
     uint16_t width;
     uint16_t height;
+    uint8_t mailbox_color;
 } MiniGLRasterBuffers;
 typedef int (*MiniGLRasterFailStopTargetFn)(void *context,
                                             MiniGLRasterBuffers *replacement);
@@ -58,6 +59,10 @@ void minigl_raster_set_trace_hook(MiniGLRasterTraceHook hook);
 /* Returns zero if any supplied board-memory region cannot contain the target. */
 int minigl_raster_configure_buffers(const MiniGLRasterBuffers *buffers);
 void minigl_raster_release_buffers(void);
+/* A target buffer is about to be freed. Returns the bytes of it that were
+ * handed to the CPU and may still be dirty in the data cache (0: none); the
+ * caller invalidates them so a late write-back cannot land in reused memory. */
+size_t minigl_raster_buffer_released(const void *buffer);
 const uint32_t *minigl_raster_color_buffer(void);
 uint16_t minigl_raster_width(void);
 uint16_t minigl_raster_height(void);
@@ -93,6 +98,12 @@ void minigl_raster_quarantine_outstanding(void);
 /* Submit the current frame without waiting for RasterIX, then poll its fences. */
 int minigl_raster_submit_present(void);
 int minigl_raster_present_ready(void);
+/* Per-target form of the two calls around it: true once RasterIX has
+ * finished every submitted command stream that draws into the colour buffer
+ * at this address, while later frames may still be rendering.  The wait
+ * variant blocks for that target only. */
+int minigl_raster_target_ready(uintptr_t color_address);
+int minigl_raster_wait_target(uintptr_t color_address);
 /* Retires the RasterIX command stream for card-side presentation without
  * expanding its RGB565 surface to RGBA. */
 int minigl_raster_prepare_present(void);
@@ -106,6 +117,7 @@ int minigl_raster_finish(void);
 int minigl_raster_drain(void);
 /* Retires backend work even after target retirement left no bound buffers. */
 int minigl_raster_retire_submitted(void);
+int minigl_raster_set_color_byte_swap(int enabled);
 void minigl_raster_target_discard(int rgb565);
 void minigl_raster_target_retire(void);
 int minigl_raster_buffer_to_rgba(uint32_t *rgba, size_t pixels);
@@ -161,6 +173,12 @@ int minigl_raster_subimage_rgba8(uint32_t id, uint16_t level, uint16_t xoffset, 
 void minigl_raster_draw_wire_v9(uint16_t mode, const float *object_vertices,
                                 uint32_t count, uint32_t flags,
                                 const uint32_t *edge_mask);
+/* 1: drawn on hardware.  0: not started, the caller draws it the general
+ * way.  -1: hardware accepted the draw and then refused it; the caller
+ * decodes into `scratch` and calls minigl_raster_cpu_redraw. */
+int minigl_raster_draw_packed_fast(const uint8_t *payload, uint32_t bytes,
+                                   int indexed, float *scratch);
+void minigl_raster_cpu_redraw(uint16_t mode, const float *object_vertices, uint32_t count);
 struct mw_state;
 void minigl_raster_set_wire_v9_state(const struct mw_state *state);
 #ifdef MINIGL_HOST_TEST

@@ -1085,8 +1085,11 @@ void zzm_minigl_abort_reset(void)
     graphics_pl330_abort(0);
 #if !defined(TASKQ_HOST_TEST)
     if (g_ops != 0 && g_caps.has_rasterix_ef) {
+        uint32_t control = graphics_csr_read(0, RIX_DRV_CSR_CONTROL) &
+                           RIX_DRV_CONTROL_COLOR_SWAP;
+
         graphics_recovery_step(2U, "RasterIX control disable");
-        Xil_Out32(ZZM_RIX_CSR_BASE + RIX_DRV_CSR_CONTROL, 0U);
+        Xil_Out32(ZZM_RIX_CSR_BASE + RIX_DRV_CSR_CONTROL, control);
         ZZM_MINIGL_DSB();
         graphics_recovery_step(4U, "RasterIX FIFO reset");
         Xil_Out32(ZZM_RIX_FIFO_BASE + RIX_DRV_FIFO_TDFR, RIX_DRV_FIFO_RESET_KEY);

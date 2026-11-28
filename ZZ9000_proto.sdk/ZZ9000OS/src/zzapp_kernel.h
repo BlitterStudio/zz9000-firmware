@@ -493,6 +493,11 @@ uint32_t zzapp_kernel_perf_test_percentile(
 
 int zzapp_kernel_api_lock(zzapp_kernel_t *kernel, uint32_t pid);
 int zzapp_kernel_api_unlock(zzapp_kernel_t *kernel, uint32_t pid);
+/* The common case of the two above, without their checks of the general case:
+ * 1 when it took (or gave) the lock, 0 with nothing changed when the general
+ * call is needed. See the comment in zzapp_kernel.c. */
+int zzapp_kernel_api_try_lock(zzapp_kernel_t *kernel, uint32_t pid);
+int zzapp_kernel_api_try_unlock(zzapp_kernel_t *kernel, uint32_t pid);
 int zzapp_kernel_api_block(zzapp_kernel_t *kernel, uint32_t pid);
 int zzapp_kernel_system_lock(zzapp_kernel_t *kernel);
 int zzapp_kernel_system_unlock(zzapp_kernel_t *kernel);

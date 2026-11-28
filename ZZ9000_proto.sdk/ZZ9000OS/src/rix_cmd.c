@@ -6,10 +6,44 @@
 
 #include <string.h>
 
+/* The command list is little-endian.  On a little-endian host a word store
+ * is one instruction (memcpy of a fixed size), and a descriptor or page
+ * list is one block copy; other hosts keep the byte-wise form. */
+#if defined(__BYTE_ORDER__) && defined(__ORDER_LITTLE_ENDIAN__) && \
+    __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
+#define RIX_CMD_LITTLE_ENDIAN 1
+#else
+#define RIX_CMD_LITTLE_ENDIAN 0
+#endif
+
 static int rix_cmd_has(const RixCmdWriter *writer, size_t bytes)
 {
     return writer != NULL && writer->bytes != NULL && !writer->failed &&
            bytes <= writer->capacity - writer->length;
+}
+
+static inline void rix_cmd_put(uint8_t *p, uint32_t word)
+{
+#if RIX_CMD_LITTLE_ENDIAN
+    memcpy(p, &word, sizeof(word));
+#else
+    p[0] = (uint8_t)word;
+    p[1] = (uint8_t)(word >> 8);
+    p[2] = (uint8_t)(word >> 16);
+    p[3] = (uint8_t)(word >> 24);
+#endif
+}
+
+static inline void rix_cmd_put_words(uint8_t *p, const uint32_t *words, size_t count)
+{
+#if RIX_CMD_LITTLE_ENDIAN
+    memcpy(p, words, count * sizeof(*words));
+#else
+    size_t i;
+
+    for (i = 0U; i < count; ++i)
+        rix_cmd_put(p + i * 4U, words[i]);
+#endif
 }
 
 
@@ -28,31 +62,32 @@ size_t rix_cmd_words(const RixCmdWriter *writer)
 
 int rix_cmd_word(RixCmdWriter *writer, uint32_t word)
 {
-    uint8_t *p;
     if (!rix_cmd_has(writer, 4U)) {
         if (writer != NULL) {
             writer->failed = 1;
         }
         return 0;
     }
-    p = writer->bytes + writer->length;
-    p[0] = (uint8_t)word;
-    p[1] = (uint8_t)(word >> 8);
-    p[2] = (uint8_t)(word >> 16);
-    p[3] = (uint8_t)(word >> 24);
+    rix_cmd_put(writer->bytes + writer->length, word);
     writer->length += 4U;
     return 1;
 }
 
 int rix_cmd_register(RixCmdWriter *writer, uint8_t reg, uint32_t value)
 {
+    uint8_t *p;
+
     if (reg >= 19U || !rix_cmd_has(writer, 8U)) {
         if (writer != NULL) {
             writer->failed = 1;
         }
         return 0;
     }
-    return rix_cmd_word(writer, RIX_OP_RENDER_CONFIG | reg) && rix_cmd_word(writer, value);
+    p = writer->bytes + writer->length;
+    rix_cmd_put(p, RIX_OP_RENDER_CONFIG | reg);
+    rix_cmd_put(p + 4U, value);
+    writer->length += 8U;
+    return 1;
 }
 
 int rix_cmd_feature_enable(RixCmdWriter *writer, uint32_t flags)
@@ -181,35 +216,53 @@ int rix_cmd_framebuffer(RixCmdWriter *writer, uint32_t flags, uint32_t pixels)
 
 int rix_cmd_triangle(RixCmdWriter *writer, const uint32_t *words, size_t count)
 {
-    size_t i;
+    uint8_t *p;
+
     if (words == NULL || count == 0U || count * 4U > 0x3ffU || !rix_cmd_has(writer, (count + 1U) * 4U)) {
         return 0;
     }
-    if (!rix_cmd_word(writer, RIX_OP_TRIANGLE_STREAM | (uint32_t)(count * 4U))) {
+    p = writer->bytes + writer->length;
+    rix_cmd_put(p, RIX_OP_TRIANGLE_STREAM | (uint32_t)(count * 4U));
+    rix_cmd_put_words(p + 4U, words, count);
+    writer->length += (count + 1U) * 4U;
+    return 1;
+}
+
+int rix_cmd_triangles(RixCmdWriter *writer, const uint32_t *words, size_t count,
+                      size_t triangles)
+{
+    uint8_t *p;
+    uint32_t header;
+    size_t index;
+
+    if (triangles == 0U)
+        return 1;
+    if (words == NULL || count == 0U || count * 4U > 0x3ffU ||
+        !rix_cmd_has(writer, triangles * (count + 1U) * 4U)) {
         return 0;
     }
-    for (i = 0U; i < count; ++i) {
-        if (!rix_cmd_word(writer, words[i])) {
-            return 0;
-        }
+    header = RIX_OP_TRIANGLE_STREAM | (uint32_t)(count * 4U);
+    p = writer->bytes + writer->length;
+    for (index = 0U; index < triangles; ++index) {
+        rix_cmd_put(p, header);
+        rix_cmd_put_words(p + 4U, words + index * count, count);
+        p += (count + 1U) * 4U;
     }
+    writer->length += triangles * (count + 1U) * 4U;
     return 1;
 }
 
 int rix_cmd_texture_pages(RixCmdWriter *writer, uint8_t tmu, const uint32_t *pages, size_t count)
 {
-    size_t i;
+    uint8_t *p;
+
     if (tmu != 0U || pages == NULL || count == 0U || count > 0x7ffffU || !rix_cmd_has(writer, (count + 1U) * 4U)) {
         return 0;
     }
-    if (!rix_cmd_word(writer, RIX_OP_TEXTURE_STREAM | (uint32_t)count | ((uint32_t)tmu << 19))) {
-        return 0;
-    }
-    for (i = 0U; i < count; ++i) {
-        if (!rix_cmd_word(writer, pages[i])) {
-            return 0;
-        }
-    }
+    p = writer->bytes + writer->length;
+    rix_cmd_put(p, RIX_OP_TEXTURE_STREAM | (uint32_t)count | ((uint32_t)tmu << 19));
+    rix_cmd_put_words(p + 4U, pages, count);
+    writer->length += (count + 1U) * 4U;
     return 1;
 }
 

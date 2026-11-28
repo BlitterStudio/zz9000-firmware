@@ -39,6 +39,7 @@ typedef enum {
     MGLP_SWAP_COPY, /* colour target copy/conversion into a P96 bitmap */
     MGLP_SWAP_FLIP, /* waiting for a P96 flip slot (or publishing a flip) */
     MGLP_OP,        /* other synchronous ops (create, readback, request) */
+    MGLP_FRONT,     /* inside an ARM app's GL call, outside every stage above */
     MGLP_STAGES
 } MiniGLProfileStage;
 
@@ -69,6 +70,9 @@ typedef enum {
     MGLP_N_FEED_STEPS,    /* asynchronous feed steps taken */
     MGLP_N_FEED_DEVICE_READS, /* RasterIX/FIFO/DMA reads made by feed steps */
     MGLP_N_FEED_INVALIDATES,  /* fence cache invalidates made by feed steps */
+    MGLP_N_DRAW_CACHE_STORES,
+    MGLP_N_DRAW_CACHE_HITS,
+    MGLP_N_DRAW_CACHE_REPLAY_BYTES,
     MGLP_COUNTERS
 } MiniGLProfileCounter;
 
@@ -172,6 +176,12 @@ void minigl_profile_set_enabled(int enabled);
 /* One ring packet: PARSE envelope, per-packet maximum, byte counters. */
 void minigl_profile_packet_begin(void);
 void minigl_profile_packet_end(uint32_t bytes, uint32_t commands);
+/* One executed wire command: payload bytes, and for draws the vertex layout
+ * word and vertex count (0 for other commands). */
+#define MGLP_OPCODES 64U
+#define MGLP_LAYOUTS 12U
+void minigl_profile_command(uint32_t opcode, uint32_t bytes, uint32_t layout,
+                            uint32_t vertices);
 /* Counts CPU draws and triangles by their normalized fallback reason. */
 void minigl_profile_fallback(uint32_t reason, uint32_t triangles);
 /* Service poll exit: prints the summary once 5 s have elapsed. */
@@ -218,6 +228,14 @@ static inline void minigl_profile_packet_end(uint32_t bytes, uint32_t commands)
 {
     (void)bytes;
     (void)commands;
+}
+static inline void minigl_profile_command(uint32_t opcode, uint32_t bytes,
+                                          uint32_t layout, uint32_t vertices)
+{
+    (void)opcode;
+    (void)bytes;
+    (void)layout;
+    (void)vertices;
 }
 static inline void minigl_profile_fallback(uint32_t reason, uint32_t triangles)
 {

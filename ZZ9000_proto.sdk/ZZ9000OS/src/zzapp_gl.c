@@ -172,7 +172,10 @@ int zzm_module_api_active(void)
 
 void zzm_module_api_enter(void)
 {
-    g_module_in_api++;
+    /* FRONT is the time inside an app's GL call that no deeper stage claims:
+     * the front end's state handling and command packing. */
+    if (g_module_in_api++ == 0)
+        minigl_profile_push(MGLP_FRONT);
     g_module_app_host->api_enter();
 }
 
@@ -187,6 +190,10 @@ void zzm_module_api_leave(void)
         (void)minigl_raster_try_feed(RIX_DRV_FEED_SOURCE_SVC);
     if (g_module_in_api == 0 && zzm_minigl_take_deferred_dispatch())
         g_module_app_host->yield_wait();
+    if (g_module_in_api == 0) {
+        minigl_profile_pop();
+        minigl_profile_report();
+    }
     g_module_app_host->api_leave();
 }
 
@@ -336,15 +343,120 @@ void zzapp_gl_test_set_p96(uint8_t *pixels, uint32_t bytes)
 static int g_bound;
 static uint32_t g_surface_id;
 static aar_gl g_table;
-/* The copy path queues two RasterIX frames.  Direct P96 rendering uses the
- * same two physical buffers but waits for every flip acknowledgement before
- * the next target can become writable. */
+/* Copy and mailbox direct can retain two frames. Queued direct uses two
+ * display buffers and waits for each flip acknowledgement before drawing. */
 static uint8_t g_present_queue[2];
 static uint8_t g_present_count;
 static uint8_t g_zero_copy;
+static uint8_t g_mailbox_direct;
+static uint32_t g_mailbox_generation;
 static uint32_t g_bound_layout;
 static uint8_t g_sync_present;
 static uint32_t g_present_frame;
+
+#ifndef ZZAPP_GL_PROFILE_DEFAULT
+#define ZZAPP_GL_PROFILE_DEFAULT 1
+#endif
+
+static uint32_t zzapp_gl_select_mailbox_target(mw_ctx *mw, uint32_t outgoing);
+
+static int zzapp_gl_mailbox_supported(void)
+{
+#if defined(MINIGL_MODULE)
+    return ZZM_SERVICE_VERSION_COMPATIBLE(g_module_app_host->version,
+                                          ZZM_SERVICE_APP_GL_HOST_V4_1) &&
+           g_module_app_host->size >= sizeof(*g_module_app_host) &&
+           g_module_app_host->mailbox_buffers && g_module_app_host->mailbox_owned &&
+           g_module_app_host->mailbox_present && g_module_app_host->mailbox_lease;
+#else
+    return 0;
+#endif
+}
+
+static int zzapp_gl_mailbox_lease(int acquire)
+{
+#if defined(MINIGL_MODULE)
+    return g_module_app_host->mailbox_lease(g_mailbox_generation, acquire);
+#else
+    (void)acquire;
+    return AAR_E_NOSYS;
+#endif
+}
+
+static int zzapp_gl_mailbox_owned(uint32_t *back, uint32_t *spare)
+{
+#if defined(MINIGL_MODULE)
+    return g_module_app_host->mailbox_owned(g_mailbox_generation, back, spare);
+#else
+    (void)back;
+    (void)spare;
+    return AAR_E_NOSYS;
+#endif
+}
+
+static int zzapp_gl_mailbox_present(uint32_t address, int gpu_written)
+{
+#if defined(MINIGL_MODULE)
+    return g_module_app_host->mailbox_present(
+        g_mailbox_generation, address, gpu_written ? ZZM_DISPLAY_PRESENT_NO_DIRTY : 0U);
+#else
+    (void)address;
+    (void)gpu_written;
+    return AAR_E_NOSYS;
+#endif
+}
+
+/* Keep the owned back in colour slot 1 (mw_state's initial back index).
+ * Only the vblank may run between these reads; it changes front and spare,
+ * never back. The addresses themselves do not change until display close. */
+static int zzapp_gl_mailbox_targets(uint32_t buffers[3], uint32_t bytes)
+{
+#if defined(MINIGL_MODULE)
+    uint32_t actual_bytes, back, spare;
+    uint32_t i;
+
+    /* Maintenance of a direct target must never touch the adjacent page. */
+    if ((bytes & (MINIGL_RIX_COLOR_CACHE_LINE_BYTES - 1U)) != 0U)
+        return 0;
+    if (g_module_app_host->mailbox_buffers(g_mailbox_generation, buffers,
+                                           &actual_bytes) != AAR_OK ||
+        actual_bytes != bytes ||
+        zzapp_gl_mailbox_owned(&back, &spare) != AAR_OK || !back)
+        return 0;
+    for (i = 0U; i < 3U; ++i) {
+        uint32_t j;
+
+        if (!buffers[i] || (buffers[i] & (MINIGL_RIX_MAILBOX_COLOR_ALIGNMENT - 1U)) != 0U) {
+            minigl_platform_logf("[app] direct target %lu is not 256-byte aligned: %08lx",
+                                 (unsigned long)i, (unsigned long)buffers[i]);
+            return 0;
+        }
+        for (j = 0U; j < i; ++j) {
+            uint32_t diff = buffers[i] > buffers[j] ?
+                buffers[i] - buffers[j] : buffers[j] - buffers[i];
+            if (diff < bytes)
+                return 0;
+        }
+    }
+    for (i = 0U; i < 3U; ++i) {
+        if (buffers[i] == back) {
+            buffers[i] = buffers[1];
+            buffers[1] = back;
+            return 1;
+        }
+    }
+#else
+    (void)buffers;
+    (void)bytes;
+#endif
+    return 0;
+}
+
+static int zzapp_gl_direct_layout(unsigned mailbox)
+{
+    return g_bound_layout == AAR_LAYOUT_RGB565_LE ||
+           (mailbox && g_bound_layout == AAR_LAYOUT_RGB565_BE);
+}
 
 #define CTX 1u
 #define ENTER() zzapp_api_enter()
@@ -884,6 +996,9 @@ int zzapp_gl_bind(uint32_t surface_id, uint32_t flags,
                   const struct aar_gl **out)
 {
     uint32_t w, h, pitch, format, front, back;
+    uint32_t buffers[3];
+    uint32_t bytes;
+    int mailbox;
     mw_ctx *mw;
     const char *present_mode;
 
@@ -904,20 +1019,31 @@ int zzapp_gl_bind(uint32_t surface_id, uint32_t flags,
         return AAR_E_INVAL;
     g_bound_layout = 0U;
     (void)zzapp_display_layout(&g_bound_layout);
+    bytes = w * h * 2U;
+    mailbox = zzapp_display_latest();
     g_zero_copy = 0U;
+    g_mailbox_direct = 0U;
     if ((flags & AAR_ZZ9000_GL_BIND_DIRECT_PRESENT) == 0U)
         present_mode = "copy (direct not requested)";
-    else if (zzapp_display_latest() != 0)
-        present_mode = "copy (mailbox display)";
     else if (format != AAR_FMT_RGB565)
         present_mode = "copy (not RGB565)";
-    else if (g_bound_layout != AAR_LAYOUT_RGB565_LE)
+    else if (!zzapp_gl_direct_layout(mailbox))
         present_mode = "copy (RGB565 layout)";
     else if (pitch != w * 2U)
         present_mode = "copy (padded pitch)";
-    else if (front == 0U || back == 0U)
+    else if (mailbox) {
+        g_mailbox_generation = zzapp_current_generation();
+        if (!zzapp_gl_mailbox_supported())
+            present_mode = "copy (mailbox host ABI)";
+        else if (!zzapp_gl_mailbox_targets(buffers, bytes))
+            present_mode = "copy (mailbox buffers)";
+        else {
+            g_mailbox_direct = 1U;
+            present_mode = "direct";
+        }
+    } else if (!front || !back)
         present_mode = "copy (missing buffers)";
-    else if ((front & 2047U) != 0U || (back & 2047U) != 0U)
+    else if (((front | back) & 2047U) != 0U)
         present_mode = "copy (unaligned buffers)";
     else {
         g_zero_copy = 1U;
@@ -932,17 +1058,39 @@ int zzapp_gl_bind(uint32_t surface_id, uint32_t flags,
         return AAR_E_NOMEM;
     }
     mw = amiberry_transport_inproc_ctx();
-    if (g_zero_copy && (!mw || !mw_host_bind_direct_rgb565(mw, front, back,
-                                                            w * h * 2U))) {
+    if (g_zero_copy && (!mw || !mw_host_bind_direct_rgb565(mw, front, back, 0U,
+                                                            bytes))) {
         g_zero_copy = 0U;
         present_mode = "copy (direct buffer bind)";
     }
     if (!zzapp_gl_configure_targets(w, h, g_zero_copy ? 2U : 3U)) {
         amiberry_inproc_close();
         g_zero_copy = 0U;
+        g_mailbox_direct = 0U;
         minigl_raster_set_async_feed(0);
         minigl_platform_set_memfetch_enabled(1);
         return AAR_E_NOMEM;
+    }
+    if (g_mailbox_direct) {
+        int leased = mw && mw->rix_enabled && zzapp_gl_mailbox_lease(1) == AAR_OK;
+
+        if (leased && g_bound_layout == AAR_LAYOUT_RGB565_BE)
+            mw->direct_color_be = minigl_raster_set_color_byte_swap(1);
+        if (leased &&
+            (g_bound_layout != AAR_LAYOUT_RGB565_BE || mw->direct_color_be) &&
+            mw_host_bind_direct_rgb565(mw, buffers[0], buffers[1], buffers[2],
+                                       bytes)) {
+            mw->present_select = zzapp_gl_select_mailbox_target;
+        } else {
+            g_mailbox_direct = 0U;
+            if (mw && mw->direct_color_be) {
+                (void)minigl_raster_set_color_byte_swap(0);
+                mw->direct_color_be = 0;
+            }
+            if (leased)
+                (void)zzapp_gl_mailbox_lease(0);
+            present_mode = "copy (direct buffer bind)";
+        }
     }
     /* The module's stdout is not wired to the UART; the module log is. */
     minigl_platform_logf("[app] present: %s", present_mode);
@@ -960,8 +1108,10 @@ int zzapp_gl_bind(uint32_t surface_id, uint32_t flags,
     g_present_frame = 0U;
     /* One [MGLP] UART line per 5 s of GL work: where an ARM app's frame
      * time goes (app vs MiniGL stages, hardware vs CPU draws, fallback
-     * reasons).  68k clients switch it on through trace_enabled. */
-    minigl_profile_set_enabled(1);
+     * reasons).  68k clients switch it on through trace_enabled.  A module
+     * built with ZZAPP_GL_PROFILE_DEFAULT=0 leaves it off for ARM apps, for
+     * timing runs that must not pay for the stage clocks or the UART. */
+    minigl_profile_set_enabled(ZZAPP_GL_PROFILE_DEFAULT);
     if (out)
         *out = &g_table;
     return AAR_OK;
@@ -972,9 +1122,12 @@ void zzapp_gl_unbind(void)
     if (!g_bound)
         return;
     amiberry_inproc_close();
+    if (g_mailbox_direct)
+        (void)zzapp_gl_mailbox_lease(0);
     g_surface_id = 0;
     g_present_count = 0U;
     g_zero_copy = 0U;
+    g_mailbox_direct = 0U;
     g_sync_present = 0U;
     g_bound_layout = 0U;
     g_bound = 0;
@@ -1158,6 +1311,14 @@ int zzapp_gl_test_copy_bound(const uint32_t *src, int rgb565,
 }
 #endif
 
+/* The address RasterIX renders colour target `index` at. */
+static uintptr_t zzapp_gl_target_address(const mw_ctx *mw, uint32_t index)
+{
+    return mw->color_direct[index] ?
+        (uintptr_t)mw->direct_color_buffers[index] :
+        (uintptr_t)mw->color_buffers[index];
+}
+
 static int zzapp_gl_present_pending(mw_ctx *mw)
 {
     uint32_t w, h, pitch, format, front, back, card;
@@ -1165,22 +1326,37 @@ static int zzapp_gl_present_pending(mw_ctx *mw)
     uint32_t copy_us, flip_us;
     uint64_t started;
     int rgb565;
-    if (g_present_count == 0U || !minigl_raster_present_ready() ||
-        !zzapp_display_flip_idle())
+    if (g_present_count == 0U)
         return 0;
-    if (zzapp_display_bound(&w, &h, &pitch, &format, &front, &back) != AAR_OK ||
-        !w || !h || !pitch || h > UINT32_MAX / pitch)
-        return 0;
+    if (g_mailbox_direct) {
+        w = mw->width;
+        h = mw->height;
+        pitch = w * 2U;
+        format = AAR_FMT_RGB565;
+    } else {
+        if (!zzapp_display_flip_idle() ||
+            zzapp_display_bound(&w, &h, &pitch, &format, &front, &back) != AAR_OK ||
+            !w || !h || !pitch || h > UINT32_MAX / pitch)
+            return 0;
+    }
     source = g_present_queue[0];
     if (source >= 3U || !mw->color_buffers[source])
         return 0;
-    card = back ? back : front;
+    /* The oldest queued frame is presentable once RasterIX has finished the
+     * command streams that draw into it; newer frames may still render. */
+    if (!minigl_raster_target_ready(zzapp_gl_target_address(mw, source)))
+        return 0;
+    card = g_mailbox_direct ? (uint32_t)(uintptr_t)mw->direct_color_buffers[source] :
+                              (back ? back : front);
     rgb565 = mw->color_rgb565[source] != 0U;
     if (mw->present_submit_rgb565[source] != (uint8_t)rgb565)
         zzapp_gl_present_layout_mismatch(mw, source, (uint8_t)rgb565);
     started = minigl_platform_time_us();
     minigl_profile_push(MGLP_SWAP_COPY);
-    if (mw->color_direct[source]) {
+    if (g_mailbox_direct && mw->color_direct[source]) {
+        /* RasterIX has finished its HP writes. No CPU has written the
+         * frame; scanout reads DDR directly and needs no cache operation. */
+    } else if (mw->color_direct[source]) {
         if ((uint32_t)(uintptr_t)mw->direct_color_buffers[source] != card) {
             minigl_profile_pop();
             return 0;
@@ -1219,9 +1395,11 @@ static int zzapp_gl_present_pending(mw_ctx *mw)
     copy_us = (uint32_t)(minigl_platform_time_us() - started);
     started = minigl_platform_time_us();
     minigl_profile_push(MGLP_SWAP_FLIP);
-    if (zzapp_gl_queue_flip(g_surface_id) != AAR_OK) {
+    if ((g_mailbox_direct ?
+         zzapp_gl_mailbox_present(card, mw->color_direct[source]) :
+         zzapp_gl_queue_flip(g_surface_id)) != AAR_OK) {
         minigl_profile_pop();
-        return 0;
+        return g_mailbox_direct ? -1 : 0;
     }
     minigl_profile_pop();
     flip_us = (uint32_t)(minigl_platform_time_us() - started);
@@ -1233,6 +1411,68 @@ static int zzapp_gl_present_pending(mw_ctx *mw)
     if (g_present_count != 0U)
         g_present_queue[0] = g_present_queue[1];
     return 1;
+}
+
+static void zzapp_gl_enqueue(mw_ctx *mw, uint32_t outgoing)
+{
+    g_present_queue[g_present_count++] = (uint8_t)outgoing;
+    mw->present_queued[outgoing] = 1U;
+    mw->present_submit_rgb565[outgoing] = mw->color_rgb565[outgoing];
+    mw->present_submit_frame[outgoing] = ++g_present_frame;
+    if (minigl_raster_feed_pending())
+        (void)minigl_raster_try_feed(RIX_DRV_FEED_SOURCE_SWAP);
+}
+
+/* After sealing the draw target, submit every ready frame in order. Only
+ * the card can retire pending into shown, and only our submits take away an
+ * owned buffer. A vblank between the query and the rebind can only add a
+ * spare, so an owned, unqueued slot stays writable. */
+static uint32_t zzapp_gl_select_mailbox_target(mw_ctx *mw, uint32_t outgoing)
+{
+    uint64_t waiting_since = 0U;
+    int waited = 0;
+
+    if (g_present_count == 2U)
+        return UINT32_MAX;
+    zzapp_gl_enqueue(mw, outgoing);
+    if (g_sync_present && !minigl_raster_drain())
+        return UINT32_MAX;
+    for (;;) {
+        uint32_t owned[2];
+        uint32_t i, j;
+        int presented;
+
+        do {
+            presented = zzapp_gl_present_pending(mw);
+        } while (presented > 0);
+        if (presented < 0 || zzapp_gl_mailbox_owned(&owned[0], &owned[1]) != AAR_OK)
+            return UINT32_MAX;
+        for (i = 0U; i < 2U; ++i) {
+            if (!owned[i])
+                continue;
+            for (j = 0U; j < 3U; ++j) {
+                if ((uintptr_t)mw->direct_color_buffers[j] == owned[i] &&
+                    !mw->present_queued[j]) {
+                    if (waited)
+                        mw_ctx_diag_add_wait(mw, 0U, 0U, 0U,
+                            (uint32_t)(minigl_platform_time_us() - waiting_since));
+                    return j;
+                }
+            }
+        }
+        /* Pending might latch before the GPU finishes, so a wait on just
+         * the GPU would stall unnecessarily. Poll both after each yield. */
+        if (zzapp_services_stop_requested())
+            return UINT32_MAX;
+        if (!waited) {
+            waiting_since = minigl_platform_time_us();
+            waited = 1;
+        } else if (minigl_platform_time_us() - waiting_since >= 3000000U) {
+            minigl_platform_log("[app] direct present target wait timed out");
+            return UINT32_MAX;
+        }
+        zzapp_host_yield_wait();
+    }
 }
 
 /* The host flip wait registers with the core-1 service pass, which wakes
@@ -1247,14 +1487,16 @@ static int zzapp_gl_wait_flip_idle(void)
 static int zzapp_gl_make_target_available(mw_ctx *mw)
 {
     while (g_present_count == 2U) {
+        uintptr_t oldest = zzapp_gl_target_address(mw, g_present_queue[0]);
+
         if (zzapp_gl_present_pending(mw))
             continue;
-        if (!minigl_raster_present_ready()) {
+        if (!minigl_raster_target_ready(oldest)) {
             int ok;
             uint64_t started = minigl_platform_time_us();
 
             minigl_profile_push(MGLP_SWAP_DRAIN);
-            ok = minigl_raster_prepare_present();
+            ok = minigl_raster_wait_target(oldest);
             minigl_profile_pop();
             mw_ctx_diag_add_wait(mw, 0U, 0U,
                                  (uint32_t)(minigl_platform_time_us() - started), 0U);
@@ -1287,16 +1529,17 @@ void zzapp_gl_swap(void)
     if (!g_bound)
         goto done;
     mw = amiberry_transport_inproc_ctx();
-    if (!mw)
+    if (!mw || mw->present_lost)
         goto done;
-    /* A completed older target is copied while the app was constructing this
-     * frame.  Do not wait when RasterIX or aar-run has not reached it yet. */
-    (void)zzapp_gl_present_pending(mw);
-    target_started = minigl_platform_time_us();
-    if (!zzapp_gl_make_target_available(mw))
-        goto done;
-    mw_ctx_diag_add_wait(mw, 0U, 0U, 0U,
-                         (uint32_t)(minigl_platform_time_us() - target_started));
+    if (!g_mailbox_direct) {
+        /* Copy has fixed rotation; make room before rebinding its target. */
+        (void)zzapp_gl_present_pending(mw);
+        target_started = minigl_platform_time_us();
+        if (!zzapp_gl_make_target_available(mw))
+            goto done;
+        mw_ctx_diag_add_wait(mw, 0U, 0U, 0U,
+                             (uint32_t)(minigl_platform_time_us() - target_started));
+    }
     outgoing = mw->state.target.back;
     guest = amiberry_context(mini_CurrentContext);
     if (!guest)
@@ -1309,15 +1552,14 @@ void zzapp_gl_swap(void)
                          !amiberry_flush(guest))) {
         goto done;
     }
+    if (g_mailbox_direct) {
+        /* MW_PRESENT queued and selected a target through the hook. */
+        minigl_profile_report();
+        goto done;
+    }
     if (outgoing >= 3U || g_present_count == 2U)
         goto done;
-    g_present_queue[g_present_count++] = (uint8_t)outgoing;
-    mw->present_queued[outgoing] = 1U;
-    mw->present_submit_rgb565[outgoing] = mw->color_rgb565[outgoing];
-    mw->present_submit_frame[outgoing] = ++g_present_frame;
-    /* Push the frame just sealed now rather than at the worker's next turn. */
-    if (minigl_raster_feed_pending())
-        (void)minigl_raster_try_feed(RIX_DRV_FEED_SOURCE_SWAP);
+    zzapp_gl_enqueue(mw, outgoing);
     if (g_zero_copy) {
         int ok;
         uint64_t started;
@@ -1328,7 +1570,7 @@ void zzapp_gl_swap(void)
          * for ownership safety. */
         started = minigl_platform_time_us();
         minigl_profile_push(MGLP_SWAP_DRAIN);
-        ok = minigl_raster_prepare_present();
+        ok = minigl_raster_wait_target(zzapp_gl_target_address(mw, outgoing));
         minigl_profile_pop();
         mw_ctx_diag_add_present_wait(mw, outgoing, 0U, 0U,
                                      (uint32_t)(minigl_platform_time_us() - started));

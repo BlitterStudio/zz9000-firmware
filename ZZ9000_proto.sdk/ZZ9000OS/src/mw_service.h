@@ -25,6 +25,9 @@ extern "C" {
  * the wire version because an older v9 peer must keep synchronous BLIT. */
 #define MW_CAP_ASYNC_PRESENT        (1U << 20)
 #define MW_CAP_DRAW_PACKED_INDEXED  (1U << 21)
+#define MW_CAP_DRAW_CACHE_INDEXED   (1U << 22)
+#define MW_CAP_DRAW_RESIDENT_INDEXED (1U << 24)
+#define MW_CAP_DRAW_RESIDENT_BOTH    (1U << 25)
 
 #define MW_DEFAULT_SLOT_CAPACITY_Z3 (256U * 1024U)
 #define MW_DEFAULT_SLOT_COUNT_Z3    2U
@@ -124,6 +127,8 @@ typedef struct ZZ9KMiniGLControlBlockV9 {
 typedef struct ZZ9KMiniGLStatusV9 {
     /* Bytes 0..63: Firmware Ownership */
     uint32_t generation;
+    /* With either indexed cache capability, error is the last ring
+     * rejection status and error_sequence_lo counts such rejections. */
     uint32_t error;
     uint32_t error_sequence_hi;
     uint32_t error_sequence_lo;
