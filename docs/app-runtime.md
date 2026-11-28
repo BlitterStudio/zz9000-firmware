@@ -282,12 +282,13 @@ when service work is due. This bounds audio-service delay at cooperative yield
 points to the current API segment plus one scheduler handoff; a body that does
 not yield remains subject to the API watchdog rather than a scheduler preemption.
 
-File and directory operations, `aar_file_request`, console read and backpressure,
-display open and flip, non-host audio open and close, `aar_msg_wait`, and sleep
-park the caller at the SVC handoff. `aar_gl_swap` parks through its flip.
+File and directory operations, `aar_file_request`, `aar_requester`, console
+read and backpressure, display open and flip, non-host audio open and close,
+`aar_msg_wait`, and sleep park the caller at the SVC handoff. `aar_gl_swap`
+parks through its flip.
 Completion wakes the record READY. File and directory I/O waits with a
 deadline wake TIMEOUT after 30 seconds and return `AAR_E_TIMEDOUT`. The
-requester has no deadline and parks only the app that called it. On a
+requesters have no deadline and park only the app that called them. On a
 latched stop (the client's `STOP` or its stop word), the core-1 service pass
 wakes every parked wait except core 0's bounded audio handoff. A waiter
 takes a completion that landed with the stop first. Otherwise, waiting
@@ -793,6 +794,19 @@ path. It does not open or create a file. A client without a requester returns
 policy (`AAR_E_ACCES`). An unanswered requester returns `AAR_E_IO` on stop;
 the late reply cannot write into app memory.
 
+`aar_requester` asks the Amiga client to show a native message dialog. It
+uses an appended API 0.6 slot with no group bit. The wrapper checks that
+the slot is present; a client without the request handler returns
+`AAR_E_NOSYS`. Pass UTF-8 for the optional title, message text, and button
+labels. The client treats the message and labels as literal text. See the
+[AAR app API](https://github.com/BlitterStudio/aar/blob/main/docs/aar-api.md)
+for the input limits. Before posting, the firmware rejects invalid lengths
+and button separators with `AAR_E_INVAL`. On `AAR_OK` the app gets the
+selected button's 1-based index. There is no implicit cancel button. On stop,
+the client closes an open dialog and the firmware ends an unanswered wait
+with `AAR_E_IO`. Anything other than a valid selection leaves the app's
+choice unchanged.
+
 **Shared buffers.** `aar_shared_alloc` takes flags 0 and returns a block from
 the host-visible heap, rounded to the 4096-byte granule, with at most 64 live
 blocks per app and the `shared_limit` described under `LOAD_BEGIN`. The
@@ -914,7 +928,7 @@ blocks of a claim are:
 | Block | Size | Allocated | Freed |
 | --- | --- | --- | --- |
 | pair | 16 KiB | `CLAIM` | `RELEASE` |
-| service | 48 KiB: 1 KiB scratch, 2 KiB palette (shadow and stage), 4 KiB console input, 8 KiB log, 32 KiB console output ring | first path, name, palette, console or log use | `RELEASE` |
+| service | 48 KiB: 1 KiB scratch, 2 KiB palette (shadow and stage), 4 KiB console input, 8 KiB log, 32 KiB console output ring | first scratch, palette, console or log use | `RELEASE` |
 | data | 8 KiB steps up to 256 KiB | first file read or write | `RELEASE` (a growth replaces it, but not while a request still names it, below) |
 | audio ring | `0x80 + frames * 4` bytes, rounded to 8 KiB | `AAR_OP_AUDIO_OPEN` | the audio close, once it is answered, and exit on the card route. On the AHI route the client maps the ring, so a close that was not posted, not answered or answered with an error, an exit without a close and a quarantined claim keep it until `RELEASE` |
 | load buffer | 72 KiB: 64 KiB staging, 4 KiB argv area, rounded | `LOAD_BEGIN` | once `START` has copied argv, or at the end of the claim |
@@ -928,8 +942,8 @@ bitmap and SDK buffer).
 A buffer a request names stays allocated and unchanged until the client has
 completed that request. The data block (`FILE_READ`, `FILE_WRITE`), the audio
 ring (`AUDIO_OPEN`; `AUDIO_CLOSE` also names it, because it tells the client to
-stop using it), the 1 KiB scratch area (every path) and the console-input room
-are such buffers. When the app gives a request up while it is still posted (a
+stop using it), the 1 KiB scratch area (paths and requester input), and the
+console-input room are such buffers. When the app gives up on a posted request (a
 timeout, a stop, a corrupt completion queue) its entry keeps the buffer held,
 with the request's id and op, until a completion with both arrives. Meanwhile
 nothing frees, replaces, reuses or rewrites the buffer (a read or write of any
@@ -953,6 +967,13 @@ nonzero, fits the capacity with its NUL, and matches the first NUL in the
 buffer before copying the path into the app. An invalid selection reply
 returns `AAR_E_IO`. Cancel returns `0`; a path that does not fit returns
 `AAR_E_NOSPC`. Cancel and errors leave the app's output buffer unchanged.
+
+`AAR_OP_REQUESTER` (`0x25`) names the claim's scratch area with no flags or
+argument words in use. `buf_len` is exactly the byte count of title, NUL,
+text, NUL, buttons, NUL. An empty title selects the client's default. The
+buffer is input only. A successful completion has result `AAR_OK` and
+`out[AAR_R_REQUESTER_CHOICE]` in the range 1 to the number of labels. A
+positive result or a success outside that range returns `AAR_E_IO`.
 
 Asynchronous file I/O has a separate request slot and uses the same data
 block. The ARM runtime posts one chunk of up to 256 KiB without parking.

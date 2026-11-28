@@ -23,8 +23,16 @@
 #define VENEER_BYTES 12U
 #define VENEER_PAGE_BYTES 4096U
 #define STRING_BYTES 512U
-_Static_assert(AAR_PATH_MAX + 1U < STRING_BYTES, "requester string limit fits SVC copies");
+_Static_assert(AAR_PATH_MAX + 1U <= STRING_BYTES, "path fits SVC string copy");
+_Static_assert(AAR_REQUESTER_TITLE_MAX + 1U <= STRING_BYTES &&
+               AAR_REQUESTER_TEXT_MAX + 1U <= STRING_BYTES &&
+               AAR_REQUESTER_BUTTONS_MAX + 1U <= STRING_BYTES,
+               "message requester fields fit SVC string copies");
 #define COPY_BYTES ((sizeof(aar_dirent) + 7U) & ~(size_t)7U)
+typedef union {
+    _Alignas(8) uint8_t bytes[COPY_BYTES];
+    char string[STRING_BYTES];
+} svc_copy_t;
 #define API_FIRST offsetof(aar_api, exit)
 #define GL_FIRST offsetof(aar_gl, Begin)
 #define API_SLOT(field) ((uint32_t)((offsetof(aar_api, field) - API_FIRST) / sizeof(void *)))
@@ -34,6 +42,7 @@ _Static_assert(AAR_PATH_MAX + 1U < STRING_BYTES, "requester string limit fits SV
 /* One more veneer than the table has slots: aar_ext_zz9000.gl_bind_flags. */
 #define API_VENEERS (API_COUNT + 1U)
 _Static_assert(API_COUNT == AAR_API_SLOT_COUNT, "aar_api slot count");
+_Static_assert(API_SLOT(requester) == 83U, "message requester ABI slot");
 _Static_assert(GL_COUNT == AAR_GL_SLOT_COUNT, "aar_gl slot count");
 _Static_assert(ZZAPP_SVC_EXT_GL_BIND_FLAGS == API_COUNT, "ext veneer number");
 _Static_assert(API_VENEERS <= ZZAPP_SVC_GL_FIRST, "api veneers below gl");
@@ -815,8 +824,8 @@ static inline void gl_telemetry_frontend_end(svc_state_t *st)
 #define OUT_ARG64_OPT(a, n) OPT(a, ZZAPP_SVC_POINTER_OUT, ZZAPP_SVC_LENGTH_ARGUMENT64, n, 1U, 0U)
 #define IN_COUNT_OPT(a, n, e) OPT(a, ZZAPP_SVC_POINTER_IN, ZZAPP_SVC_LENGTH_COUNT, n, e, 0U)
 #define OUT_COUNT_OPT(a, n, e) OPT(a, ZZAPP_SVC_POINTER_OUT, ZZAPP_SVC_LENGTH_COUNT, n, e, 0U)
-#define IN_STRING_LIMIT_OPT(a, n) OPT(a, ZZAPP_SVC_POINTER_IN, ZZAPP_SVC_LENGTH_STRING, 0U, n, 1U)
-#define IN_STRING_OPT(a) IN_STRING_LIMIT_OPT(a, STRING_BYTES)
+#define IN_STRING_LIMIT_OPT(a, n) OPT(a, ZZAPP_SVC_POINTER_IN, ZZAPP_SVC_LENGTH_BOUNDED_STRING, 0U, n, 1U)
+#define IN_STRING_OPT(a) OPT(a, ZZAPP_SVC_POINTER_IN, ZZAPP_SVC_LENGTH_STRING, 0U, STRING_BYTES, 1U)
 #define OUT_PTR(a) OUT_OPTIONAL(a, sizeof(void *), 1U)
 #define OUT_U32(a) OUT_OPTIONAL(a, 4U, 1U)
 #define OUT_U64(a) OUT_OPTIONAL(a, 8U, 1U)
@@ -930,6 +939,10 @@ static const zzapp_svc_descriptor_t api_descriptors[API_VENEERS] = {
     [API_SLOT(file_request)] = D(5, ZZAPP_SVC_RETURN_INT,
         IN_STRING_LIMIT_OPT(1, AAR_PATH_MAX + 1U),
         IN_STRING_LIMIT_OPT(2, AAR_PATH_MAX + 1U), OUT_ARG_OPT(3, 4)),
+    [API_SLOT(requester)] = { 4, 0U, ZZAPP_SVC_RETURN_INT, 0U, 0U,
+        { IN_STRING_LIMIT_OPT(0, AAR_REQUESTER_TITLE_MAX + 1U),
+          IN_STRING_LIMIT_OPT(1, AAR_REQUESTER_TEXT_MAX + 1U),
+          IN_STRING_LIMIT_OPT(2, AAR_REQUESTER_BUTTONS_MAX + 1U), OUT_U32(3) } },
     /* aar_ext_zz9000.gl_bind_flags: not a table slot, the next veneer */
     [ZZAPP_SVC_EXT_GL_BIND_FLAGS] = D(2, ZZAPP_SVC_RETURN_POINTER, N, N, N)
 };
@@ -1679,9 +1692,7 @@ static int copy_string(const zzapp_as_t *as, uint32_t address, uint32_t bytes,
         destination[i] = *(const char *)(uintptr_t)(address + i);
         if (!destination[i]) return AAR_OK;
     }
-    /* The generic SVC limit reports a pointer fault as before. A shorter
-     * API limit instead rejects an overlong string as an invalid argument. */
-    return bytes == STRING_BYTES ? AAR_E_FAULT : AAR_E_INVAL;
+    return AAR_E_INVAL;
 }
 typedef uint32_t (*word_call_t)(uint32_t, uint32_t, uint32_t, uint32_t,
                                 uint32_t, uint32_t, uint32_t, uint32_t,
@@ -1710,12 +1721,13 @@ static int entry_at(const void *table, uint32_t size, uint32_t first, uint32_t s
  * with. Returns AAR_OK, AAR_E_FAULT or AAR_E_INVAL. */
 static int prepare_pointers(const svc_state_t *st, const zzapp_as_t *as,
                             const zzapp_svc_descriptor_t *descriptor,
-                            uint32_t args[SVC_MAX_WORDS], uint8_t copies[3][COPY_BYTES],
-                            char strings[3][STRING_BYTES], uint32_t originals[3],
-                            uint32_t lengths[3], uint32_t tails[3])
+                            uint32_t args[SVC_MAX_WORDS], svc_copy_t copies[ZZAPP_SVC_POINTERS],
+                            uint32_t originals[ZZAPP_SVC_POINTERS],
+                            uint32_t lengths[ZZAPP_SVC_POINTERS],
+                            uint32_t tails[ZZAPP_SVC_POINTERS])
 {
     uint32_t i;
-    for (i = 0U; i < 3U; ++i) {
+    for (i = 0U; i < ZZAPP_SVC_POINTERS; ++i) {
         const zzapp_svc_pointer_t *pointer = &descriptor->pointers[i];
         uint32_t bytes = 0U;
         uint32_t tail = 0U;
@@ -1730,10 +1742,12 @@ static int prepare_pointers(const svc_state_t *st, const zzapp_as_t *as,
             continue;
         address = args[pointer->argument];
         write = pointer->direction != ZZAPP_SVC_POINTER_IN;
-        if (pointer->length == ZZAPP_SVC_LENGTH_STRING) {
-            rc = copy_string(as, address, pointer->element_bytes, strings[i]);
-            if (rc != AAR_OK) return rc;
-            args[pointer->argument] = (uint32_t)(uintptr_t)strings[i];
+        if (pointer->length == ZZAPP_SVC_LENGTH_STRING ||
+            pointer->length == ZZAPP_SVC_LENGTH_BOUNDED_STRING) {
+            rc = copy_string(as, address, pointer->element_bytes, copies[i].string);
+            if (rc != AAR_OK)
+                return pointer->length == ZZAPP_SVC_LENGTH_STRING ? AAR_E_FAULT : rc;
+            args[pointer->argument] = (uint32_t)(uintptr_t)copies[i].string;
             continue;
         }
         if (pointer->length == ZZAPP_SVC_LENGTH_SIZE_FIELD) {
@@ -1751,10 +1765,10 @@ static int prepare_pointers(const svc_state_t *st, const zzapp_as_t *as,
         }
         if (pointer->copy) {
             if (bytes > COPY_BYTES) return AAR_E_FAULT;
-            memset(copies[i], 0, COPY_BYTES);
+            memset(copies[i].bytes, 0, COPY_BYTES);
             if (pointer->direction != ZZAPP_SVC_POINTER_OUT)
-                memcpy(copies[i], (const void *)(uintptr_t)address, bytes);
-            args[pointer->argument] = (uint32_t)(uintptr_t)copies[i];
+                memcpy(copies[i].bytes, (const void *)(uintptr_t)address, bytes);
+            args[pointer->argument] = (uint32_t)(uintptr_t)copies[i].bytes;
         }
         lengths[i] = bytes;
         tails[i] = tail;
@@ -1762,9 +1776,10 @@ static int prepare_pointers(const svc_state_t *st, const zzapp_as_t *as,
     return AAR_OK;
 }
 static void finish_pointers(const zzapp_svc_descriptor_t *descriptor,
-                            uint8_t copies[3][COPY_BYTES],
-                            const uint32_t originals[3],
-                            const uint32_t lengths[3], const uint32_t tails[3],
+                            svc_copy_t copies[ZZAPP_SVC_POINTERS],
+                            const uint32_t originals[ZZAPP_SVC_POINTERS],
+                            const uint32_t lengths[ZZAPP_SVC_POINTERS],
+                            const uint32_t tails[ZZAPP_SVC_POINTERS],
                             uint32_t result)
 {
     uint32_t i;
@@ -1774,12 +1789,12 @@ static void finish_pointers(const zzapp_svc_descriptor_t *descriptor,
         (!(descriptor->flags & ZZAPP_SVC_COPY_OUT_ON_NOSPC) ||
          result != (uint32_t)AAR_E_NOSPC))
         return;
-    for (i = 0U; i < 3U; ++i) {
+    for (i = 0U; i < ZZAPP_SVC_POINTERS; ++i) {
         const zzapp_svc_pointer_t *pointer = &descriptor->pointers[i];
         if (!pointer->element_bytes || !pointer->copy ||
             (pointer->optional && !originals[i]) ||
             pointer->direction == ZZAPP_SVC_POINTER_IN) continue;
-        memcpy((void *)(uintptr_t)originals[i], copies[i], lengths[i]);
+        memcpy((void *)(uintptr_t)originals[i], copies[i].bytes, lengths[i]);
         if (tails[i])
             memset((uint8_t *)(uintptr_t)originals[i] + lengths[i], 0, tails[i]);
     }
@@ -1806,7 +1821,7 @@ static int check_pointer_image(const zzapp_as_t *as, const aar_pointer *image)
  * store would land in a frame that is gone. */
 static int heap_shrink_out_overlaps(const zzapp_proc_t *proc,
                                     const uint32_t args[SVC_MAX_WORDS],
-                                    const uint32_t originals[3])
+                                    const uint32_t originals[ZZAPP_SVC_POINTERS])
 {
     uint64_t start;
     uint64_t end;
@@ -2048,7 +2063,7 @@ static uint8_t gl_fast_classify(uint32_t number)
         number == GL_SLOT(UnlockArrays) || number == GL_SLOT(DrawArrays) ||
         number == GL_SLOT(DrawElements))
         return 0U;
-    for (i = 0U; i < 3U; ++i)
+    for (i = 0U; i < ZZAPP_SVC_POINTERS; ++i)
         if (descriptor->pointers[i].element_bytes)
             return 0U;
     if (descriptor->arguments > SVC_MAX_WORDS ||
@@ -2255,11 +2270,10 @@ static void zzapp_svc_dispatch_slow(const aar_api *api, zzapp_proc_t *proc,
     const zzapp_svc_descriptor_t *descriptor;
     uint32_t result = 0U;
     uint32_t args[SVC_MAX_WORDS] = { 0U };
-    _Alignas(8) uint8_t copies[3][COPY_BYTES];
-    char strings[3][STRING_BYTES];
-    uint32_t originals[3] = { 0U };
-    uint32_t lengths[3] = { 0U };
-    uint32_t tails[3] = { 0U };
+    svc_copy_t copies[ZZAPP_SVC_POINTERS];
+    uint32_t originals[ZZAPP_SVC_POINTERS] = { 0U };
+    uint32_t lengths[ZZAPP_SVC_POINTERS] = { 0U };
+    uint32_t tails[ZZAPP_SVC_POINTERS] = { 0U };
     int gl;
     int status;
 
@@ -2285,7 +2299,7 @@ static void zzapp_svc_dispatch_slow(const aar_api *api, zzapp_proc_t *proc,
         args[2] = 0U;
     if (status == AAR_OK)
         status = prepare_pointers(st, &proc->as, descriptor, args, copies,
-                                  strings, originals, lengths, tails);
+                                  originals, lengths, tails);
     if (status != AAR_OK) {
         if (gl) {
             gl_telemetry_pointer_failure(st);
@@ -2322,7 +2336,7 @@ static void zzapp_svc_dispatch_slow(const aar_api *api, zzapp_proc_t *proc,
     }
     if (!gl && number == API_SLOT(image_open) && originals[0]) {
         const aar_image_params *open =
-            (const aar_image_params *)(const void *)copies[0];
+            (const aar_image_params *)(const void *)copies[0].bytes;
 
         if (zzapp_svc_check_user(&proc->as, (uint32_t)(uintptr_t)open->tile,
                                  open->tile_bytes, 1) != AAR_OK) {
@@ -2333,7 +2347,7 @@ static void zzapp_svc_dispatch_slow(const aar_api *api, zzapp_proc_t *proc,
     if (!gl && number == API_SLOT(display_pointer) &&
         args[1] == AAR_POINTER_CUSTOM && originals[0]) {
         status = check_pointer_image(&proc->as,
-            (const aar_pointer *)(const void *)copies[0]);
+            (const aar_pointer *)(const void *)copies[0].bytes);
         if (status != AAR_OK) {
             frame->r[0] = (uint32_t)status;
             return;

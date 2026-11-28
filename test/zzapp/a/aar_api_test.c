@@ -609,7 +609,8 @@ static void expect_group_slots(const aar_api *t, uint32_t groups)
     GCHECK(t->exit && t->yield && t->should_stop && t->time_us &&
            t->sleep_us && t->info && t->heap_range && t->shared_alloc &&
            t->log && t->file_open && t->console_write && t->event_poll &&
-           t->msg_send && t->ext && t->map_file && t->unmap_file);
+           t->msg_send && t->ext && t->map_file && t->unmap_file &&
+           t->requester);
 }
 
 static void test_undeclared_group_slots(void)
