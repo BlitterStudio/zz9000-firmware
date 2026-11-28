@@ -17,8 +17,11 @@
 
 // Direct-mapped texture cache which interfaces with the AXI memory system.
 // This cache is read only. It has no write back policy implemented.
+// A request reads up to two texels (slots A and B) from the cache and returns
+// them in one transfer. Slots which are not used (s_tc_slot_valid) return
+// nothing; a request without any slot only passes through the cache.
 // Pipelined: yes
-// Depth: 1
+// Depth: 3
 module TextureCacheDirectMapped #(
     parameter TEXEL_WIDTH = 16,
 
@@ -40,11 +43,12 @@ module TextureCacheDirectMapped #(
     input wire                              invalidate,
     input wire                              enable,
 
-    input wire [ADDR_WIDTH - 1 : 0]         s_tc_addr,
+    input wire [ 1 : 0]                     s_tc_slot_valid,    // Slots which read a texel { B, A }
+    input wire [2 * ADDR_WIDTH - 1 : 0]     s_tc_addr,          // Byte address of slot { B, A }
     input wire                              s_tc_valid,
     output wire                             s_tc_ready,
 
-    output wire [TEXEL_WIDTH - 1 : 0]       m_tc_texel,
+    output wire [2 * TEXEL_WIDTH - 1 : 0]   m_tc_texel,         // { slot B, slot A }
     output wire                             m_tc_valid,
     input wire                              m_tc_ready,
 
@@ -66,28 +70,32 @@ module TextureCacheDirectMapped #(
     input wire                              m_axi_rvalid,
     output wire                             m_axi_rready
 );
-    localparam COMMAND_WIDTH = 1 + ADDR_WIDTH;
+    localparam COMMAND_WIDTH = 1 + 2 + 1 + (2 * ADDR_WIDTH);
     localparam AXI_R_WIDTH = ID_WIDTH + DATA_WIDTH + 2 + 1;
 
-    wire                        controllerValid;
-    wire                        controllerReady;
-    wire                        controllerCmd;
-    wire [ADDR_WIDTH - 1 : 0]   controllerAddr;
+    wire                            controllerValid;
+    wire                            controllerReady;
+    wire                            controllerCmd;
+    wire [ 1 : 0]                   controllerRead;
+    wire                            controllerEmit;
+    wire [2 * ADDR_WIDTH - 1 : 0]   controllerAddr;
 
-    wire                        contextSlaveReady;
-    wire                        contextMasterReady;
+    wire                            contextSlaveReady;
+    wire                            contextMasterReady;
 
-    wire                        commandFifoFull;
-    wire                        commandFifoEmpty;
-    wire                        commandFifoCmd;
-    wire [ADDR_WIDTH - 1 : 0]   commandFifoAddr;
+    wire                            commandFifoFull;
+    wire                            commandFifoEmpty;
+    wire                            commandFifoCmd;
+    wire [ 1 : 0]                   commandFifoRead;
+    wire                            commandFifoEmit;
+    wire [2 * ADDR_WIDTH - 1 : 0]   commandFifoAddr;
 
-    wire                        readFifoFull;
-    wire                        readFifoEmpty;
-    wire [ID_WIDTH - 1 : 0]     readFifoId;
-    wire [DATA_WIDTH - 1 : 0]   readFifoData;
-    wire [1 : 0]                readFifoResponse;
-    wire                        readFifoLast;
+    wire                            readFifoFull;
+    wire                            readFifoEmpty;
+    wire [ID_WIDTH - 1 : 0]         readFifoId;
+    wire [DATA_WIDTH - 1 : 0]       readFifoData;
+    wire [1 : 0]                    readFifoResponse;
+    wire                            readFifoLast;
 
     assign m_axi_rready = AXI_R_FIFO_DEPTH_POW2 == 0 ? contextMasterReady : !readFifoFull;
 
@@ -102,12 +110,15 @@ module TextureCacheDirectMapped #(
         .resetn(resetn),
         .invalidate(invalidate),
         .enable(enable),
+        .s_tc_slot_valid(s_tc_slot_valid),
         .s_tc_addr(s_tc_addr),
         .s_tc_valid(s_tc_valid),
         .s_tc_ready(s_tc_ready),
         .m_tc_valid(controllerValid),
         .m_tc_ready(controllerReady),
         .m_tc_cmd(controllerCmd),
+        .m_tc_read(controllerRead),
+        .m_tc_emit(controllerEmit),
         .m_tc_addr(controllerAddr),
         .m_axi_arid(m_axi_arid),
         .m_axi_araddr(m_axi_araddr),
@@ -135,6 +146,8 @@ module TextureCacheDirectMapped #(
         .s_tc_valid(!commandFifoEmpty),
         .s_tc_ready(contextSlaveReady),
         .s_tc_cmd(commandFifoCmd),
+        .s_tc_read(commandFifoRead),
+        .s_tc_emit(commandFifoEmit),
         .s_tc_addr(commandFifoAddr),
         .m_tc_texel(m_tc_texel),
         .m_tc_valid(m_tc_valid),
@@ -153,6 +166,8 @@ module TextureCacheDirectMapped #(
         if (COMMAND_FIFO_DEPTH_POW2 == 0)
         begin
             assign commandFifoCmd = controllerCmd;
+            assign commandFifoRead = controllerRead;
+            assign commandFifoEmit = controllerEmit;
             assign commandFifoAddr = controllerAddr;
             assign commandFifoEmpty = !controllerValid;
             assign commandFifoFull = 1'b0;
@@ -171,6 +186,8 @@ module TextureCacheDirectMapped #(
                 .i_wr(controllerValid && controllerReady),
                 .i_data({ 
                     controllerAddr,
+                    controllerEmit,
+                    controllerRead,
                     controllerCmd
                 }),
                 .o_full(commandFifoFull),
@@ -178,6 +195,8 @@ module TextureCacheDirectMapped #(
                 .i_rd(!commandFifoEmpty && contextSlaveReady),
                 .o_data({ 
                     commandFifoAddr,
+                    commandFifoEmit,
+                    commandFifoRead,
                     commandFifoCmd
                 }),
                 .o_empty(commandFifoEmpty)

@@ -15,49 +15,65 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
-// Texture reader context which manages the texture texel cache and handles read requests.
-// Counterpart is the TextureReaderController which manages the cache.
+// Texture reader context which holds the four texel lanes of the current fragment.
+// Counterpart is the TextureReaderController which manages the lanes.
+// Every command updates all lanes at once: a lane keeps its texel, takes the
+// texel of another lane or takes one of the two texels which arrive from the
+// cache with the command (see TextureReaderController for the lane select).
+// The lanes are also the output registers. They only change while no sample
+// is waiting for the consumer.
 // Pipelined: yes
 // Depth: 1
 module TextureReaderContext #(
     parameter TEXEL_WIDTH = 16
 )
 (
-    input  wire                         aclk,
-    input  wire                         resetn,
+    input  wire                             aclk,
+    input  wire                             resetn,
 
     // Interface to the TextureReaderController
-    input  wire [ 1 : 0]                s_trc_texel_pos,
-    input  wire [TEXEL_WIDTH - 1 : 0]   s_trc_texel,
-    input  wire                         s_trc_cmd, // 1 = store and sample, 0 = store only
-    input  wire                         s_trc_valid,
-    output reg                          s_trc_ready,
+    input  wire [11 : 0]                    s_trc_lane_sel,
+    input  wire [2 * TEXEL_WIDTH - 1 : 0]   s_trc_texel,    // { slot B, slot A }
+    input  wire                             s_trc_sample,   // 1 = emit the lanes
+    input  wire                             s_trc_valid,
+    output reg                              s_trc_ready,
     
     // Texture Read
-    output reg  [TEXEL_WIDTH - 1 : 0]   m_tr_texel_00,
-    output reg  [TEXEL_WIDTH - 1 : 0]   m_tr_texel_01,
-    output reg  [TEXEL_WIDTH - 1 : 0]   m_tr_texel_10,
-    output reg  [TEXEL_WIDTH - 1 : 0]   m_tr_texel_11,
-    output reg                          m_tr_valid,
-    input  wire                         m_tr_ready
+    output reg  [TEXEL_WIDTH - 1 : 0]       m_tr_texel_00,
+    output reg  [TEXEL_WIDTH - 1 : 0]       m_tr_texel_01,
+    output reg  [TEXEL_WIDTH - 1 : 0]       m_tr_texel_10,
+    output reg  [TEXEL_WIDTH - 1 : 0]       m_tr_texel_11,
+    output reg                              m_tr_valid,
+    input  wire                             m_tr_ready
 );
-    localparam CMD_STORE_AND_SAMPLE = 1;
-    localparam CMD_STORE_ONLY       = 0;
+    reg                             rSkidValid;
+    reg  [11 : 0]                   rSkidLaneSel;
+    reg  [2 * TEXEL_WIDTH - 1 : 0]  rSkidTexel;
+    reg                             rSkidSample;
 
-    reg  [TEXEL_WIDTH - 1 : 0] rTexel00;
-    reg  [TEXEL_WIDTH - 1 : 0] rTexel01;
-    reg  [TEXEL_WIDTH - 1 : 0] rTexel10;
-    reg  [TEXEL_WIDTH - 1 : 0] rTexel11;
+    wire [11 : 0]                   wLaneSel = rSkidValid ? rSkidLaneSel : s_trc_lane_sel;
+    wire [2 * TEXEL_WIDTH - 1 : 0]  wTexel   = rSkidValid ? rSkidTexel   : s_trc_texel;
+    wire                            wSample  = rSkidValid ? rSkidSample  : s_trc_sample;
+    wire                            wValid   = rSkidValid ? 1'b1         : s_trc_valid;
 
-    reg                        rSkidValid;
-    reg  [ 1 : 0]              rSkidTexelPos;
-    reg  [TEXEL_WIDTH - 1 : 0] rSkidTexel;
-    reg                        rSkidCmd;
-
-    wire [ 1 : 0]              wTexelPos = rSkidValid ? rSkidTexelPos : s_trc_texel_pos;
-    wire [TEXEL_WIDTH - 1 : 0] wTexel    = rSkidValid ? rSkidTexel    : s_trc_texel;
-    wire                       wCmd      = rSkidValid ? rSkidCmd      : s_trc_cmd;
-    wire                       wValid    = rSkidValid ? 1'b1          : s_trc_valid;
+    function [TEXEL_WIDTH - 1 : 0] NextLane;
+        input [ 2 : 0]                  select;
+        input [TEXEL_WIDTH - 1 : 0]     lane00;
+        input [TEXEL_WIDTH - 1 : 0]     lane01;
+        input [TEXEL_WIDTH - 1 : 0]     lane10;
+        input [TEXEL_WIDTH - 1 : 0]     lane11;
+        input [2 * TEXEL_WIDTH - 1 : 0] loaded;
+        begin
+            case (select)
+                3'b000:  NextLane = lane00;
+                3'b001:  NextLane = lane01;
+                3'b010:  NextLane = lane10;
+                3'b011:  NextLane = lane11;
+                3'b100:  NextLane = loaded[0 +: TEXEL_WIDTH];
+                default: NextLane = loaded[TEXEL_WIDTH +: TEXEL_WIDTH];
+            endcase
+        end
+    endfunction
 
     always @(posedge aclk)
     begin
@@ -72,10 +88,6 @@ module TextureReaderContext #(
              * neighbours cannot inject an unknown into downstream texenv
              * pipeline state before a linear request has populated them.
              */
-            rTexel00 <= { TEXEL_WIDTH { 1'b0 } };
-            rTexel01 <= { TEXEL_WIDTH { 1'b0 } };
-            rTexel10 <= { TEXEL_WIDTH { 1'b0 } };
-            rTexel11 <= { TEXEL_WIDTH { 1'b0 } };
             m_tr_texel_00 <= { TEXEL_WIDTH { 1'b0 } };
             m_tr_texel_01 <= { TEXEL_WIDTH { 1'b0 } };
             m_tr_texel_10 <= { TEXEL_WIDTH { 1'b0 } };
@@ -85,27 +97,13 @@ module TextureReaderContext #(
         begin
             if (!m_tr_valid || (m_tr_valid && m_tr_ready))
             begin
-                if (s_trc_valid || rSkidValid)
+                if (wValid)
                 begin
-                    case (wTexelPos)
-                        2'b00: rTexel00 = wTexel;
-                        2'b01: rTexel01 = wTexel;
-                        2'b10: rTexel10 = wTexel;
-                        2'b11: rTexel11 = wTexel;
-                    endcase
-
-                    if (wCmd == CMD_STORE_AND_SAMPLE)
-                    begin
-                        m_tr_texel_00 <= rTexel00;
-                        m_tr_texel_01 <= rTexel01;
-                        m_tr_texel_10 <= rTexel10;
-                        m_tr_texel_11 <= rTexel11;
-                        m_tr_valid   <= 1'b1;
-                    end
-                    else
-                    begin
-                        m_tr_valid <= 1'b0;
-                    end
+                    m_tr_texel_00 <= NextLane(wLaneSel[0 +: 3], m_tr_texel_00, m_tr_texel_01, m_tr_texel_10, m_tr_texel_11, wTexel);
+                    m_tr_texel_01 <= NextLane(wLaneSel[3 +: 3], m_tr_texel_00, m_tr_texel_01, m_tr_texel_10, m_tr_texel_11, wTexel);
+                    m_tr_texel_10 <= NextLane(wLaneSel[6 +: 3], m_tr_texel_00, m_tr_texel_01, m_tr_texel_10, m_tr_texel_11, wTexel);
+                    m_tr_texel_11 <= NextLane(wLaneSel[9 +: 3], m_tr_texel_00, m_tr_texel_01, m_tr_texel_10, m_tr_texel_11, wTexel);
+                    m_tr_valid <= wSample;
 
                     if (rSkidValid)
                     begin
@@ -122,11 +120,11 @@ module TextureReaderContext #(
             begin
                 if (!rSkidValid)
                 begin
-                    rSkidTexelPos <= s_trc_texel_pos;
+                    rSkidLaneSel  <= s_trc_lane_sel;
                     rSkidTexel    <= s_trc_texel;
-                    rSkidCmd      <= s_trc_cmd;
+                    rSkidSample   <= s_trc_sample;
                     rSkidValid    <= s_trc_valid;
-                    s_trc_ready    <= !s_trc_valid;
+                    s_trc_ready   <= !s_trc_valid;
                 end
             end
         end

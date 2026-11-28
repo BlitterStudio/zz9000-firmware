@@ -314,3 +314,47 @@ right shift as having no discarded rounding bit rather than indexing bit `-1`;
 this occurs when converting normalized colour values in the `[0.5, 1.0)`
 range. The full-frame capture mode rejects any framebuffer unknowns, so all
 three regressions are covered by the real service streams.
+
+## Texture reader throughput scenes
+
+`rix_xsim_gen` also writes ten `tp-*` scenes (textures at pages 70..341 of
+`textures.hex`). Each draws a 608x448 textured area inside a clear margin, with
+TMU0 `REPLACE`, so the frame shows exactly which texel reached the filter. They
+have no analytic reference: `refs/frames.sha256` holds the SHA-256 of every
+frame of the RTL before the texture reader lane forwarding (also for the
+older scenes), and `run_tp_scenes.py --expect refs/frames.sha256` requires
+byte-identical frames.
+
+| Scene | Workload |
+| --- | --- |
+| `tp-lin1` | 256x256 GL_LINEAR, 1 texel per pixel, repeat |
+| `tp-lin-half` | same, 0.5 texel per pixel |
+| `tp-mag16` | same, 16x magnified |
+| `tp-nearest` | same as `tp-lin1`, GL_NEAREST |
+| `tp-mip-min` | mipmapped 256x256, 2 and 1.5 texels per pixel (level 1) |
+| `tp-mip-persp` | mipmapped perspective floor, LOD 2 at the top to 0 at the bottom |
+| `tp-alt` | eight bands alternating two textures (page-table write, cache invalidation per band) |
+| `tp-rot30` | `tp-lin1` rotated by 30 degrees |
+| `tp-rot-mix` | four quadrants: 45/135/200/300 degrees, scales 0.5..1.3, one mirrored, two textures plus the mip texture |
+| `tp-rand` | 28 random triangles: random texture (plain, mipmapped, 1x1, 2x2, 4x256, 256x4, 64x64, 32x128), nearest/linear, clamp/repeat, rotation, scale, mirroring or random per-vertex coordinates |
+
+The testbench prints `TEXPERF scene frags first last span stall fills texels`:
+fragments accepted by the TMU0 reader, first accepted and last returned cycle,
+cycles a fragment waited for the reader, line fills on the TMU0 AXI port.
+`run_tp_scenes.py --root ROOT --scenes SCENES --out OUT` compiles once
+and runs scenes in parallel;
+`compare_tp_frames.py before.json after.json` prints frame identity and cost.
+
+To check RGB565 byte order on the RasterIX colour AXI port, run the same
+scenes twice: `--tag off`, then `--tag on --env COLOR_BYTE_SWAP=1`. Use
+`--expect refs/frames.sha256` on both runs. Include `ef-stress`, `ef-blendbe`,
+`ef-logicbe` and `ef-mask` to exercise destination reads and masked writes.
+Run `python check_byteswap.py OUT/summary-off.json OUT/summary-on.json`.
+It checks the logical frame, the stored byte order and the depth buffer
+for every scene.
+
+`tb_texture_reader.sv` (`run_tr_unit.py --root ROOT --out OUT [--cache N] [--perf]`)
+tests `TextureReader` alone against a scoreboard: traversal patterns, random
+gaps, back pressure, AXI latency, page-table rewrites with new page
+permutations, cache sizes from 256 bytes to 8 KiB. `--perf` prints cycles per
+fragment for ideal memory.
