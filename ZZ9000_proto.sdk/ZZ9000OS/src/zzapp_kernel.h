@@ -223,7 +223,7 @@ typedef struct {
 	uint8_t next_kind;	/* cause of the next park, from the services */
 	uint8_t reserved;
 	uint32_t picks;		/* times a dispatch gave the app the core */
-	uint64_t since_us;	/* start of the park in progress */
+	uint64_t since_us;	/* start of the run or park in progress */
 	uint64_t snap_sys_us;	/* kernel totals when the wait began */
 	uint64_t snap_app_us;
 	uint64_t run_us;
@@ -330,6 +330,7 @@ typedef struct {
 	 * slice_started_us (the idle core is neither). */
 	uint64_t acct_sys_us;
 	uint64_t acct_app_us;
+	uint32_t acct_at_boundary; /* use committed totals during dispatch */
 	zzapp_pick_reason_t pick_reason;
 	uint32_t defer_pending;
 	/* The app that held the core last, whatever the system thread did since. */

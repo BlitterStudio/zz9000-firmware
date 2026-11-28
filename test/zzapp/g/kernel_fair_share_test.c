@@ -15,10 +15,14 @@
 #include "zzapp_rec.h"
 
 static uint64_t clock_us;
+static uint64_t clock_read_step_us;
 
 uint64_t zzapp_kernel_now_us(void)
 {
-	return clock_us;
+	uint64_t now = clock_us;
+
+	clock_us += clock_read_step_us;
+	return now;
 }
 
 static int failures;
@@ -1290,6 +1294,89 @@ static void test_sched_counters_split_parks_by_cause(void)
 	CHECK(sched_total(&a) == clock_us);
 }
 
+/* Timeout wakes found by a dispatch have the same timestamp as the pick.
+ * Let time pass between clock reads inside the switch, as on the card. */
+static void test_sched_counters_timestamp_timeout_wakes(void)
+{
+	static const uint32_t pair[] = { 1U, 1U };
+	uint64_t run_us = 0U, park_us = 0U, peer_us = 0U;
+	unsigned i;
+
+	sim_start(&g_sim, pair, 2U);
+	for (i = 1U; i <= 8U; i++) {
+		zzapp_sched_acct_t a, b;
+		uint64_t start_us = g_sim.kernel.slice_started_us;
+		uint64_t park_start_us, wake_us;
+
+		sim_run_for(&g_sim, 137U);
+		park_start_us = clock_us;
+		CHECK(zzapp_kernel_sleep(&g_sim.kernel, 0U,
+					 g_sim.kernel.now + 2U) == 0);
+		sim_step(&g_sim, 11U, ZZAPP_KERNEL_DISPATCH_VOLUNTARY);
+		CHECK(zzapp_kernel_current_thread() == 1);
+		CHECK(THREAD(g_sim.kernel, 0U).state == ZZAPP_THREAD_SLEEPING);
+		wake_us = clock_us + 2000U;
+		clock_read_step_us = 7U;
+		sim_step(&g_sim, 2000U, ZZAPP_KERNEL_DISPATCH_TICK);
+		clock_read_step_us = 0U;
+		CHECK(zzapp_kernel_current_thread() == 0);
+		CHECK(THREAD(g_sim.kernel, 0U).wake_reason == ZZAPP_WAKE_TIMEOUT);
+
+		run_us += park_start_us - start_us;
+		park_us += wake_us - park_start_us;
+		peer_us += 2000U;
+		a = sched_of(&g_sim, 0U);
+		CHECK(a.run_us == run_us + clock_us - wake_us);
+		CHECK(a.wait_app_us == 0U && a.wait_sys_us == 0U);
+		CHECK(a.park_us[ZZAPP_KERNEL_PARK_SLEEP] == park_us);
+		CHECK(a.park_n[ZZAPP_KERNEL_PARK_SLEEP] == i && a.wakes == i);
+		CHECK(sched_total(&a) == clock_us);
+		b = sched_of(&g_sim, 1U);
+		CHECK(b.run_us == peer_us);
+		CHECK(b.wait_app_us == clock_us - peer_us && b.wait_sys_us == 0U);
+		CHECK(sched_total(&b) == clock_us);
+	}
+}
+
+/* A stop between dispatches closes the live wait, park or run, and later
+ * dispatches must not add time to the stopped app. */
+static void test_sched_counters_close_at_stop(void)
+{
+	static const uint32_t pair[] = { 1U, 1U };
+	zzapp_sched_acct_t a;
+
+	sim_start(&g_sim, pair, 2U);
+	sim_run_for(&g_sim, 700U);
+	CHECK(zzapp_kernel_block(&g_sim.kernel, 1U) == 0);
+	sim_run_for(&g_sim, 300U);
+	CHECK(zzapp_kernel_wake(&g_sim.kernel, 1U, ZZAPP_WAKE_READY) == 0);
+	sim_run_for(&g_sim, 200U);
+	zzapp_kernel_stop_app(&g_sim.kernel, 1U);
+	a = sched_of(&g_sim, 1U);
+	CHECK(a.wait_app_us == 900U && a.park_us[0] == 300U);
+	CHECK(sched_total(&a) == 1200U);
+
+	CHECK(zzapp_kernel_block(&g_sim.kernel, 0U) == 0);
+	sim_run_for(&g_sim, 100U);
+	CHECK(zzapp_kernel_wake(&g_sim.kernel, 0U, ZZAPP_WAKE_READY) == 0);
+	sim_run_for(&g_sim, 300U);
+	zzapp_kernel_stop_app(&g_sim.kernel, 0U);
+	sim_step(&g_sim, 50U, ZZAPP_KERNEL_DISPATCH_VOLUNTARY);
+	a = sched_of(&g_sim, 0U);
+	CHECK(a.run_us == 1500U && a.park_us[0] == 100U);
+	CHECK(a.wait_app_us == 0U && sched_total(&a) == 1600U);
+
+	sim_start(&g_sim, pair, 2U);
+	sim_run_for(&g_sim, 100U);
+	CHECK(zzapp_kernel_block(&g_sim.kernel, 1U) == 0);
+	sim_run_for(&g_sim, 200U);
+	zzapp_kernel_stop_app(&g_sim.kernel, 1U);
+	sim_run_for(&g_sim, 50U);
+	a = sched_of(&g_sim, 1U);
+	CHECK(a.wait_app_us == 100U && a.park_us[0] == 200U);
+	CHECK(sched_total(&a) == 300U);
+}
+
 /* A pick that gives the core to an app while service is due and its window
  * budget is spent counts against that app. */
 static void test_sched_counters_count_service_deferrals(void)
@@ -1402,6 +1489,9 @@ int main(int argc, char **argv)
 	run_case("sched_split", test_sched_counters_split_the_time, argc, argv);
 	run_case("sched_park", test_sched_counters_split_parks_by_cause, argc,
 		 argv);
+	run_case("sched_timeout", test_sched_counters_timestamp_timeout_wakes,
+		 argc, argv);
+	run_case("sched_stop", test_sched_counters_close_at_stop, argc, argv);
 	run_case("sched_defer", test_sched_counters_count_service_deferrals, argc,
 		 argv);
 	run_case("sched_why", test_sched_counters_name_the_picks, argc, argv);
